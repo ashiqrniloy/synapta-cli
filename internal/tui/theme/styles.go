@@ -1,0 +1,61 @@
+package theme
+
+import (
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/synapta/synapta-cli/internal/config"
+)
+
+// Styles holds all lipgloss styles derived from the active theme.
+type Styles struct {
+	TitleStyle    lipgloss.Style
+	SubtitleStyle lipgloss.Style
+	BorderStyle   lipgloss.Style
+	InputStyle    lipgloss.Style
+	CursorStyle   lipgloss.Style
+	ErrorStyle    lipgloss.Style
+	SuccessStyle  lipgloss.Style
+	MutedStyle    lipgloss.Style
+	BaseStyle     lipgloss.Style
+}
+
+// NewStyles creates a Styles set from the given theme config.
+func NewStyles(t config.Theme) *Styles {
+	bgColor := lipgloss.Color(t.Background)
+	fgColor := lipgloss.Color(t.Foreground)
+	primary := lipgloss.Color(t.Primary)
+	muted := lipgloss.Color(t.Muted)
+	border := lipgloss.Color(t.Border)
+	errorC := lipgloss.Color(t.Error)
+	cursorBg := lipgloss.Color(t.CursorBG)
+	cursorFg := lipgloss.Color(t.CursorFG)
+
+	return &Styles{
+		BaseStyle: lipgloss.NewStyle().
+			Background(bgColor).
+			Foreground(fgColor),
+		TitleStyle: lipgloss.NewStyle().
+			Foreground(primary).
+			Bold(true).
+			PaddingLeft(1),
+		SubtitleStyle: lipgloss.NewStyle().
+			Foreground(muted),
+		BorderStyle: lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(border).
+			Padding(1, 2),
+		InputStyle: lipgloss.NewStyle().
+			Foreground(fgColor).
+			Background(bgColor),
+		CursorStyle: lipgloss.NewStyle().
+			Foreground(cursorFg).
+			Background(cursorBg).
+			Bold(true),
+		ErrorStyle: lipgloss.NewStyle().
+			Foreground(errorC),
+		SuccessStyle: lipgloss.NewStyle().
+			Foreground(primary),
+		MutedStyle: lipgloss.NewStyle().
+			Foreground(muted),
+	}
+}

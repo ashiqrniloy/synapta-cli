@@ -1,0 +1,29 @@
+# Synapta Configuration Reference
+# Copy this to ~/.synapta/config.yaml or edit in place
+
+# Keybindings section
+# Naming convention: lowercase snake_case, verb or action oriented
+# Use standard key names separated by + (e.g., shift+enter, ctrl+c, alt+q)
+keybindings:
+  newline: "shift+enter"
+  submit: "enter"
+  quit: "ctrl+c"
+
+# Themes section
+# Each theme defines a complete color palette using Gruvbox Material as default
+themes:
+  default: "gruvbox-material-dark" # active theme key
+  gruvbox-material-dark:
+    name: "Gruvbox Material Dark"
+    background: "#282828"
+    foreground: "#d4be98"
+    primary: "#a9b665"
+    secondary: "#89b482"
+    accent: "#d8a657"
+    muted: "#7c6f64"
+    border: "#504945"
+    selection: "#3c3836"
+    error: "#ea6962"
+    success: "#a9b665"
+    cursor_fg: "#282828"
+    cursor_bg: "#a9b665"
