@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/synapta/synapta-cli/internal/config"
@@ -35,7 +35,7 @@ subcommand such as "synapta code" to launch the coding agent directly.`,
 
 func runLauncher(cmd *cobra.Command, args []string) error {
 	lm := newLauncherModel()
-	p := tea.NewProgram(lm, tea.WithAltScreen())
+	p := tea.NewProgram(lm)
 	model, err := p.Run()
 	if err != nil {
 		return fmt.Errorf("launcher failed: %w", err)
@@ -75,7 +75,7 @@ func runCodeAgent() error {
 	}
 
 	model := components.NewCodeAgentModel(cfg)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model)
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("code agent error: %w", err)
 	}
@@ -102,7 +102,7 @@ func (m *launcherModel) Init() tea.Cmd { return nil }
 
 func (m *launcherModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
 			m.quit = true
@@ -123,9 +123,9 @@ func (m *launcherModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *launcherModel) View() string {
+func (m *launcherModel) View() tea.View {
 	if m.quit {
-		return ""
+		return tea.NewView("")
 	}
 	s := "\n"
 	s += "  ╔═══════════════════════════════════╗\n"
@@ -141,5 +141,5 @@ func (m *launcherModel) View() string {
 		s += fmt.Sprintf("%s  %s\n", prefix, opt)
 	}
 	s += "\n  ↑/↓ navigate   enter select   q/esc quit\n"
-	return s
+	return tea.NewView(s)
 }

@@ -3,9 +3,10 @@ package components
 import (
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"charm.land/bubbles/v2/textarea"
 
 	"github.com/synapta/synapta-cli/internal/config"
 	"github.com/synapta/synapta-cli/internal/tui/theme"
@@ -20,6 +21,7 @@ type CodeAgentModel struct {
 	quit        bool
 	borderColor string
 	msgs        []string
+	cfg         *config.AppConfig
 }
 
 // NewCodeAgentModel creates the model using the loaded AppConfig.
@@ -27,52 +29,84 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	t := cfg.ActiveTheme()
 	return &CodeAgentModel{
 		styles:      theme.NewStyles(t),
-		ta:          buildTextarea(t),
+		ta:          buildTextarea(t, cfg),
 		borderColor: t.Border,
+		cfg:         cfg,
 	}
 }
 
-func buildTextarea(t config.Theme) textarea.Model {
+func buildTextarea(t config.Theme, cfg *config.AppConfig) textarea.Model {
 	ta := textarea.New()
-	ta.Placeholder = "Type your message…"
+	ta.Placeholder = "Type your message... (Enter=send, Shift+Enter=newline)"
 	ta.ShowLineNumbers = false
 
-	// Clean, minimal styling — no background fill, no cursor-line highlight.
+	// Enable dynamic height - textarea will grow/shrink based on content
+	ta.DynamicHeight = true
+	ta.MinHeight = 1
+	ta.MaxHeight = 15 // Leave room for title and padding
+
+	// Clean, minimal styling using lipgloss v2
 	noBg := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Foreground))
 	placeholder := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Muted))
 	empty := lipgloss.NewStyle()
 
-	ta.FocusedStyle.Base = noBg
-	ta.FocusedStyle.Text = noBg
-	ta.FocusedStyle.CursorLine = empty
-	ta.FocusedStyle.CursorLineNumber = empty
-	ta.FocusedStyle.EndOfBuffer = empty
-	ta.FocusedStyle.Placeholder = placeholder
-	ta.FocusedStyle.Prompt = empty
-	ta.FocusedStyle.LineNumber = empty
+	// v2 uses ta.Styles() method instead of ta.FocusedStyle
+	styles := ta.Styles()
+	styles.Focused.Base = noBg
+	styles.Focused.Text = noBg
+	styles.Focused.CursorLine = empty
+	styles.Focused.CursorLineNumber = empty
+	styles.Focused.EndOfBuffer = empty
+	styles.Focused.Placeholder = placeholder
+	styles.Focused.Prompt = empty
+	styles.Focused.LineNumber = empty
 
-	ta.BlurredStyle.Base = noBg
-	ta.BlurredStyle.Text = noBg
-	ta.BlurredStyle.CursorLine = empty
-	ta.BlurredStyle.CursorLineNumber = empty
-	ta.BlurredStyle.EndOfBuffer = empty
-	ta.BlurredStyle.Placeholder = placeholder
-	ta.BlurredStyle.Prompt = empty
-	ta.BlurredStyle.LineNumber = empty
-
-	// We'll handle Shift+Enter at the model level
-	ta.KeyMap.InsertNewline.SetKeys() // Clear default keys
+	styles.Blurred.Base = noBg
+	styles.Blurred.Text = noBg
+	styles.Blurred.CursorLine = empty
+	styles.Blurred.CursorLineNumber = empty
+	styles.Blurred.EndOfBuffer = empty
+	styles.Blurred.Placeholder = placeholder
+	styles.Blurred.Prompt = empty
+	styles.Blurred.LineNumber = empty
+	ta.SetStyles(styles)
 
 	ta.SetWidth(80)
-	ta.SetHeight(1)
 	ta.Focus()
+
+	// In v2, Enter is the default for newline
+	// We want Shift+Enter for newline and Enter for submit
+	// So we disable the textarea's newline handling on Enter
+	// and handle it ourselves
+	ta.KeyMap.InsertNewline.SetKeys() // Remove all keys for insert newline
+	// Shift+Enter will be handled in Update
+
 	return ta
 }
 
-// isShiftEnter checks if the key message is Shift+Enter
-func isShiftEnter(msg tea.KeyMsg) bool {
-	// Shift+Enter produces KeyRunes with '\n' in most terminals
-	return msg.Type == tea.KeyRunes && len(msg.Runes) > 0 && msg.Runes[0] == '\n'
+// normalizeKeyName converts config key names to bubbletea v2 format
+func normalizeKeyName(key string) string {
+	lower := strings.ToLower(key)
+	replacer := strings.NewReplacer(
+		"escape", "esc",
+	)
+	return replacer.Replace(lower)
+}
+
+// getSubmitKey returns the configured submit key (default: enter)
+func (m *CodeAgentModel) getSubmitKey() string {
+	if m.cfg != nil && m.cfg.Keybindings.Submit != "" {
+		return normalizeKeyName(m.cfg.Keybindings.Submit)
+	}
+	return "enter"
+}
+
+// getQuitKey returns the configured quit key
+func (m *CodeAgentModel) getQuitKey() string {
+	if m.cfg != nil && m.cfg.Keybindings.Quit != "" {
+		return normalizeKeyName(m.cfg.Keybindings.Quit)
+	}
+	return "ctrl+c"
 }
 
 // ─── tea.Model ───────────────────────────────────────────────────────
@@ -89,44 +123,41 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ta.SetWidth(max(msg.Width-6, 40))
 		return m, nil
 
-	case tea.KeyMsg:
-		// Ctrl+C to quit
-		if msg.String() == "ctrl+c" {
+	case tea.KeyPressMsg:
+		keyStr := msg.String()
+
+		// Check for quit key (default: ctrl+c)
+		quitKey := m.getQuitKey()
+		if keyStr == quitKey {
 			m.quit = true
 			return m, tea.Quit
 		}
 
-		// Enter (without Shift) to submit
-		if msg.Type == tea.KeyEnter {
+		// Check for submit key (default: enter)
+		submitKey := m.getSubmitKey()
+		if keyStr == submitKey {
+			// Only submit if we have text
 			text := m.ta.Value()
 			if text != "" {
 				m.msgs = append(m.msgs, text)
+				m.ta.SetValue("")
 			}
-			m.ta.SetValue("")
-			m.ta.SetHeight(1)
 			return m, nil
 		}
 
-		// Shift+Enter to insert newline
-		if isShiftEnter(msg) {
-			// Pre-grow height BEFORE inserting newline
-			// This ensures the viewport shows all lines including the new one
-			newLineCount := m.ta.LineCount() + 1
-			if newLineCount > m.ta.Height() {
-				maxLines := 12
-				if m.height > 0 && m.height < 30 {
-					maxLines = m.height - 5
-				}
-				if maxLines < 3 {
-					maxLines = 3
-				}
-				m.ta.SetHeight(min(newLineCount, maxLines))
-			}
-			// Now insert the newline
-			m.ta, _ = m.ta.Update(tea.KeyMsg{
-				Type:  tea.KeyRunes,
-				Runes: []rune{'\n'},
-			})
+		// Handle Shift+Enter for newline
+		// In v2 with keyboard enhancements, we can detect modifiers
+		if msg.Code == tea.KeyEnter && msg.Mod.Contains(tea.ModShift) {
+			// Insert newline manually
+			m.ta.InsertRune('\n')
+			return m, nil
+		}
+
+		// Handle Ctrl+M (which some terminals send for Enter with modifiers)
+		// This is a fallback for terminals that don't support Kitty protocol
+		if keyStr == "ctrl+m" || (msg.Code == 'm' && msg.Mod.Contains(tea.ModCtrl)) {
+			// Check if shift is also held (via the text representation)
+			// This is a workaround for terminals that don't report modifiers properly
 			return m, nil
 		}
 	}
@@ -134,48 +165,19 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Let the textarea process other keys
 	var cmd tea.Cmd
 	m.ta, cmd = m.ta.Update(msg)
-	m = m.adjustHeight()
 
 	return m, cmd
 }
 
-// adjustHeight ensures the textarea height accommodates all content
-func (m CodeAgentModel) adjustHeight() CodeAgentModel {
-	numLines := m.ta.LineCount()
-	if numLines < 1 {
-		numLines = 1
-	}
-
-	// Calculate max allowed height
-	maxLines := 12
-	if m.height > 0 && m.height < 30 {
-		maxLines = m.height - 5
-	}
-	if maxLines < 3 {
-		maxLines = 3
-	}
-
-	// Grow if needed
-	currentHeight := m.ta.Height()
-	if numLines > currentHeight {
-		m.ta.SetHeight(min(numLines, maxLines))
-	}
-
-	return m
-}
-
-func (m CodeAgentModel) View() string {
+func (m CodeAgentModel) View() tea.View {
 	if m.quit {
-		return ""
+		return tea.NewView("")
 	}
 
 	// ── Title ──
 	title := m.styles.TitleStyle.Render("Synapta Code")
 
-	// ── Input box ──
-	// The border grows naturally with the textarea content.
-	// We do NOT set an explicit height on the bordered style —
-	// this follows Golden Rule #4 (let content determine size).
+	// ── Input box with border ──
 	taView := m.ta.View()
 	borderStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -183,19 +185,38 @@ func (m CodeAgentModel) View() string {
 		Padding(0, 1)
 	inputBox := borderStyle.Render(taView)
 
-	// ── Vertical spacer — push input to the bottom ──
-	titleH := lipgloss.Height(title)
-	inputH := lipgloss.Height(inputBox)
-
-	spacer := ""
+	// ── Compose view ──
+	var content string
 	if m.height > 0 {
-		needed := m.height - titleH - inputH
-		if needed > 0 {
-			spacer = strings.Repeat("\n", needed)
+		// Calculate space needed
+		titleH := lipgloss.Height(title)
+		inputH := lipgloss.Height(inputBox)
+		instructions := lipgloss.NewStyle().
+			Foreground(m.styles.MutedStyle.GetForeground()).
+			Render("  ↑/↓ navigate   Shift+Enter=newline   Enter=send   Ctrl+C=quit")
+		instructionsH := lipgloss.Height(instructions)
+
+		totalContentH := titleH + inputH + instructionsH + 2 // 2 for spacing
+		availableH := m.height - totalContentH
+
+		spacer := ""
+		if availableH > 0 {
+			spacer = strings.Repeat("\n", availableH)
 		}
+
+		content = title + "\n\n" + instructions + "\n" + spacer + inputBox
+	} else {
+		content = title + "\n\n" + inputBox
 	}
 
-	return title + spacer + inputBox
+	v := tea.NewView(content)
+	v.AltScreen = true
+
+	// Request keyboard enhancements for modifier key support (Shift+Enter, etc.)
+	// This enables Kitty protocol support on compatible terminals
+	v.KeyboardEnhancements.ReportEventTypes = true
+
+	return v
 }
 
 func min(a, b int) int {

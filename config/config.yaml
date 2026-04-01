@@ -4,10 +4,23 @@
 # Keybindings section
 # Naming convention: lowercase snake_case, verb or action oriented
 # Use standard key names separated by + (e.g., shift+enter, ctrl+c, alt+q)
+#
+# Bubbletea v2 supports keyboard enhancements (Kitty protocol) on
+# compatible terminals, enabling proper modifier detection:
+# - Shift+Enter is now properly detected for newlines
+# - Ctrl+Enter works for submit on supported terminals
+# - Enter is used for submit by default
+#
+# For terminals without Kitty protocol support:
+# - Use Ctrl+J or Escape as fallback submit keys
 keybindings:
-  newline: "shift+enter"
-  submit: "enter"
-  quit: "ctrl+c"
+  newline: "shift+enter"  # Shift+Enter inserts newline
+  submit: "enter"         # Enter submits
+  quit: "ctrl+c"          # Ctrl+C quits
+  # Alternative submit options (uncomment if needed):
+  # submit: "ctrl+enter"  # Ctrl+Enter submits
+  # submit: "ctrl+j"      # Ctrl+J submits (fallback for terminals without Kitty)
+  # submit: "escape"      # Escape key submits
 
 # Themes section
 # Each theme defines a complete color palette using Gruvbox Material as default
