@@ -11,8 +11,6 @@ type Styles struct {
 	TitleStyle    lipgloss.Style
 	SubtitleStyle lipgloss.Style
 	BorderStyle   lipgloss.Style
-	InputStyle    lipgloss.Style
-	CursorStyle   lipgloss.Style
 	ErrorStyle    lipgloss.Style
 	SuccessStyle  lipgloss.Style
 	MutedStyle    lipgloss.Style
@@ -21,19 +19,13 @@ type Styles struct {
 
 // NewStyles creates a Styles set from the given theme config.
 func NewStyles(t config.Theme) *Styles {
-	bgColor := lipgloss.Color(t.Background)
-	fgColor := lipgloss.Color(t.Foreground)
 	primary := lipgloss.Color(t.Primary)
 	muted := lipgloss.Color(t.Muted)
 	border := lipgloss.Color(t.Border)
 	errorC := lipgloss.Color(t.Error)
-	cursorBg := lipgloss.Color(t.CursorBG)
-	cursorFg := lipgloss.Color(t.CursorFG)
 
 	return &Styles{
-		BaseStyle: lipgloss.NewStyle().
-			Background(bgColor).
-			Foreground(fgColor),
+		BaseStyle: lipgloss.NewStyle(),
 		TitleStyle: lipgloss.NewStyle().
 			Foreground(primary).
 			Bold(true).
@@ -44,13 +36,6 @@ func NewStyles(t config.Theme) *Styles {
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(border).
 			Padding(1, 2),
-		InputStyle: lipgloss.NewStyle().
-			Foreground(fgColor).
-			Background(bgColor),
-		CursorStyle: lipgloss.NewStyle().
-			Foreground(cursorFg).
-			Background(cursorBg).
-			Bold(true),
 		ErrorStyle: lipgloss.NewStyle().
 			Foreground(errorC),
 		SuccessStyle: lipgloss.NewStyle().

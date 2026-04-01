@@ -59,8 +59,8 @@ func defaultTheme() Theme {
 
 // RawThemes is the intermediate structure for YAML unmarshalling.
 type RawThemes struct {
-	Default string            `mapstructure:"default"`
-	Map     map[string]Theme  `mapstructure:",remain"`
+	Default string           `mapstructure:"default"`
+	Map     map[string]Theme `mapstructure:",remain"`
 }
 
 // AppConfig is the top-level configuration structure.
