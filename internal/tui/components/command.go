@@ -40,6 +40,21 @@ func AvailableProviders() []CommandItem {
 	}
 }
 
+// ModelsFromSlice converts a slice of Model to CommandItems.
+func ModelsFromSlice(models []ModelInfo) []CommandItem {
+	items := make([]CommandItem, len(models))
+	for i, m := range models {
+		items[i] = CommandItem{ID: m.ID, Name: m.Name}
+	}
+	return items
+}
+
+// ModelInfo holds model display information.
+type ModelInfo struct {
+	ID   string
+	Name string
+}
+
 // ─── Messages ──────────────────────────────────────────────────────
 
 // CommandActionMsg is sent when a command is fully selected.
@@ -157,14 +172,26 @@ func (cp *CommandPicker) HandleSelect() (completed bool) {
 			cp.cursor = 0
 			return false
 		}
-		// Commands without sub-options are complete
+		if selected.ID == "set-model" {
+			// Return false - caller will load models via LoadModels()
+			return false
+		}
+		// Other commands are complete
 		return true
 	case 2:
-		// Second level (provider selected, etc.)
+		// Second level (provider selected, model selected, etc.)
 		return true
 	default:
 		return true
 	}
+}
+
+// LoadModels loads models into the picker for selection.
+func (cp *CommandPicker) LoadModels(models []ModelInfo) {
+	items := ModelsFromSlice(models)
+	cp.items = items
+	cp.filtered = items
+	cp.cursor = 0
 }
 
 // HandleBack goes back one level in the command path.

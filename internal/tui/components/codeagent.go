@@ -1,6 +1,11 @@
 package components
 
 import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -9,8 +14,32 @@ import (
 	"charm.land/bubbles/v2/textarea"
 
 	"github.com/synapta/synapta-cli/internal/config"
+	"github.com/synapta/synapta-cli/internal/llm"
 	"github.com/synapta/synapta-cli/internal/tui/theme"
 )
+
+// ─── Kilo Auth Messages ─────────────────────────────────────────────
+
+// KiloAuthProgressMsg reports progress during Kilo authentication.
+type KiloAuthProgressMsg string
+
+// KiloAuthCompleteMsg is sent when Kilo authentication completes.
+type KiloAuthCompleteMsg struct {
+	Err        error
+	Email      string
+	ModelCount int
+}
+
+// ModelsLoadedMsg contains the loaded models for selection.
+type ModelsLoadedMsg struct {
+	Models []ModelInfo
+}
+
+// ModelSelectedMsg is sent when a model is selected.
+type ModelSelectedMsg struct {
+	ModelID   string
+	ModelName string
+}
 
 // CodeAgentModel is the main TUI model for the Synapta Code agent.
 type CodeAgentModel struct {
@@ -22,22 +51,40 @@ type CodeAgentModel struct {
 	borderColor string
 	msgs        []string
 	cfg         *config.AppConfig
+	authStorage *llm.AuthStorage
 
 	// Inline command picker
 	picker *CommandPicker
+
+	// Selected model
+	selectedModel string
 }
 
 // NewCodeAgentModel creates the model using the loaded AppConfig.
 func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	t := cfg.ActiveTheme()
 	styles := theme.NewStyles(t)
-	return &CodeAgentModel{
+
+	// Initialize auth storage
+	homeDir, _ := os.UserHomeDir()
+	authDir := homeDir + "/.synapta"
+	authStorage, _ := llm.NewAuthStorage(authDir)
+
+	model := &CodeAgentModel{
 		styles:      styles,
 		ta:          buildTextarea(t, cfg),
 		borderColor: t.Border,
 		cfg:         cfg,
 		picker:      NewCommandPicker(styles),
+		authStorage: authStorage,
 	}
+
+	// Check if already authenticated and show model count
+	if authStorage != nil && authStorage.HasAuth("kilo") {
+		model.msgs = append(model.msgs, "[Kilo] ✓ Authenticated")
+	}
+
+	return model
 }
 
 func buildTextarea(t config.Theme, cfg *config.AppConfig) textarea.Model {
@@ -145,20 +192,64 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case CommandActionMsg:
 		// Handle completed command
-		m.clearCommandMode()
-
 		if len(msg.Path) == 0 {
+			m.clearCommandMode()
 			return m, nil
 		}
 
 		commandID := msg.Path[0].ID
 		switch commandID {
 		case "add-provider":
+			m.clearCommandMode()
 			if len(msg.Path) > 1 {
+				providerID := msg.Path[1].ID
+				if providerID == "kilo" {
+					// Start Kilo Gateway OAuth flow
+					m.msgs = append(m.msgs, "[Kilo] Starting authentication...")
+					return m, m.startKiloAuth()
+				}
 				m.msgs = append(m.msgs, "[Add Provider] Selected: "+msg.Path[1].Name)
 			}
 		case "set-model":
-			m.msgs = append(m.msgs, "[Command] Set Model — coming soon")
+			if len(msg.Path) > 1 {
+				// Model was selected
+				m.selectedModel = msg.Path[1].Name
+				m.clearCommandMode()
+				m.msgs = append(m.msgs, "[Model] Selected: "+msg.Path[1].Name)
+			} else {
+				// Need to load models first
+				return m, m.loadModels()
+			}
+		}
+		return m, nil
+
+	case ModelsLoadedMsg:
+		if len(msg.Models) == 0 {
+			m.msgs = append(m.msgs, "[Model] No models available. Add a provider first.")
+			m.clearCommandMode()
+			return m, nil
+		}
+		// Load models into picker (preserves breadcrumb path)
+		m.picker.LoadModels(msg.Models)
+		// Clear filter for new items
+		m.ta.SetValue(":")
+		return m, nil
+
+	case KiloAuthProgressMsg:
+		m.msgs = append(m.msgs, "[Kilo] "+string(msg))
+		return m, nil
+
+	case KiloAuthCompleteMsg:
+		if msg.Err != nil {
+			// Split error message into multiple lines for readability
+			errLines := strings.Split(msg.Err.Error(), "\n")
+			m.msgs = append(m.msgs, "[Kilo] ✗ Authentication failed:")
+			for _, line := range errLines {
+				m.msgs = append(m.msgs, "[Kilo]   "+line)
+			}
+		} else {
+			m.msgs = append(m.msgs, "[Kilo] ✓ Authentication successful! "+msg.Email)
+			m.msgs = append(m.msgs, "[Kilo] ✓ "+fmt.Sprintf("%d models available", msg.ModelCount))
 		}
 		return m, nil
 
@@ -195,6 +286,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// Enter selects the highlighted item
 			if keyStr == "enter" {
+				selected := m.picker.Selected()
 				completed := m.picker.HandleSelect()
 				if completed {
 					// Command fully selected
@@ -204,7 +296,12 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return CommandActionMsg{Path: path}
 					}
 				}
-				// Navigated deeper, clear filter for new level
+				// Navigated deeper
+				// Check if we need to load models for "set-model"
+				if selected != nil && selected.ID == "set-model" {
+					return m, m.loadModels()
+				}
+				// Clear filter for new level
 				m.ta.SetValue(":")
 				return m, nil
 			}
@@ -287,6 +384,21 @@ func (m CodeAgentModel) View() tea.View {
 	// ── Title ──
 	title := m.styles.TitleStyle.Render("Synapta Code")
 
+	// ── Messages (recent ones) ──
+	msgsView := ""
+	if len(m.msgs) > 0 {
+		// Show last 3 messages
+		start := 0
+		if len(m.msgs) > 3 {
+			start = len(m.msgs) - 3
+		}
+		var msgLines []string
+		for _, msg := range m.msgs[start:] {
+			msgLines = append(msgLines, m.styles.MutedStyle.Render(msg))
+		}
+		msgsView = strings.Join(msgLines, "\n")
+	}
+
 	// ── Input box with border ──
 	taView := m.ta.View()
 	borderStyle := lipgloss.NewStyle().
@@ -303,23 +415,35 @@ func (m CodeAgentModel) View() tea.View {
 
 	// ── Compose view ──
 	var content string
+
+	// Build instructions line with model indicator
+	instructionsText := "  ↑/↓ navigate   Shift+Enter=newline   Enter=send   :=commands   Ctrl+C=quit"
+	if m.selectedModel != "" {
+		// Show model at the right
+		modelIndicator := lipgloss.NewStyle().
+			Foreground(m.styles.SuccessStyle.GetForeground()).
+			Bold(true).
+			Render("● " + m.selectedModel)
+		instructionsText = instructionsText + "   " + modelIndicator
+	}
 	instructions := lipgloss.NewStyle().
 		Foreground(m.styles.MutedStyle.GetForeground()).
-		Render("  ↑/↓ navigate   Shift+Enter=newline   Enter=send   :=commands   Ctrl+C=quit")
+		Render(instructionsText)
 
 	if m.height > 0 {
 		titleH := lipgloss.Height(title)
+		msgsH := lipgloss.Height(msgsView)
 		inputH := lipgloss.Height(inputBox)
 		pickerH := lipgloss.Height(pickerView)
 		instructionsH := lipgloss.Height(instructions)
 
 		var totalContentH int
 		if pickerView != "" {
-			// Command mode: title, spacer, picker, input
-			totalContentH = titleH + pickerH + inputH + 3
+			// Command mode: title, msgs, spacer, picker, input
+			totalContentH = titleH + msgsH + pickerH + inputH + 3
 		} else {
-			// Normal mode: title, instructions, spacer, input
-			totalContentH = titleH + instructionsH + inputH + 3
+			// Normal mode: title, msgs, instructions, spacer, input
+			totalContentH = titleH + msgsH + instructionsH + inputH + 3
 		}
 
 		availableH := m.height - totalContentH
@@ -329,17 +453,17 @@ func (m CodeAgentModel) View() tea.View {
 		}
 
 		if pickerView != "" {
-			// Command mode: title, spacer (push picker+input to bottom), picker, input
-			content = title + "\n" + spacer + pickerView + "\n\n" + inputBox
+			// Command mode: title, msgs, spacer (push picker+input to bottom), picker, input
+			content = title + "\n" + msgsView + "\n" + spacer + pickerView + "\n\n" + inputBox
 		} else {
-			// Normal mode: title, instructions, spacer, input at bottom
-			content = title + "\n\n" + instructions + "\n" + spacer + inputBox
+			// Normal mode: title, msgs, instructions, spacer, input at bottom
+			content = title + "\n" + msgsView + "\n\n" + instructions + "\n" + spacer + inputBox
 		}
 	} else {
 		if pickerView != "" {
-			content = title + "\n\n" + pickerView + "\n" + inputBox
+			content = title + "\n" + msgsView + "\n\n" + pickerView + "\n" + inputBox
 		} else {
-			content = title + "\n\n" + inputBox
+			content = title + "\n" + msgsView + "\n\n" + inputBox
 		}
 	}
 
@@ -364,4 +488,120 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ─── Model Loading ──────────────────────────────────────────────────
+
+// loadModels loads available models from authenticated providers.
+func (m *CodeAgentModel) loadModels() tea.Cmd {
+	return func() tea.Msg {
+		var models []ModelInfo
+
+		// Check if Kilo is authenticated
+		if m.authStorage != nil && m.authStorage.HasAuth("kilo") {
+			creds, err := m.authStorage.GetOAuthCredentials("kilo")
+			if err == nil {
+				gateway := llm.NewKiloGateway()
+				kiloModels, err := gateway.FetchModels(creds.Access)
+				if err == nil {
+					for _, model := range kiloModels {
+						models = append(models, ModelInfo{
+							ID:   model.ID,
+							Name: model.Name,
+						})
+					}
+				}
+			}
+		}
+
+		// If no authenticated providers, use defaults
+		if len(models) == 0 {
+			defaultModels := llm.KiloDefaultModels()
+			for _, model := range defaultModels {
+				models = append(models, ModelInfo{
+					ID:   model.ID,
+					Name: model.Name,
+				})
+			}
+		}
+
+		return ModelsLoadedMsg{Models: models}
+	}
+}
+
+// ─── Kilo Gateway Authentication ────────────────────────────────────
+
+// startKiloAuth initiates the Kilo Gateway OAuth flow.
+func (m *CodeAgentModel) startKiloAuth() tea.Cmd {
+	return func() tea.Msg {
+		gateway := llm.NewKiloGateway()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		var verificationURL string
+
+		creds, err := gateway.Login(ctx, llm.DeviceAuthCallbacks{
+			OnAuth: func(url, code string) {
+				verificationURL = url
+				// Open browser automatically
+				if err := openBrowser(url); err != nil {
+					fmt.Printf("Failed to open browser: %v\n", err)
+					fmt.Printf("Please open this URL manually: %s\n", url)
+				}
+			},
+			OnProgress: func(msg string) {
+				// Can't send progress messages from here in bubbletea v2
+				// Progress will be shown after completion
+			},
+			Signal: ctx,
+		})
+
+		if err != nil {
+			// If we have a verification URL, include it in the error message
+			if verificationURL != "" {
+				return KiloAuthCompleteMsg{
+					Err: fmt.Errorf("%w\nOpen this URL: %s", err, verificationURL),
+				}
+			}
+			return KiloAuthCompleteMsg{Err: err}
+		}
+
+		// Store credentials
+		if m.authStorage != nil {
+			if err := m.authStorage.SetOAuthCredentials("kilo", creds); err != nil {
+				return KiloAuthCompleteMsg{
+					Err: fmt.Errorf("authenticated but failed to store credentials: %w", err),
+				}
+			}
+		}
+
+		// Fetch all models with the token
+		models, err := gateway.FetchModels(creds.Access)
+		if err != nil {
+			return KiloAuthCompleteMsg{
+				Err: fmt.Errorf("authenticated but failed to fetch models: %w", err),
+			}
+		}
+
+		return KiloAuthCompleteMsg{
+			Email:      "Authenticated",
+			ModelCount: len(models),
+		}
+	}
+}
+
+// openBrowser opens the specified URL in the default browser.
+func openBrowser(url string) error {
+	var cmd *exec.Cmd
+
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", url)
+	default: // linux, freebsd, etc.
+		cmd = exec.Command("xdg-open", url)
+	}
+
+	return cmd.Start()
 }
