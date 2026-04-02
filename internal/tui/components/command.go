@@ -3,344 +3,276 @@ package components
 import (
 	"strings"
 
-	tea "charm.land/bubbletea/v2"
-	"charm.land/bubbles/v2/textarea"
 	"charm.land/lipgloss/v2"
 
-	"github.com/synapta/synapta-cli/internal/config"
 	"github.com/synapta/synapta-cli/internal/tui/theme"
 )
 
-// Command represents an executable command in the palette.
-type Command struct {
-	ID          string
-	Name        string
-	Description string
+// ─── Types ──────────────────────────────────────────────────────────
+
+// CommandItem represents a selectable item in the command picker.
+type CommandItem struct {
+	ID   string // unique identifier
+	Name string // display name
 }
 
-// DefaultCommands returns the built-in command list.
-func DefaultCommands() []Command {
-	return []Command{
-		{
-			ID:          "add-provider",
-			Name:        "Add Provider",
-			Description: "Add a new LLM provider",
-		},
-		{
-			ID:          "set-provider",
-			Name:        "Set Provider",
-			Description: "Change the active LLM provider",
-		},
-		{
-			ID:          "set-model",
-			Name:        "Set Model",
-			Description: "Change the active model",
-		},
+// CommandStep represents a selection made in the command path.
+type CommandStep struct {
+	Name string
+	ID   string
+}
+
+// ─── Data ──────────────────────────────────────────────────────────
+
+// DefaultCommands returns all built-in commands, sorted alphabetically.
+func DefaultCommands() []CommandItem {
+	return []CommandItem{
+		{ID: "add-provider", Name: "Add Provider"},
+		{ID: "set-model", Name: "Set Model"},
 	}
 }
 
-// CommandExecutedMsg is sent when a command is executed.
-type CommandExecutedMsg struct {
-	Command Command
+// AvailableProviders returns the list of providers.
+func AvailableProviders() []CommandItem {
+	return []CommandItem{
+		{ID: "github-copilot", Name: "GitHub Copilot"},
+		{ID: "kilo", Name: "Kilo Gateway"},
+	}
 }
 
-// CommandModal is a modal overlay for selecting and executing commands.
-type CommandModal struct {
-	width     int
-	height    int
-	filter    textarea.Model
-	commands  []Command
-	filtered  []Command
-	cursor    int
+// ─── Messages ──────────────────────────────────────────────────────
+
+// CommandActionMsg is sent when a command is fully selected.
+type CommandActionMsg struct {
+	Path []CommandStep // breadcrumb path of selections
+}
+
+// ─── CommandPicker ─────────────────────────────────────────────────
+
+// CommandPicker manages the inline command picker state.
+type CommandPicker struct {
+	active    bool
+	items     []CommandItem // current list
+	filtered  []CommandItem // filtered list
+	cursor    int           // selected index
+	path      []CommandStep // selections made so far
 	styles    *theme.Styles
-	t         config.Theme
-	executed  bool
+	maxVisible int // items to show (fixed at 5)
 }
 
-// NewCommandModal creates a new command modal.
-func NewCommandModal(styles *theme.Styles, t config.Theme) *CommandModal {
-	ta := textarea.New()
-	ta.Placeholder = "Type to filter commands..."
-	ta.ShowLineNumbers = false
-	ta.DynamicHeight = false
-	ta.SetHeight(1)
-
-	// Style the textarea to match the main input
-	placeholder := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Muted))
-	noBg := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Foreground))
-	empty := lipgloss.NewStyle()
-
-	s := ta.Styles()
-	s.Focused.Base = noBg
-	s.Focused.Text = noBg
-	s.Focused.CursorLine = empty
-	s.Focused.CursorLineNumber = empty
-	s.Focused.EndOfBuffer = empty
-	s.Focused.Placeholder = placeholder
-	s.Focused.Prompt = empty
-	s.Focused.LineNumber = empty
-	s.Blurred.Base = noBg
-	s.Blurred.Text = noBg
-	s.Blurred.CursorLine = empty
-	s.Blurred.CursorLineNumber = empty
-	s.Blurred.EndOfBuffer = empty
-	s.Blurred.Placeholder = placeholder
-	s.Blurred.Prompt = empty
-	s.Blurred.LineNumber = empty
-	ta.SetStyles(s)
-
-	ta.Focus()
-
-	cmds := DefaultCommands()
-	return &CommandModal{
-		filter:   ta,
-		commands: cmds,
-		filtered: cmds,
-		styles:   styles,
-		t:        t,
+// NewCommandPicker creates a new command picker.
+func NewCommandPicker(styles *theme.Styles) *CommandPicker {
+	return &CommandPicker{
+		items:      DefaultCommands(),
+		filtered:   DefaultCommands(),
+		styles:     styles,
+		maxVisible: 5,
 	}
 }
 
-// SetSize updates the modal dimensions.
-func (m *CommandModal) SetSize(width, height int) {
-	m.width = width
-	m.height = height
-	// Modal width is 60% of screen, max 60 chars
-	modalWidth := min(width*60/100, 60)
-	// Modal inner width: modalWidth - 2 (border) - 4 (padding) = modalWidth - 6
-	// Filter box inner: needs to fit within modalInnerWidth - 4 (filter border + padding)
-	// So filter textarea width = modalInnerWidth - 4 - 2 = modalWidth - 12
-	m.filter.SetWidth(modalWidth - 12)
+// IsActive returns true if the command picker is active.
+func (cp *CommandPicker) IsActive() bool {
+	return cp.active
 }
 
-// filterCommands returns commands matching the current filter text.
-func (m *CommandModal) filterCommands() {
-	query := strings.ToLower(strings.TrimSpace(m.filter.Value()))
+// Activate starts command mode with the initial command list.
+func (cp *CommandPicker) Activate() {
+	cp.active = true
+	cp.items = DefaultCommands()
+	cp.filtered = DefaultCommands()
+	cp.cursor = 0
+	cp.path = nil
+}
+
+// Deactivate exits command mode.
+func (cp *CommandPicker) Deactivate() {
+	cp.active = false
+	cp.items = nil
+	cp.filtered = nil
+	cp.cursor = 0
+	cp.path = nil
+}
+
+// Filter updates the filtered list based on the query.
+func (cp *CommandPicker) Filter(query string) {
+	query = strings.ToLower(strings.TrimSpace(query))
 	if query == "" {
-		m.filtered = m.commands
-		return
-	}
-
-	var result []Command
-	for _, cmd := range m.commands {
-		name := strings.ToLower(cmd.Name)
-		desc := strings.ToLower(cmd.Description)
-		if strings.Contains(name, query) || strings.Contains(desc, query) {
-			result = append(result, cmd)
+		cp.filtered = cp.items
+	} else {
+		var result []CommandItem
+		for _, item := range cp.items {
+			if strings.Contains(strings.ToLower(item.Name), query) {
+				result = append(result, item)
+			}
 		}
+		cp.filtered = result
 	}
-	m.filtered = result
-
 	// Reset cursor if out of bounds
-	if m.cursor >= len(m.filtered) {
-		m.cursor = 0
-	}
-	if len(m.filtered) > 0 && m.cursor < 0 {
-		m.cursor = 0
+	if cp.cursor >= len(cp.filtered) {
+		cp.cursor = 0
 	}
 }
 
-// Init implements tea.Model.
-func (m *CommandModal) Init() tea.Cmd {
-	return textarea.Blink
+// MoveUp moves the cursor up.
+func (cp *CommandPicker) MoveUp() {
+	if cp.cursor > 0 {
+		cp.cursor--
+	}
 }
 
-// Update implements tea.Model.
-func (m *CommandModal) Update(msg tea.Msg) (*CommandModal, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyPressMsg:
-		keyStr := msg.String()
+// MoveDown moves the cursor down.
+func (cp *CommandPicker) MoveDown() {
+	if cp.cursor < len(cp.filtered)-1 {
+		cp.cursor++
+	}
+}
 
-		switch keyStr {
-		case "up":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-			return m, nil
+// Selected returns the currently selected item, or nil if none.
+func (cp *CommandPicker) Selected() *CommandItem {
+	if len(cp.filtered) == 0 {
+		return nil
+	}
+	return &cp.filtered[cp.cursor]
+}
 
-		case "down":
-			if m.cursor < len(m.filtered)-1 {
-				m.cursor++
-			}
-			return m, nil
+// HandleSelect processes a selection and returns what action to take.
+// Returns true if a command was fully executed, false if we navigated deeper.
+func (cp *CommandPicker) HandleSelect() (completed bool) {
+	selected := cp.Selected()
+	if selected == nil {
+		return false
+	}
 
-		case "enter":
-			if len(m.filtered) > 0 {
-				m.executed = true
-				selected := m.filtered[m.cursor]
-				return m, func() tea.Msg {
-					return CommandExecutedMsg{Command: selected}
-				}
-			}
-			return m, nil
+	// Record this selection in the path
+	cp.path = append(cp.path, CommandStep{Name: selected.Name, ID: selected.ID})
+
+	// Determine what to do based on the current level
+	switch len(cp.path) {
+	case 1:
+		// Top-level command selected
+		if selected.ID == "add-provider" {
+			// Navigate to provider list
+			cp.items = AvailableProviders()
+			cp.filtered = cp.items
+			cp.cursor = 0
+			return false
 		}
-
-		// Pass other keys to the filter textarea
-		var cmd tea.Cmd
-		m.filter, cmd = m.filter.Update(msg)
-		m.filterCommands()
-		return m, cmd
+		// Commands without sub-options are complete
+		return true
+	case 2:
+		// Second level (provider selected, etc.)
+		return true
+	default:
+		return true
 	}
-
-	return m, nil
 }
 
-// View implements tea.Model.
-func (m *CommandModal) View() string {
-	if m.executed {
+// HandleBack goes back one level in the command path.
+// Returns true if we can go back, false if we're at the root.
+func (cp *CommandPicker) HandleBack() bool {
+	if len(cp.path) == 0 {
+		// At root, nothing to go back to
+		return false
+	}
+
+	// Remove last selection
+	cp.path = cp.path[:len(cp.path)-1]
+
+	// Reset to appropriate level
+	if len(cp.path) == 0 {
+		// Back to root commands
+		cp.items = DefaultCommands()
+	} else {
+		// Would need to handle deeper levels here if we add more
+		cp.items = DefaultCommands()
+	}
+
+	cp.filtered = cp.items
+	cp.cursor = 0
+	return true
+}
+
+// Path returns the current breadcrumb path.
+func (cp *CommandPicker) Path() []CommandStep {
+	return cp.path
+}
+
+// VisibleItems returns the items to display (up to maxVisible).
+func (cp *CommandPicker) VisibleItems() []CommandItem {
+	if len(cp.filtered) == 0 {
+		return nil
+	}
+	end := min(len(cp.filtered), cp.maxVisible)
+	return cp.filtered[:end]
+}
+
+// Cursor returns the current cursor index.
+func (cp *CommandPicker) Cursor() int {
+	return cp.cursor
+}
+
+// TotalItems returns the total number of filtered items.
+func (cp *CommandPicker) TotalItems() int {
+	return len(cp.filtered)
+}
+
+// ─── View ──────────────────────────────────────────────────────────
+
+// View renders the command picker.
+func (cp *CommandPicker) View(width int) string {
+	if !cp.active {
 		return ""
 	}
 
-	// Modal dimensions
-	modalWidth := min(m.width*60/100, 60)
-	modalHeight := min(m.height*50/100, 20)
+	styles := cp.styles
+	fgColor := styles.CommandHighlightStyle.GetForeground()
+	highlightBg := styles.CommandHighlightStyle.GetBackground()
+	mutedFg := styles.MutedStyle.GetForeground()
 
-	borderColor := lipgloss.Color(m.t.Border)
-	fgColor := lipgloss.Color(m.t.Foreground)
-	mutedColor := lipgloss.Color(m.t.Muted)
+	var lines []string
 
-	// Title
-	// Modal inner width: modalWidth - 2 (border) - 4 (padding 1,2) = modalWidth - 6
-	modalInnerWidth := modalWidth - 6
-
-	titleStyle := lipgloss.NewStyle().
-		Foreground(fgColor).
-		Bold(true).
-		Width(modalInnerWidth - 2). // -2 for padding(0,1)
-		Padding(0, 1)
-
-	title := titleStyle.Render("Commands")
-
-	// Filter input - must fit within modal inner width
-	// Filter box: Width + 2 (border) + 2 (padding) = modalInnerWidth
-	// So filter Width = modalInnerWidth - 4
-	filterBorder := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(borderColor).
-		Width(modalInnerWidth - 4).
-		Padding(0, 1)
-
-	filterView := filterBorder.Render(m.filter.View())
-
-	// Command list
-	listHeight := modalHeight - lipgloss.Height(title) - lipgloss.Height(filterView) - 4
-	if listHeight < 1 {
-		listHeight = 1
+	// Breadcrumb (if we've made selections)
+	if len(cp.path) > 0 {
+		breadcrumb := "Commands"
+		for _, step := range cp.path {
+			breadcrumb += " / " + step.Name
+		}
+		breadcrumbStyle := lipgloss.NewStyle().
+			Foreground(mutedFg).
+			Width(width)
+		lines = append(lines, breadcrumbStyle.Render(breadcrumb))
 	}
 
-	// Build list items
-	var items []string
-	for i, cmd := range m.filtered {
-		if i >= listHeight {
-			break
-		}
+	// Items
+	visible := cp.VisibleItems()
+	for i, item := range visible {
+		var line string
 
-		nameStyle := lipgloss.NewStyle().
-			Foreground(fgColor).
-			Bold(true)
-
-		descStyle := lipgloss.NewStyle().
-			Foreground(mutedColor)
-
-		// Build the line
-		name := nameStyle.Render(cmd.Name)
-		desc := descStyle.Render(" — " + cmd.Description)
-		line := name + desc
-
-		// Pad to full width (modal inner width)
-		lineWidth := lipgloss.Width(line)
-		padding := max(modalInnerWidth-lineWidth, 1)
-		line = line + strings.Repeat(" ", padding)
-
-		// Apply highlight style to the selected item
-		if i == m.cursor {
-			line = m.styles.CommandHighlightStyle.Render(
-				strings.Repeat(" ", modalInnerWidth),
-			)
-			// Re-render name and desc on top of highlighted background
-			name = lipgloss.NewStyle().
+		if i == cp.cursor {
+			// Highlighted item
+			nameStyle := lipgloss.NewStyle().
 				Foreground(fgColor).
 				Bold(true).
-				Background(m.styles.CommandHighlightStyle.GetBackground()).
-				Render(cmd.Name)
-			desc = lipgloss.NewStyle().
-				Foreground(mutedColor).
-				Background(m.styles.CommandHighlightStyle.GetBackground()).
-				Render(" — " + cmd.Description)
-			line = name + desc
-			linePad := max(modalInnerWidth-lipgloss.Width(line), 1)
+				Background(highlightBg)
+
+			name := "▸ " + item.Name
+			rendered := nameStyle.Render(name)
+
+			// Pad to full width with highlight background
+			lineWidth := lipgloss.Width(rendered)
+			padding := max(width-lineWidth, 1)
 			line = lipgloss.NewStyle().
-				Background(m.styles.CommandHighlightStyle.GetBackground()).
-				Render(line + strings.Repeat(" ", linePad))
+				Background(highlightBg).
+				Render(name + strings.Repeat(" ", padding))
+		} else {
+			// Normal item
+			nameStyle := lipgloss.NewStyle().
+				Foreground(mutedFg)
+			line = nameStyle.Render("  " + item.Name)
 		}
 
-		items = append(items, line)
+		lines = append(lines, line)
 	}
 
-	// Fill empty slots
-	for len(items) < listHeight {
-		items = append(items, "")
-	}
-
-	listView := strings.Join(items, "\n")
-
-	// Compose modal
-	modalBorder := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(borderColor).
-		Width(modalWidth).
-		Padding(1, 2)
-
-	modalContent := title + "\n" + filterView + "\n" + listView
-	modal := modalBorder.Render(modalContent)
-
-	// Center the modal on screen
-	modalH := lipgloss.Height(modal)
-	modalW := lipgloss.Width(modal)
-
-	// Vertical centering
-	topPad := max((m.height-modalH)/2, 0)
-	// Horizontal centering
-	leftPad := max((m.width-modalW)/2, 0)
-
-	// Build the overlay with background dimming
-	lines := strings.Split(modal, "\n")
-	var result strings.Builder
-
-	// Background overlay style (semi-transparent using background color)
-	overlayBg := lipgloss.NewStyle().
-		Foreground(mutedColor)
-
-	// Top padding
-	for i := 0; i < topPad; i++ {
-		if m.width > 0 {
-			result.WriteString(overlayBg.Render(strings.Repeat("·", m.width)))
-		}
-		result.WriteString("\n")
-	}
-
-	// Modal lines
-	for _, line := range lines {
-		if leftPad > 0 {
-			result.WriteString(overlayBg.Render(strings.Repeat("·", leftPad)))
-		}
-		result.WriteString(line)
-		// Right padding
-		lineW := lipgloss.Width(line)
-		rightPad := max(m.width-leftPad-lineW, 0)
-		if rightPad > 0 {
-			result.WriteString(overlayBg.Render(strings.Repeat("·", rightPad)))
-		}
-		result.WriteString("\n")
-	}
-
-	// Bottom padding
-	for i := topPad + modalH; i < m.height; i++ {
-		if m.width > 0 {
-			result.WriteString(overlayBg.Render(strings.Repeat("·", m.width)))
-		}
-		result.WriteString("\n")
-	}
-
-	return strings.TrimRight(result.String(), "\n")
+	return strings.Join(lines, "\n")
 }

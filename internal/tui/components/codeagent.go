@@ -14,26 +14,29 @@ import (
 
 // CodeAgentModel is the main TUI model for the Synapta Code agent.
 type CodeAgentModel struct {
-	width        int
-	height       int
-	styles       *theme.Styles
-	ta           textarea.Model
-	quit         bool
-	borderColor  string
-	msgs         []string
-	cfg          *config.AppConfig
-	commandModal *CommandModal
-	commandOpen  bool
+	width       int
+	height      int
+	styles      *theme.Styles
+	ta          textarea.Model
+	quit        bool
+	borderColor string
+	msgs        []string
+	cfg         *config.AppConfig
+
+	// Inline command picker
+	picker *CommandPicker
 }
 
 // NewCodeAgentModel creates the model using the loaded AppConfig.
 func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	t := cfg.ActiveTheme()
+	styles := theme.NewStyles(t)
 	return &CodeAgentModel{
-		styles:      theme.NewStyles(t),
+		styles:      styles,
 		ta:          buildTextarea(t, cfg),
 		borderColor: t.Border,
 		cfg:         cfg,
+		picker:      NewCommandPicker(styles),
 	}
 }
 
@@ -111,12 +114,19 @@ func (m *CodeAgentModel) getQuitKey() string {
 	return "ctrl+c"
 }
 
-// getCommandKey returns the configured command palette key (default: ctrl+p)
-func (m *CodeAgentModel) getCommandKey() string {
-	if m.cfg != nil && m.cfg.Keybindings.Command != "" {
-		return normalizeKeyName(m.cfg.Keybindings.Command)
+// getFilterText returns the text used for filtering (after the ':' prefix).
+func (m *CodeAgentModel) getFilterText() string {
+	value := m.ta.Value()
+	if strings.HasPrefix(value, ":") {
+		return value[1:] // everything after ':'
 	}
-	return "ctrl+p"
+	return ""
+}
+
+// clearCommandMode clears the input and exits command mode.
+func (m *CodeAgentModel) clearCommandMode() {
+	m.ta.SetValue("")
+	m.picker.Deactivate()
 }
 
 // ─── tea.Model ───────────────────────────────────────────────────────
@@ -131,20 +141,22 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ta.SetWidth(max(msg.Width-6, 40))
-		if m.commandModal != nil {
-			m.commandModal.SetSize(msg.Width, msg.Height)
-		}
 		return m, nil
 
-	case CommandExecutedMsg:
-		// Handle executed command
-		m.commandOpen = false
-		m.commandModal = nil
-		switch msg.Command.ID {
+	case CommandActionMsg:
+		// Handle completed command
+		m.clearCommandMode()
+
+		if len(msg.Path) == 0 {
+			return m, nil
+		}
+
+		commandID := msg.Path[0].ID
+		switch commandID {
 		case "add-provider":
-			m.msgs = append(m.msgs, "[Command] Add Provider — coming soon")
-		case "set-provider":
-			m.msgs = append(m.msgs, "[Command] Set Provider — coming soon")
+			if len(msg.Path) > 1 {
+				m.msgs = append(m.msgs, "[Add Provider] Selected: "+msg.Path[1].Name)
+			}
 		case "set-model":
 			m.msgs = append(m.msgs, "[Command] Set Model — coming soon")
 		}
@@ -152,35 +164,88 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		keyStr := msg.String()
+		quitKey := m.getQuitKey()
 
-		// If command modal is open, route keys there
-		if m.commandOpen && m.commandModal != nil {
-			commandKey := m.getCommandKey()
-			// Close modal on command key or escape
-			if keyStr == commandKey || keyStr == "esc" {
-				m.commandOpen = false
-				m.commandModal = nil
+		// ─── Command Mode Active ────────────────────────────────
+		if m.picker.IsActive() {
+			// Ctrl+Q exits command mode
+			if keyStr == quitKey || keyStr == "ctrl+q" {
+				m.clearCommandMode()
 				return m, nil
 			}
+
+			// ESC goes back one level (or exits if at root)
+			if keyStr == "esc" {
+				if !m.picker.HandleBack() {
+					// At root, exit command mode
+					m.clearCommandMode()
+				}
+				return m, nil
+			}
+
+			// Up/Down navigation
+			if keyStr == "up" {
+				m.picker.MoveUp()
+				return m, nil
+			}
+			if keyStr == "down" {
+				m.picker.MoveDown()
+				return m, nil
+			}
+
+			// Enter selects the highlighted item
+			if keyStr == "enter" {
+				completed := m.picker.HandleSelect()
+				if completed {
+					// Command fully selected
+					path := m.picker.Path()
+					m.picker.Deactivate()
+					return m, func() tea.Msg {
+						return CommandActionMsg{Path: path}
+					}
+				}
+				// Navigated deeper, clear filter for new level
+				m.ta.SetValue(":")
+				return m, nil
+			}
+
+			// All other keys go to the textarea for filtering
+			// But first, check if user deleted the ':'
+			if keyStr == "backspace" {
+				value := m.ta.Value()
+				if len(value) <= 1 {
+					// Deleting the ':', exit command mode
+					m.clearCommandMode()
+					return m, nil
+				}
+			}
+
+			// Pass to textarea
 			var cmd tea.Cmd
-			m.commandModal, cmd = m.commandModal.Update(msg)
+			m.ta, cmd = m.ta.Update(msg)
+
+			// Update filter based on new text
+			m.picker.Filter(m.getFilterText())
 			return m, cmd
 		}
 
-		// Check for command palette key (default: ctrl+p)
-		commandKey := m.getCommandKey()
-		if keyStr == commandKey {
-			m.commandOpen = true
-			m.commandModal = NewCommandModal(m.styles, m.cfg.ActiveTheme())
-			m.commandModal.SetSize(m.width, m.height)
-			return m, m.commandModal.Init()
-		}
+		// ─── Normal Mode ────────────────────────────────────────
 
 		// Check for quit key (default: ctrl+c)
-		quitKey := m.getQuitKey()
 		if keyStr == quitKey {
 			m.quit = true
 			return m, tea.Quit
+		}
+
+		// Check for ':' as first character to enter command mode
+		if keyStr == ":" {
+			value := m.ta.Value()
+			if value == "" {
+				// Enter command mode
+				m.picker.Activate()
+				m.ta.SetValue(":")
+				return m, nil
+			}
 		}
 
 		// Check for submit key (default: enter)
@@ -188,7 +253,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if keyStr == submitKey {
 			// Only submit if we have text
 			text := m.ta.Value()
-			if text != "" {
+			if text != "" && !strings.HasPrefix(text, ":") {
 				m.msgs = append(m.msgs, text)
 				m.ta.SetValue("")
 			}
@@ -196,18 +261,13 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Handle Shift+Enter for newline
-		// In v2 with keyboard enhancements, we can detect modifiers
 		if msg.Code == tea.KeyEnter && msg.Mod.Contains(tea.ModShift) {
-			// Insert newline manually
 			m.ta.InsertRune('\n')
 			return m, nil
 		}
 
 		// Handle Ctrl+M (which some terminals send for Enter with modifiers)
-		// This is a fallback for terminals that don't support Kitty protocol
 		if keyStr == "ctrl+m" || (msg.Code == 'm' && msg.Mod.Contains(tea.ModCtrl)) {
-			// Check if shift is also held (via the text representation)
-			// This is a workaround for terminals that don't report modifiers properly
 			return m, nil
 		}
 	}
@@ -235,37 +295,51 @@ func (m CodeAgentModel) View() tea.View {
 		Padding(0, 1)
 	inputBox := borderStyle.Render(taView)
 
+	// ── Command picker (inline, below input) ──
+	pickerView := ""
+	if m.picker.IsActive() {
+		pickerView = m.picker.View(m.width - 6) // match input width
+	}
+
 	// ── Compose view ──
 	var content string
-	commandKey := m.getCommandKey()
 	instructions := lipgloss.NewStyle().
 		Foreground(m.styles.MutedStyle.GetForeground()).
-		Render("  ↑/↓ navigate   Shift+Enter=newline   Enter=send   " + strings.ToUpper(commandKey[:1]) + commandKey[1:]+"=commands   Ctrl+C=quit")
+		Render("  ↑/↓ navigate   Shift+Enter=newline   Enter=send   :=commands   Ctrl+C=quit")
 
 	if m.height > 0 {
-		// Calculate space needed
 		titleH := lipgloss.Height(title)
 		inputH := lipgloss.Height(inputBox)
+		pickerH := lipgloss.Height(pickerView)
 		instructionsH := lipgloss.Height(instructions)
 
-		totalContentH := titleH + inputH + instructionsH + 2 // 2 for spacing
-		availableH := m.height - totalContentH
+		var totalContentH int
+		if pickerView != "" {
+			// Command mode: title, spacer, picker, input
+			totalContentH = titleH + pickerH + inputH + 3
+		} else {
+			// Normal mode: title, instructions, spacer, input
+			totalContentH = titleH + instructionsH + inputH + 3
+		}
 
+		availableH := m.height - totalContentH
 		spacer := ""
 		if availableH > 0 {
 			spacer = strings.Repeat("\n", availableH)
 		}
 
-		content = title + "\n\n" + instructions + "\n" + spacer + inputBox
+		if pickerView != "" {
+			// Command mode: title, spacer (push picker+input to bottom), picker, input
+			content = title + "\n" + spacer + pickerView + "\n\n" + inputBox
+		} else {
+			// Normal mode: title, instructions, spacer, input at bottom
+			content = title + "\n\n" + instructions + "\n" + spacer + inputBox
+		}
 	} else {
-		content = title + "\n\n" + inputBox
-	}
-
-	// If command modal is open, overlay it on top
-	if m.commandOpen && m.commandModal != nil {
-		modalView := m.commandModal.View()
-		if modalView != "" {
-			content = modalView
+		if pickerView != "" {
+			content = title + "\n\n" + pickerView + "\n" + inputBox
+		} else {
+			content = title + "\n\n" + inputBox
 		}
 	}
 
@@ -273,7 +347,6 @@ func (m CodeAgentModel) View() tea.View {
 	v.AltScreen = true
 
 	// Request keyboard enhancements for modifier key support (Shift+Enter, etc.)
-	// This enables Kitty protocol support on compatible terminals
 	v.KeyboardEnhancements.ReportEventTypes = true
 
 	return v
