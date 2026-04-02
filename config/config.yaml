@@ -17,6 +17,7 @@ keybindings:
   newline: "shift+enter"  # Shift+Enter inserts newline
   submit: "enter"         # Enter submits
   quit: "ctrl+c"          # Ctrl+C quits
+  command: "ctrl+p"       # Ctrl+P opens command palette
   # Alternative submit options (uncomment if needed):
   # submit: "ctrl+enter"  # Ctrl+Enter submits
   # submit: "ctrl+j"      # Ctrl+J submits (fallback for terminals without Kitty)
@@ -40,3 +41,5 @@ themes:
     success: "#a9b665"
     cursor_fg: "#282828"
     cursor_bg: "#a9b665"
+    highlight_color: "#a9b665"   # Base color for command palette highlight
+    highlight_opacity: 0.2       # Opacity of highlight background (0.0-1.0)

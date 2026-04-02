@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/viper"
+	go_yaml "go.yaml.in/yaml/v3"
 )
 
 // Keybindings defines named keybinding mappings.
@@ -20,40 +21,45 @@ type Keybindings struct {
 	Newline string `mapstructure:"newline"`
 	Submit  string `mapstructure:"submit"`
 	Quit    string `mapstructure:"quit"`
+	Command string `mapstructure:"command"`
 }
 
 // Theme defines a complete colour palette for a named theme.
 type Theme struct {
-	Name       string `mapstructure:"name"`
-	Background string `mapstructure:"background"`
-	Foreground string `mapstructure:"foreground"`
-	Primary    string `mapstructure:"primary"`
-	Secondary  string `mapstructure:"secondary"`
-	Accent     string `mapstructure:"accent"`
-	Muted      string `mapstructure:"muted"`
-	Border     string `mapstructure:"border"`
-	Selection  string `mapstructure:"selection"`
-	Error      string `mapstructure:"error"`
-	Success    string `mapstructure:"success"`
-	CursorFG   string `mapstructure:"cursor_fg"`
-	CursorBG   string `mapstructure:"cursor_bg"`
+	Name             string  `mapstructure:"name"`
+	Background       string  `mapstructure:"background"`
+	Foreground       string  `mapstructure:"foreground"`
+	Primary          string  `mapstructure:"primary"`
+	Secondary        string  `mapstructure:"secondary"`
+	Accent           string  `mapstructure:"accent"`
+	Muted            string  `mapstructure:"muted"`
+	Border           string  `mapstructure:"border"`
+	Selection        string  `mapstructure:"selection"`
+	Error            string  `mapstructure:"error"`
+	Success          string  `mapstructure:"success"`
+	CursorFG         string  `mapstructure:"cursor_fg"`
+	CursorBG         string  `mapstructure:"cursor_bg"`
+	HighlightColor   string  `mapstructure:"highlight_color"`
+	HighlightOpacity float64 `mapstructure:"highlight_opacity"`
 }
 
 func defaultTheme() Theme {
 	return Theme{
-		Name:       "Gruvbox Material Dark",
-		Background: "#282828",
-		Foreground: "#d4be98",
-		Primary:    "#a9b665",
-		Secondary:  "#89b482",
-		Accent:     "#d8a657",
-		Muted:      "#7c6f64",
-		Border:     "#504945",
-		Selection:  "#3c3836",
-		Error:      "#ea6962",
-		Success:    "#a9b665",
-		CursorFG:   "#282828",
-		CursorBG:   "#a9b665",
+		Name:             "Gruvbox Material Dark",
+		Background:       "#282828",
+		Foreground:       "#d4be98",
+		Primary:          "#a9b665",
+		Secondary:        "#89b482",
+		Accent:           "#d8a657",
+		Muted:            "#7c6f64",
+		Border:           "#504945",
+		Selection:        "#3c3836",
+		Error:            "#ea6962",
+		Success:          "#a9b665",
+		CursorFG:         "#282828",
+		CursorBG:         "#a9b665",
+		HighlightColor:   "#a9b665",
+		HighlightOpacity: 0.2,
 	}
 }
 
@@ -63,10 +69,17 @@ type RawThemes struct {
 	Map     map[string]Theme `mapstructure:",remain"`
 }
 
+// ProviderConfig stores the active provider and model selection.
+type ProviderConfig struct {
+	Default string `mapstructure:"default"` // Provider ID (e.g., "github-copilot", "kilo")
+	Model   string `mapstructure:"model"`   // Model ID (e.g., "gpt-4o", "claude-sonnet-4-20250514")
+}
+
 // AppConfig is the top-level configuration structure.
 type AppConfig struct {
-	Keybindings Keybindings `mapstructure:"keybindings"`
-	Themes      RawThemes   `mapstructure:"themes"`
+	Keybindings Keybindings    `mapstructure:"keybindings"`
+	Themes      RawThemes      `mapstructure:"themes"`
+	Provider    ProviderConfig `mapstructure:"provider"`
 }
 
 // ActiveTheme returns the currently selected Theme, falling back to the
@@ -93,6 +106,7 @@ func defaultKeybindings() Keybindings {
 		Newline: "shift+enter",
 		Submit:  "enter",
 		Quit:    "ctrl+c",
+		Command: "ctrl+p",
 	}
 }
 
@@ -150,6 +164,17 @@ func LoadConfig() (*AppConfig, error) {
 		if v, ok := kb["quit"]; ok && v != "" {
 			cfg.Keybindings.Quit = v
 		}
+		if v, ok := kb["command"]; ok && v != "" {
+			cfg.Keybindings.Command = v
+		}
+	}
+
+	// Provider config
+	if p := v.GetString("provider.default"); p != "" {
+		cfg.Provider.Default = p
+	}
+	if m := v.GetString("provider.model"); m != "" {
+		cfg.Provider.Model = m
 	}
 
 	// Active theme key
@@ -205,4 +230,59 @@ func parseBinding(s string) (key string, shift bool) {
 	default:
 		return s, false
 	}
+}
+
+// SaveConfig writes the current config to ~/.synapta/config.yaml.
+func SaveConfig(cfg *AppConfig) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("getting home dir: %w", err)
+	}
+
+	configDir := filepath.Join(homeDir, ".synapta")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return fmt.Errorf("creating config dir: %w", err)
+	}
+
+	configPath := filepath.Join(configDir, "config.yaml")
+
+	// Read existing config if it exists
+	data, err := os.ReadFile(configPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reading existing config: %w", err)
+	}
+
+	// If config exists, update provider section only
+	if len(data) > 0 {
+		var existing map[string]any
+		if err := go_yaml.Unmarshal(data, &existing); err != nil {
+			existing = make(map[string]any)
+		}
+
+		// Update provider section
+		existing["provider"] = map[string]any{
+			"default": cfg.Provider.Default,
+			"model":   cfg.Provider.Model,
+		}
+
+		data, err = go_yaml.Marshal(existing)
+		if err != nil {
+			return fmt.Errorf("marshaling config: %w", err)
+		}
+	} else {
+		// Create new config
+		data, err = go_yaml.Marshal(cfg)
+		if err != nil {
+			return fmt.Errorf("marshaling config: %w", err)
+		}
+	}
+
+	return os.WriteFile(configPath, data, 0644)
+}
+
+// SetProvider updates the active provider and model, then saves to disk.
+func (c *AppConfig) SetProvider(providerID, modelID string) error {
+	c.Provider.Default = providerID
+	c.Provider.Model = modelID
+	return SaveConfig(c)
 }

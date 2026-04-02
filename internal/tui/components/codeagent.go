@@ -14,14 +14,16 @@ import (
 
 // CodeAgentModel is the main TUI model for the Synapta Code agent.
 type CodeAgentModel struct {
-	width       int
-	height      int
-	styles      *theme.Styles
-	ta          textarea.Model
-	quit        bool
-	borderColor string
-	msgs        []string
-	cfg         *config.AppConfig
+	width        int
+	height       int
+	styles       *theme.Styles
+	ta           textarea.Model
+	quit         bool
+	borderColor  string
+	msgs         []string
+	cfg          *config.AppConfig
+	commandModal *CommandModal
+	commandOpen  bool
 }
 
 // NewCodeAgentModel creates the model using the loaded AppConfig.
@@ -109,6 +111,14 @@ func (m *CodeAgentModel) getQuitKey() string {
 	return "ctrl+c"
 }
 
+// getCommandKey returns the configured command palette key (default: ctrl+p)
+func (m *CodeAgentModel) getCommandKey() string {
+	if m.cfg != nil && m.cfg.Keybindings.Command != "" {
+		return normalizeKeyName(m.cfg.Keybindings.Command)
+	}
+	return "ctrl+p"
+}
+
 // ─── tea.Model ───────────────────────────────────────────────────────
 
 func (m CodeAgentModel) Init() tea.Cmd {
@@ -121,10 +131,50 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ta.SetWidth(max(msg.Width-6, 40))
+		if m.commandModal != nil {
+			m.commandModal.SetSize(msg.Width, msg.Height)
+		}
+		return m, nil
+
+	case CommandExecutedMsg:
+		// Handle executed command
+		m.commandOpen = false
+		m.commandModal = nil
+		switch msg.Command.ID {
+		case "add-provider":
+			m.msgs = append(m.msgs, "[Command] Add Provider — coming soon")
+		case "set-provider":
+			m.msgs = append(m.msgs, "[Command] Set Provider — coming soon")
+		case "set-model":
+			m.msgs = append(m.msgs, "[Command] Set Model — coming soon")
+		}
 		return m, nil
 
 	case tea.KeyPressMsg:
 		keyStr := msg.String()
+
+		// If command modal is open, route keys there
+		if m.commandOpen && m.commandModal != nil {
+			commandKey := m.getCommandKey()
+			// Close modal on command key or escape
+			if keyStr == commandKey || keyStr == "esc" {
+				m.commandOpen = false
+				m.commandModal = nil
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.commandModal, cmd = m.commandModal.Update(msg)
+			return m, cmd
+		}
+
+		// Check for command palette key (default: ctrl+p)
+		commandKey := m.getCommandKey()
+		if keyStr == commandKey {
+			m.commandOpen = true
+			m.commandModal = NewCommandModal(m.styles, m.cfg.ActiveTheme())
+			m.commandModal.SetSize(m.width, m.height)
+			return m, m.commandModal.Init()
+		}
 
 		// Check for quit key (default: ctrl+c)
 		quitKey := m.getQuitKey()
@@ -187,13 +237,15 @@ func (m CodeAgentModel) View() tea.View {
 
 	// ── Compose view ──
 	var content string
+	commandKey := m.getCommandKey()
+	instructions := lipgloss.NewStyle().
+		Foreground(m.styles.MutedStyle.GetForeground()).
+		Render("  ↑/↓ navigate   Shift+Enter=newline   Enter=send   " + strings.ToUpper(commandKey[:1]) + commandKey[1:]+"=commands   Ctrl+C=quit")
+
 	if m.height > 0 {
 		// Calculate space needed
 		titleH := lipgloss.Height(title)
 		inputH := lipgloss.Height(inputBox)
-		instructions := lipgloss.NewStyle().
-			Foreground(m.styles.MutedStyle.GetForeground()).
-			Render("  ↑/↓ navigate   Shift+Enter=newline   Enter=send   Ctrl+C=quit")
 		instructionsH := lipgloss.Height(instructions)
 
 		totalContentH := titleH + inputH + instructionsH + 2 // 2 for spacing
@@ -207,6 +259,14 @@ func (m CodeAgentModel) View() tea.View {
 		content = title + "\n\n" + instructions + "\n" + spacer + inputBox
 	} else {
 		content = title + "\n\n" + inputBox
+	}
+
+	// If command modal is open, overlay it on top
+	if m.commandOpen && m.commandModal != nil {
+		modalView := m.commandModal.View()
+		if modalView != "" {
+			content = modalView
+		}
 	}
 
 	v := tea.NewView(content)
