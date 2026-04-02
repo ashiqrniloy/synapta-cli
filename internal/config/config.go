@@ -26,40 +26,44 @@ type Keybindings struct {
 
 // Theme defines a complete colour palette for a named theme.
 type Theme struct {
-	Name             string  `mapstructure:"name"`
-	Background       string  `mapstructure:"background"`
-	Foreground       string  `mapstructure:"foreground"`
-	Primary          string  `mapstructure:"primary"`
-	Secondary        string  `mapstructure:"secondary"`
-	Accent           string  `mapstructure:"accent"`
-	Muted            string  `mapstructure:"muted"`
-	Border           string  `mapstructure:"border"`
-	Selection        string  `mapstructure:"selection"`
-	Error            string  `mapstructure:"error"`
-	Success          string  `mapstructure:"success"`
-	CursorFG         string  `mapstructure:"cursor_fg"`
-	CursorBG         string  `mapstructure:"cursor_bg"`
-	HighlightColor   string  `mapstructure:"highlight_color"`
-	HighlightOpacity float64 `mapstructure:"highlight_opacity"`
+	Name                        string  `mapstructure:"name"`
+	Background                  string  `mapstructure:"background"`
+	Foreground                  string  `mapstructure:"foreground"`
+	Primary                     string  `mapstructure:"primary"`
+	Secondary                   string  `mapstructure:"secondary"`
+	Accent                      string  `mapstructure:"accent"`
+	Muted                       string  `mapstructure:"muted"`
+	Border                      string  `mapstructure:"border"`
+	Selection                   string  `mapstructure:"selection"`
+	Error                       string  `mapstructure:"error"`
+	Success                     string  `mapstructure:"success"`
+	CursorFG                    string  `mapstructure:"cursor_fg"`
+	CursorBG                    string  `mapstructure:"cursor_bg"`
+	HighlightColor              string  `mapstructure:"highlight_color"`
+	HighlightOpacity            float64 `mapstructure:"highlight_opacity"`
+	InteractionHighlightColor   string  `mapstructure:"interaction_highlight_color"`
+	InteractionHighlightOpacity float64 `mapstructure:"interaction_highlight_opacity"`
 }
 
 func defaultTheme() Theme {
 	return Theme{
-		Name:             "Gruvbox Material Dark",
-		Background:       "#282828",
-		Foreground:       "#d4be98",
-		Primary:          "#a9b665",
-		Secondary:        "#89b482",
-		Accent:           "#d8a657",
-		Muted:            "#7c6f64",
-		Border:           "#504945",
-		Selection:        "#3c3836",
-		Error:            "#ea6962",
-		Success:          "#a9b665",
-		CursorFG:         "#282828",
-		CursorBG:         "#a9b665",
-		HighlightColor:   "#a9b665",
-		HighlightOpacity: 0.2,
+		Name:                        "Gruvbox Material Dark",
+		Background:                  "#282828",
+		Foreground:                  "#d4be98",
+		Primary:                     "#a9b665",
+		Secondary:                   "#89b482",
+		Accent:                      "#d8a657",
+		Muted:                       "#7c6f64",
+		Border:                      "#504945",
+		Selection:                   "#3c3836",
+		Error:                       "#ea6962",
+		Success:                     "#a9b665",
+		CursorFG:                    "#282828",
+		CursorBG:                    "#a9b665",
+		HighlightColor:              "#a9b665",
+		HighlightOpacity:            0.2,
+		InteractionHighlightColor:    "#d8a657",
+		InteractionHighlightOpacity: 0.15,
 	}
 }
 

@@ -10,14 +10,15 @@ import (
 
 // Styles holds all lipgloss styles derived from the active theme.
 type Styles struct {
-	TitleStyle            lipgloss.Style
-	SubtitleStyle         lipgloss.Style
-	BorderStyle           lipgloss.Style
-	ErrorStyle            lipgloss.Style
-	SuccessStyle          lipgloss.Style
-	MutedStyle            lipgloss.Style
-	BaseStyle             lipgloss.Style
-	CommandHighlightStyle lipgloss.Style
+	TitleStyle                lipgloss.Style
+	SubtitleStyle             lipgloss.Style
+	BorderStyle               lipgloss.Style
+	ErrorStyle                lipgloss.Style
+	SuccessStyle              lipgloss.Style
+	MutedStyle                lipgloss.Style
+	BaseStyle                 lipgloss.Style
+	CommandHighlightStyle     lipgloss.Style
+	InteractionHighlightStyle lipgloss.Style
 }
 
 // NewStyles creates a Styles set from the given theme config.
@@ -45,6 +46,18 @@ func NewStyles(t config.Theme) *Styles {
 	// opacity 0.0 = pure background, opacity 1.0 = pure highlight color
 	highlightBg := blendToward(hlColor, baseBgColor, 1.0-highlightOpacity)
 
+	// Interaction highlight style (for user messages)
+	interactionHighlightColor := t.InteractionHighlightColor
+	if interactionHighlightColor == "" {
+		interactionHighlightColor = t.Accent
+	}
+	interactionHighlightOpacity := t.InteractionHighlightOpacity
+	if interactionHighlightOpacity == 0 {
+		interactionHighlightOpacity = 0.15
+	}
+	intHlColor := lipgloss.Color(interactionHighlightColor)
+	interactionBg := blendToward(intHlColor, baseBgColor, 1.0-interactionHighlightOpacity)
+
 	return &Styles{
 		BaseStyle: lipgloss.NewStyle(),
 		TitleStyle: lipgloss.NewStyle().
@@ -67,6 +80,9 @@ func NewStyles(t config.Theme) *Styles {
 			Foreground(fgColor).
 			Background(highlightBg).
 			Bold(true),
+		InteractionHighlightStyle: lipgloss.NewStyle().
+			Foreground(fgColor).
+			Background(interactionBg),
 	}
 }
 

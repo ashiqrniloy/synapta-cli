@@ -41,6 +41,12 @@ type ModelSelectedMsg struct {
 	ModelName string
 }
 
+// ChatMessage represents a message in the chat.
+type ChatMessage struct {
+	Role    string // "user" or "assistant"
+	Content string
+}
+
 // CodeAgentModel is the main TUI model for the Synapta Code agent.
 type CodeAgentModel struct {
 	width       int
@@ -58,6 +64,10 @@ type CodeAgentModel struct {
 
 	// Selected model
 	selectedModel string
+
+	// Chat messages
+	chatMessages []ChatMessage
+	isWorking    bool
 }
 
 // NewCodeAgentModel creates the model using the loaded AppConfig.
@@ -351,7 +361,12 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Only submit if we have text
 			text := m.ta.Value()
 			if text != "" && !strings.HasPrefix(text, ":") {
-				m.msgs = append(m.msgs, text)
+				// Add user message to chat
+				m.chatMessages = append(m.chatMessages, ChatMessage{
+					Role:    "user",
+					Content: text,
+				})
+				m.isWorking = true
 				m.ta.SetValue("")
 			}
 			return m, nil
@@ -384,19 +399,35 @@ func (m CodeAgentModel) View() tea.View {
 	// ── Title ──
 	title := m.styles.TitleStyle.Render("Synapta Code")
 
-	// ── Messages (recent ones) ──
-	msgsView := ""
+	// ── Status messages (recent ones) ──
+	statusView := ""
 	if len(m.msgs) > 0 {
-		// Show last 3 messages
 		start := 0
-		if len(m.msgs) > 3 {
-			start = len(m.msgs) - 3
+		if len(m.msgs) > 2 {
+			start = len(m.msgs) - 2
 		}
 		var msgLines []string
 		for _, msg := range m.msgs[start:] {
 			msgLines = append(msgLines, m.styles.MutedStyle.Render(msg))
 		}
-		msgsView = strings.Join(msgLines, "\n")
+		statusView = strings.Join(msgLines, "\n")
+	}
+
+	// ── Chat messages (each separated by 1 blank row) ──
+	var chatLines []string
+	for _, msg := range m.chatMessages {
+		if msg.Role == "user" {
+			chatLines = append(chatLines, m.renderUserMessage(msg.Content))
+		}
+	}
+
+	// ── Working indicator ──
+	workingView := ""
+	if m.isWorking {
+		workingStyle := lipgloss.NewStyle().
+			Foreground(m.styles.SuccessStyle.GetForeground()).
+			Italic(true)
+		workingView = workingStyle.Render("Working...")
 	}
 
 	// ── Input box with border ──
@@ -407,73 +438,214 @@ func (m CodeAgentModel) View() tea.View {
 		Padding(0, 1)
 	inputBox := borderStyle.Render(taView)
 
-	// ── Command picker (inline, below input) ──
+	// ── Command picker (inline, above input) ──
 	pickerView := ""
 	if m.picker.IsActive() {
-		pickerView = m.picker.View(m.width - 6) // match input width
+		pickerView = m.picker.View(m.width - 6)
 	}
 
-	// ── Compose view ──
-	var content string
-
-	// Build instructions line with model indicator
-	instructionsText := "  ↑/↓ navigate   Shift+Enter=newline   Enter=send   :=commands   Ctrl+C=quit"
+	// ── Instructions (centered, always last row) ──
+	instructionsText := "↑/↓ navigate  │  Shift+Enter=newline  │  Enter=send  │  :=commands  │  Ctrl+C=quit"
 	if m.selectedModel != "" {
-		// Show model at the right
-		modelIndicator := lipgloss.NewStyle().
-			Foreground(m.styles.SuccessStyle.GetForeground()).
-			Bold(true).
-			Render("● " + m.selectedModel)
-		instructionsText = instructionsText + "   " + modelIndicator
+		instructionsText = instructionsText + "  │  " + m.selectedModel
 	}
 	instructions := lipgloss.NewStyle().
 		Foreground(m.styles.MutedStyle.GetForeground()).
+		Width(m.width).
+		Align(lipgloss.Center).
 		Render(instructionsText)
 
-	if m.height > 0 {
-		titleH := lipgloss.Height(title)
-		msgsH := lipgloss.Height(msgsView)
-		inputH := lipgloss.Height(inputBox)
-		pickerH := lipgloss.Height(pickerView)
-		instructionsH := lipgloss.Height(instructions)
+	if m.height < 1 {
+		v := tea.NewView("")
+		v.AltScreen = true
+		v.KeyboardEnhancements.ReportEventTypes = true
+		return v
+	}
 
-		var totalContentH int
-		if pickerView != "" {
-			// Command mode: title, msgs, spacer, picker, input
-			totalContentH = titleH + msgsH + pickerH + inputH + 3
-		} else {
-			// Normal mode: title, msgs, instructions, spacer, input
-			totalContentH = titleH + msgsH + instructionsH + inputH + 3
-		}
+	// Trim trailing newlines from lipgloss-rendered strings
+	// (lipgloss adds them with Width/Align/Padding)
+	title = strings.TrimRight(title, "\n")
+	statusView = strings.TrimRight(statusView, "\n")
+	for i, cl := range chatLines {
+		chatLines[i] = strings.TrimRight(cl, "\n")
+	}
+	workingView = strings.TrimRight(workingView, "\n")
+	inputBox = strings.TrimRight(inputBox, "\n")
+	pickerView = strings.TrimRight(pickerView, "\n")
 
-		availableH := m.height - totalContentH
-		spacer := ""
-		if availableH > 0 {
-			spacer = strings.Repeat("\n", availableH)
+	// countLines returns the number of lines in a trimmed string
+	countLines := func(s string) int {
+		if s == "" {
+			return 0
 		}
+		return strings.Count(s, "\n") + 1
+	}
 
-		if pickerView != "" {
-			// Command mode: title, msgs, spacer (push picker+input to bottom), picker, input
-			content = title + "\n" + msgsView + "\n" + spacer + pickerView + "\n\n" + inputBox
-		} else {
-			// Normal mode: title, msgs, instructions, spacer, input at bottom
-			content = title + "\n" + msgsView + "\n\n" + instructions + "\n" + spacer + inputBox
+	// ── Compute section heights ──
+	titleH := countLines(title)
+	statusH := countLines(statusView)
+
+	chatH := 0
+	for _, cl := range chatLines {
+		chatH += countLines(cl)
+	}
+	if len(chatLines) > 0 {
+		chatH += len(chatLines) - 1 // 1 blank between messages
+	}
+
+	workingH := countLines(workingView)
+	inputH := countLines(inputBox)
+	pickerH := countLines(pickerView)
+
+	// ── Bottom anchor zone ──
+	// picker + 1 gap + input + 3 gaps + 1 instructions
+	bottomZone := inputH
+	if pickerH > 0 {
+		bottomZone += 1 + pickerH
+	}
+	bottomZone += 3 + 1
+
+	// ── Top zone: title + 2 blanks + status + (2 blanks) + chat + (1 blank) + working ──
+	topZone := titleH + 2 // title + 2 blank rows after it
+	if statusH > 0 {
+		topZone += statusH
+	}
+	if chatH > 0 {
+		if statusH > 0 {
+			topZone += 2 // 2 blanks between status and first chat
 		}
-	} else {
-		if pickerView != "" {
-			content = title + "\n" + msgsView + "\n\n" + pickerView + "\n" + inputBox
-		} else {
-			content = title + "\n" + msgsView + "\n\n" + inputBox
+		topZone += chatH
+		if workingH > 0 {
+			topZone += 1 // 1 blank between last chat and working
+		}
+	}
+	if workingH > 0 {
+		topZone += workingH
+	}
+
+	spacerH := m.height - topZone - bottomZone
+	if spacerH < 0 {
+		spacerH = 0
+	}
+
+	// ── Build output ──
+	var sb strings.Builder
+
+	emitLines := func(s string) {
+		if s == "" {
+			return
+		}
+		for _, line := range strings.Split(s, "\n") {
+			sb.WriteString(line)
+			sb.WriteString("\n")
 		}
 	}
 
-	v := tea.NewView(content)
+	// Title
+	emitLines(title)
+	sb.WriteString("\n") // 2nd blank row after title (total 2)
+
+	// Status
+	emitLines(statusView)
+
+	// 2 blanks between status and first chat message
+	if len(chatLines) > 0 && statusH > 0 {
+		sb.WriteString("\n")
+	}
+
+	// Chat messages
+	for i, cl := range chatLines {
+		emitLines(cl)
+		if i < len(chatLines)-1 {
+			sb.WriteString("\n") // 1 blank between messages
+		}
+	}
+
+	// 1 blank row between last chat message and working indicator
+	if len(chatLines) > 0 && workingH > 0 {
+		sb.WriteString("\n")
+	}
+
+	// Working indicator
+	emitLines(workingView)
+
+	// Spacer (pushes bottom elements toward screen bottom)
+	for i := 0; i < spacerH; i++ {
+		sb.WriteString("\n")
+	}
+
+	// Picker (command mode)
+	if pickerH > 0 {
+		emitLines(pickerView)
+		sb.WriteString("\n") // blank row before input
+	}
+
+	// Input box
+	emitLines(inputBox)
+
+	// 3 blank rows between input and instructions
+	sb.WriteString("\n\n\n")
+
+	// Instructions — absolute last row, no trailing newline
+	sb.WriteString(instructions)
+
+	v := tea.NewView(sb.String())
 	v.AltScreen = true
-
-	// Request keyboard enhancements for modifier key support (Shift+Enter, etc.)
 	v.KeyboardEnhancements.ReportEventTypes = true
-
 	return v
+}
+
+// renderUserMessage renders a user message with interaction highlight.
+func (m *CodeAgentModel) renderUserMessage(content string) string {
+	// Calculate available width for the message
+	maxWidth := m.width - 8
+	if maxWidth < 20 {
+		maxWidth = 20
+	}
+
+	// Word wrap the content
+	lines := wordWrap(content, maxWidth-4) // 4 for padding
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+
+	// Render each line with the interaction highlight style
+	var rendered []string
+	for _, line := range lines {
+		rendered = append(rendered, line)
+	}
+
+	// Join lines and apply style
+	joined := strings.Join(rendered, "\n")
+	return m.styles.InteractionHighlightStyle.
+		Width(maxWidth).
+		Padding(0, 1).
+		Render(joined)
+}
+
+// wordWrap wraps text to fit within the given width.
+func wordWrap(text string, width int) []string {
+	if width <= 0 || len(text) == 0 {
+		return []string{text}
+	}
+
+	var lines []string
+	for len(text) > width {
+		// Find last space before width
+		breakAt := width
+		for i := width; i > 0; i-- {
+			if text[i-1] == ' ' {
+				breakAt = i
+				break
+			}
+		}
+		lines = append(lines, text[:breakAt])
+		text = strings.TrimLeft(text[breakAt:], " ")
+	}
+	if len(text) > 0 {
+		lines = append(lines, text)
+	}
+	return lines
 }
 
 func min(a, b int) int {

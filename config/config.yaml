@@ -43,3 +43,5 @@ themes:
     cursor_bg: "#a9b665"
     highlight_color: "#a9b665"   # Base color for command palette highlight
     highlight_opacity: 0.2       # Opacity of highlight background (0.0-1.0)
+    interaction_highlight_color: "#d8a657"   # Base color for user messages
+    interaction_highlight_opacity: 0.15      # Opacity of message background (0.0-1.0)
