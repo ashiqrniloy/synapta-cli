@@ -103,6 +103,8 @@ type StreamChunk struct {
 type StreamChoice struct {
 	Index        int     `json:"index"`
 	Delta        Message `json:"delta"`
+	Message      Message `json:"message,omitempty"`
+	Text         string  `json:"text,omitempty"`
 	FinishReason string  `json:"finish_reason,omitempty"`
 }
 
@@ -124,9 +126,9 @@ type APICredentials struct {
 
 // Credentials represents either OAuth or API key credentials.
 type Credentials struct {
-	Type  string           `json:"type"`
+	Type  string            `json:"type"`
 	OAuth *OAuthCredentials `json:"oauth,omitempty"`
-	API   *APICredentials  `json:"api,omitempty"`
+	API   *APICredentials   `json:"api,omitempty"`
 }
 
 // OAuthLoginCallbacks provides callbacks for the OAuth login flow.
@@ -159,9 +161,9 @@ type Provider interface {
 
 // AuthEntry represents stored credentials for a provider.
 type AuthEntry struct {
-	Type  string           `json:"type"`
+	Type  string            `json:"type"`
 	OAuth *OAuthCredentials `json:"oauth,omitempty"`
-	API   *APICredentials  `json:"api,omitempty"`
+	API   *APICredentials   `json:"api,omitempty"`
 }
 
 // AuthStorage manages credential storage.

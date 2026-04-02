@@ -7,13 +7,16 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
 
 	"github.com/synapta/synapta-cli/internal/config"
+	"github.com/synapta/synapta-cli/internal/core"
 	"github.com/synapta/synapta-cli/internal/llm"
 	"github.com/synapta/synapta-cli/internal/tui/theme"
 )
@@ -35,6 +38,10 @@ type ModelsLoadedMsg struct {
 	Models []ModelInfo
 }
 
+type ModelsLoadErrMsg struct {
+	Err error
+}
+
 // ModelSelectedMsg is sent when a model is selected.
 type ModelSelectedMsg struct {
 	ModelID   string
@@ -46,6 +53,18 @@ type ChatMessage struct {
 	Role    string // "user" or "assistant"
 	Content string
 }
+
+type chatStreamChunkMsg struct {
+	Text string
+}
+
+type chatStreamDoneMsg struct{}
+
+type chatStreamErrMsg struct {
+	Err error
+}
+
+const assistantPlaceholder = "Working..."
 
 // CodeAgentModel is the main TUI model for the Synapta Code agent.
 type CodeAgentModel struct {
@@ -63,11 +82,22 @@ type CodeAgentModel struct {
 	picker *CommandPicker
 
 	// Selected model
-	selectedModel string
+	selectedModelName string
+	selectedModelID   string
+	selectedProvider  string
 
 	// Chat messages
-	chatMessages []ChatMessage
-	isWorking    bool
+	chatMessages       []ChatMessage
+	isWorking          bool
+	activeAssistantIdx int
+	streamCh           <-chan tea.Msg
+	chatService        *core.ChatService
+	chatViewport       viewport.Model
+	chatAutoScroll     bool
+	streamStartedAt    time.Time
+	firstChunkAt       time.Time
+	streamChunkCount   int
+	streamCharCount    int
 }
 
 // NewCodeAgentModel creates the model using the loaded AppConfig.
@@ -80,13 +110,27 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	authDir := homeDir + "/.synapta"
 	authStorage, _ := llm.NewAuthStorage(authDir)
 
+	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(10))
+	vp.SoftWrap = true
+	vp.FillHeight = true
+
 	model := &CodeAgentModel{
-		styles:      styles,
-		ta:          buildTextarea(t, cfg),
-		borderColor: t.Border,
-		cfg:         cfg,
-		picker:      NewCommandPicker(styles),
-		authStorage: authStorage,
+		styles:             styles,
+		ta:                 buildTextarea(t, cfg),
+		borderColor:        t.Border,
+		cfg:                cfg,
+		picker:             NewCommandPicker(styles),
+		authStorage:        authStorage,
+		chatService:        core.NewChatService(authStorage),
+		activeAssistantIdx: -1,
+		chatViewport:       vp,
+		chatAutoScroll:     true,
+	}
+
+	if cfg.Provider.Default != "" && cfg.Provider.Model != "" {
+		model.selectedProvider = cfg.Provider.Default
+		model.selectedModelID = cfg.Provider.Model
+		model.selectedModelName = cfg.Provider.Model
 	}
 
 	// Check if already authenticated and show model count
@@ -184,6 +228,7 @@ func (m *CodeAgentModel) getFilterText() string {
 func (m *CodeAgentModel) clearCommandMode() {
 	m.ta.SetValue("")
 	m.picker.Deactivate()
+	m.recalculateLayout()
 }
 
 // ─── tea.Model ───────────────────────────────────────────────────────
@@ -197,7 +242,8 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.ta.SetWidth(max(msg.Width-6, 40))
+		m.recalculateLayout()
+		m.refreshChatViewport()
 		return m, nil
 
 	case CommandActionMsg:
@@ -222,8 +268,21 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "set-model":
 			if len(msg.Path) > 1 {
-				// Model was selected
-				m.selectedModel = msg.Path[1].Name
+				providerID, modelID, ok := parseModelSelectionKey(msg.Path[1].ID)
+				if !ok {
+					m.msgs = append(m.msgs, "[Model] Invalid selection")
+					m.clearCommandMode()
+					return m, nil
+				}
+
+				m.selectedProvider = providerID
+				m.selectedModelID = modelID
+				m.selectedModelName = msg.Path[1].Name
+				if m.cfg != nil {
+					if err := m.cfg.SetProvider(providerID, modelID); err != nil {
+						m.msgs = append(m.msgs, "[Model] Warning: failed to save config: "+err.Error())
+					}
+				}
 				m.clearCommandMode()
 				m.msgs = append(m.msgs, "[Model] Selected: "+msg.Path[1].Name)
 			} else {
@@ -243,6 +302,12 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.picker.LoadModels(msg.Models)
 		// Clear filter for new items
 		m.ta.SetValue(":")
+		m.recalculateLayout()
+		return m, nil
+
+	case ModelsLoadErrMsg:
+		m.msgs = append(m.msgs, "[Model] ✗ "+msg.Err.Error())
+		m.clearCommandMode()
 		return m, nil
 
 	case KiloAuthProgressMsg:
@@ -263,6 +328,68 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case chatStreamChunkMsg:
+		if m.firstChunkAt.IsZero() {
+			m.firstChunkAt = time.Now()
+			if !m.streamStartedAt.IsZero() {
+				m.msgs = append(m.msgs, fmt.Sprintf("[Chat dbg] first chunk in %s", m.firstChunkAt.Sub(m.streamStartedAt).Round(time.Millisecond)))
+			}
+		}
+		m.streamChunkCount++
+		m.streamCharCount += len(msg.Text)
+		if m.activeAssistantIdx >= 0 && m.activeAssistantIdx < len(m.chatMessages) {
+			if m.chatMessages[m.activeAssistantIdx].Content == assistantPlaceholder {
+				m.chatMessages[m.activeAssistantIdx].Content = msg.Text
+			} else {
+				m.chatMessages[m.activeAssistantIdx].Content += msg.Text
+			}
+		}
+		m.refreshChatViewport()
+		return m, waitForStreamMsg(m.streamCh)
+
+	case chatStreamDoneMsg:
+		if m.activeAssistantIdx >= 0 && m.activeAssistantIdx < len(m.chatMessages) {
+			if m.chatMessages[m.activeAssistantIdx].Content == assistantPlaceholder {
+				m.chatMessages[m.activeAssistantIdx].Content = ""
+			}
+		}
+		if !m.streamStartedAt.IsZero() {
+			m.msgs = append(m.msgs, fmt.Sprintf("[Chat dbg] done in %s (%d chunks, %d chars)", time.Since(m.streamStartedAt).Round(time.Millisecond), m.streamChunkCount, m.streamCharCount))
+		}
+		m.isWorking = false
+		m.activeAssistantIdx = -1
+		m.streamCh = nil
+		m.streamStartedAt = time.Time{}
+		m.firstChunkAt = time.Time{}
+		m.streamChunkCount = 0
+		m.streamCharCount = 0
+		m.refreshChatViewport()
+		return m, nil
+
+	case chatStreamErrMsg:
+		if !m.streamStartedAt.IsZero() {
+			m.msgs = append(m.msgs, fmt.Sprintf("[Chat dbg] error after %s (%d chunks, %d chars)", time.Since(m.streamStartedAt).Round(time.Millisecond), m.streamChunkCount, m.streamCharCount))
+		}
+		m.isWorking = false
+		m.activeAssistantIdx = -1
+		m.streamCh = nil
+		m.streamStartedAt = time.Time{}
+		m.firstChunkAt = time.Time{}
+		m.streamChunkCount = 0
+		m.streamCharCount = 0
+		m.msgs = append(m.msgs, "[Chat] ✗ "+msg.Err.Error())
+		m.refreshChatViewport()
+		return m, nil
+
+	case tea.MouseWheelMsg:
+		if m.picker.IsActive() {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.chatViewport, cmd = m.chatViewport.Update(msg)
+		m.chatAutoScroll = m.chatViewport.AtBottom()
+		return m, cmd
+
 	case tea.KeyPressMsg:
 		keyStr := msg.String()
 		quitKey := m.getQuitKey()
@@ -280,6 +407,8 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if !m.picker.HandleBack() {
 					// At root, exit command mode
 					m.clearCommandMode()
+				} else {
+					m.recalculateLayout()
 				}
 				return m, nil
 			}
@@ -333,6 +462,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// Update filter based on new text
 			m.picker.Filter(m.getFilterText())
+			m.recalculateLayout()
 			return m, cmd
 		}
 
@@ -344,6 +474,20 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
+		// Chat scrolling
+		if keyStr == "pgup" || keyStr == "pageup" || keyStr == "ctrl+up" {
+			var cmd tea.Cmd
+			m.chatViewport, cmd = m.chatViewport.Update(msg)
+			m.chatAutoScroll = m.chatViewport.AtBottom()
+			return m, cmd
+		}
+		if keyStr == "pgdown" || keyStr == "pagedown" || keyStr == "ctrl+down" {
+			var cmd tea.Cmd
+			m.chatViewport, cmd = m.chatViewport.Update(msg)
+			m.chatAutoScroll = m.chatViewport.AtBottom()
+			return m, cmd
+		}
+
 		// Check for ':' as first character to enter command mode
 		if keyStr == ":" {
 			value := m.ta.Value()
@@ -351,6 +495,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Enter command mode
 				m.picker.Activate()
 				m.ta.SetValue(":")
+				m.recalculateLayout()
 				return m, nil
 			}
 		}
@@ -358,23 +503,43 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Check for submit key (default: enter)
 		submitKey := m.getSubmitKey()
 		if keyStr == submitKey {
-			// Only submit if we have text
-			text := m.ta.Value()
-			if text != "" && !strings.HasPrefix(text, ":") {
-				// Add user message to chat
-				m.chatMessages = append(m.chatMessages, ChatMessage{
-					Role:    "user",
-					Content: text,
-				})
-				m.isWorking = true
-				m.ta.SetValue("")
+			if m.isWorking {
+				return m, nil
 			}
-			return m, nil
+
+			text := strings.TrimSpace(m.ta.Value())
+			if text == "" || strings.HasPrefix(text, ":") {
+				return m, nil
+			}
+			if m.selectedProvider == "" || m.selectedModelID == "" {
+				m.msgs = append(m.msgs, "[Chat] Select a model first via :set-model")
+				return m, nil
+			}
+
+			m.chatMessages = append(m.chatMessages, ChatMessage{Role: "user", Content: text})
+			history := m.chatHistoryAsLLM()
+
+			m.chatMessages = append(m.chatMessages, ChatMessage{Role: "assistant", Content: assistantPlaceholder})
+			m.activeAssistantIdx = len(m.chatMessages) - 1
+			m.isWorking = true
+			m.chatAutoScroll = true
+			m.streamStartedAt = time.Now()
+			m.firstChunkAt = time.Time{}
+			m.streamChunkCount = 0
+			m.streamCharCount = 0
+			m.msgs = append(m.msgs, fmt.Sprintf("[Chat dbg] start %s/%s", m.selectedProvider, m.selectedModelID))
+			m.ta.SetValue("")
+			m.recalculateLayout()
+			m.refreshChatViewport()
+
+			cmd := m.startChatStream(history)
+			return m, cmd
 		}
 
 		// Handle Shift+Enter for newline
 		if msg.Code == tea.KeyEnter && msg.Mod.Contains(tea.ModShift) {
 			m.ta.InsertRune('\n')
+			m.recalculateLayout()
 			return m, nil
 		}
 
@@ -387,6 +552,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Let the textarea process other keys
 	var cmd tea.Cmd
 	m.ta, cmd = m.ta.Update(msg)
+	m.recalculateLayout()
 
 	return m, cmd
 }
@@ -396,203 +562,140 @@ func (m CodeAgentModel) View() tea.View {
 		return tea.NewView("")
 	}
 
-	// ── Title ──
-	title := m.styles.TitleStyle.Render("Synapta Code")
-
-	// ── Status messages (recent ones) ──
-	statusView := ""
-	if len(m.msgs) > 0 {
-		start := 0
-		if len(m.msgs) > 2 {
-			start = len(m.msgs) - 2
-		}
-		var msgLines []string
-		for _, msg := range m.msgs[start:] {
-			msgLines = append(msgLines, m.styles.MutedStyle.Render(msg))
-		}
-		statusView = strings.Join(msgLines, "\n")
+	if m.height < 1 || m.width < 1 {
+		v := tea.NewView("")
+		v.AltScreen = true
+		v.MouseMode = tea.MouseModeCellMotion
+		v.KeyboardEnhancements.ReportEventTypes = true
+		return v
 	}
 
-	// ── Chat messages (each separated by 1 blank row) ──
-	var chatLines []string
-	for _, msg := range m.chatMessages {
-		if msg.Role == "user" {
-			chatLines = append(chatLines, m.renderUserMessage(msg.Content))
-		}
+	title := strings.TrimRight(m.styles.TitleStyle.Render("Synapta Code"), "\n")
+	statusView := strings.TrimRight(m.renderStatusView(), "\n")
+	pickerView := ""
+	if m.picker.IsActive() {
+		pickerView = strings.TrimRight(m.picker.View(max(m.width-6, 20)), "\n")
 	}
+	inputBox := strings.TrimRight(m.renderInputBox(), "\n")
+	instructions := strings.TrimRight(m.renderInstructions(), "\n")
 
-	// ── Working indicator ──
-	workingView := ""
-	if m.isWorking {
-		workingStyle := lipgloss.NewStyle().
-			Foreground(m.styles.SuccessStyle.GetForeground()).
-			Italic(true)
-		workingView = workingStyle.Render("Working...")
+	var sections []string
+	sections = append(sections, title)
+	if statusView != "" {
+		sections = append(sections, statusView)
 	}
+	sections = append(sections, "", m.chatViewport.View(), "")
+	if pickerView != "" {
+		sections = append(sections, pickerView)
+	}
+	sections = append(sections, inputBox, instructions)
 
-	// ── Input box with border ──
+	v := tea.NewView(strings.Join(sections, "\n"))
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	v.KeyboardEnhancements.ReportEventTypes = true
+	return v
+}
+
+func countLines(s string) int {
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
+func (m *CodeAgentModel) renderStatusView() string {
+	if len(m.msgs) == 0 {
+		return ""
+	}
+	start := 0
+	if len(m.msgs) > 6 {
+		start = len(m.msgs) - 6
+	}
+	var lines []string
+	for _, msg := range m.msgs[start:] {
+		lines = append(lines, m.styles.MutedStyle.Render(msg))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *CodeAgentModel) renderInputBox() string {
 	taView := m.ta.View()
 	borderStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(m.borderColor)).
 		Padding(0, 1)
-	inputBox := borderStyle.Render(taView)
+	return borderStyle.Render(taView)
+}
 
-	// ── Command picker (inline, above input) ──
-	pickerView := ""
-	if m.picker.IsActive() {
-		pickerView = m.picker.View(m.width - 6)
+func (m *CodeAgentModel) renderInstructions() string {
+	instructionsText := "PgUp/PgDn scroll  │  Shift+Enter newline  │  Enter send  │  :=commands  │  Ctrl+C quit"
+	if m.selectedModelName != "" {
+		instructionsText += "  │  " + m.selectedModelName
 	}
-
-	// ── Instructions (centered, always last row) ──
-	instructionsText := "↑/↓ navigate  │  Shift+Enter=newline  │  Enter=send  │  :=commands  │  Ctrl+C=quit"
-	if m.selectedModel != "" {
-		instructionsText = instructionsText + "  │  " + m.selectedModel
-	}
-	instructions := lipgloss.NewStyle().
+	return lipgloss.NewStyle().
 		Foreground(m.styles.MutedStyle.GetForeground()).
 		Width(m.width).
 		Align(lipgloss.Center).
 		Render(instructionsText)
+}
 
-	if m.height < 1 {
-		v := tea.NewView("")
-		v.AltScreen = true
-		v.KeyboardEnhancements.ReportEventTypes = true
-		return v
+func (m *CodeAgentModel) recalculateLayout() {
+	if m.width < 1 || m.height < 1 {
+		return
 	}
 
-	// Trim trailing newlines from lipgloss-rendered strings
-	// (lipgloss adds them with Width/Align/Padding)
-	title = strings.TrimRight(title, "\n")
-	statusView = strings.TrimRight(statusView, "\n")
-	for i, cl := range chatLines {
-		chatLines[i] = strings.TrimRight(cl, "\n")
+	m.ta.SetWidth(max(m.width-6, 40))
+
+	titleH := countLines(m.styles.TitleStyle.Render("Synapta Code"))
+	statusH := countLines(m.renderStatusView())
+	pickerH := 0
+	if m.picker.IsActive() {
+		pickerH = countLines(m.picker.View(max(m.width-6, 20)))
 	}
-	workingView = strings.TrimRight(workingView, "\n")
-	inputBox = strings.TrimRight(inputBox, "\n")
-	pickerView = strings.TrimRight(pickerView, "\n")
+	inputH := countLines(m.renderInputBox())
+	instructionsH := countLines(m.renderInstructions())
 
-	// countLines returns the number of lines in a trimmed string
-	countLines := func(s string) int {
-		if s == "" {
-			return 0
-		}
-		return strings.Count(s, "\n") + 1
-	}
-
-	// ── Compute section heights ──
-	titleH := countLines(title)
-	statusH := countLines(statusView)
-
-	chatH := 0
-	for _, cl := range chatLines {
-		chatH += countLines(cl)
-	}
-	if len(chatLines) > 0 {
-		chatH += len(chatLines) - 1 // 1 blank between messages
-	}
-
-	workingH := countLines(workingView)
-	inputH := countLines(inputBox)
-	pickerH := countLines(pickerView)
-
-	// ── Bottom anchor zone ──
-	// picker + 1 gap + input + 3 gaps + 1 instructions
-	bottomZone := inputH
-	if pickerH > 0 {
-		bottomZone += 1 + pickerH
-	}
-	bottomZone += 3 + 1
-
-	// ── Top zone: title + 2 blanks + status + (2 blanks) + chat + (1 blank) + working ──
-	topZone := titleH + 2 // title + 2 blank rows after it
+	reserved := titleH + statusH + inputH + instructionsH + 2 // two spacer lines around chat
 	if statusH > 0 {
-		topZone += statusH
+		reserved++
 	}
-	if chatH > 0 {
-		if statusH > 0 {
-			topZone += 2 // 2 blanks between status and first chat
-		}
-		topZone += chatH
-		if workingH > 0 {
-			topZone += 1 // 1 blank between last chat and working
-		}
-	}
-	if workingH > 0 {
-		topZone += workingH
-	}
-
-	spacerH := m.height - topZone - bottomZone
-	if spacerH < 0 {
-		spacerH = 0
-	}
-
-	// ── Build output ──
-	var sb strings.Builder
-
-	emitLines := func(s string) {
-		if s == "" {
-			return
-		}
-		for _, line := range strings.Split(s, "\n") {
-			sb.WriteString(line)
-			sb.WriteString("\n")
-		}
-	}
-
-	// Title
-	emitLines(title)
-	sb.WriteString("\n") // 2nd blank row after title (total 2)
-
-	// Status
-	emitLines(statusView)
-
-	// 2 blanks between status and first chat message
-	if len(chatLines) > 0 && statusH > 0 {
-		sb.WriteString("\n")
-	}
-
-	// Chat messages
-	for i, cl := range chatLines {
-		emitLines(cl)
-		if i < len(chatLines)-1 {
-			sb.WriteString("\n") // 1 blank between messages
-		}
-	}
-
-	// 1 blank row between last chat message and working indicator
-	if len(chatLines) > 0 && workingH > 0 {
-		sb.WriteString("\n")
-	}
-
-	// Working indicator
-	emitLines(workingView)
-
-	// Spacer (pushes bottom elements toward screen bottom)
-	for i := 0; i < spacerH; i++ {
-		sb.WriteString("\n")
-	}
-
-	// Picker (command mode)
 	if pickerH > 0 {
-		emitLines(pickerView)
-		sb.WriteString("\n") // blank row before input
+		reserved += pickerH
 	}
 
-	// Input box
-	emitLines(inputBox)
+	chatH := m.height - reserved
+	if chatH < 3 {
+		chatH = 3
+	}
 
-	// 3 blank rows between input and instructions
-	sb.WriteString("\n\n\n")
+	m.chatViewport.SetWidth(max(m.width-4, 20))
+	m.chatViewport.SetHeight(chatH)
+}
 
-	// Instructions — absolute last row, no trailing newline
-	sb.WriteString(instructions)
+func (m *CodeAgentModel) renderChatTranscript() string {
+	if len(m.chatMessages) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(m.chatMessages))
+	for _, msg := range m.chatMessages {
+		switch msg.Role {
+		case "user":
+			lines = append(lines, strings.TrimRight(m.renderUserMessage(msg.Content), "\n"))
+		case "assistant":
+			lines = append(lines, strings.TrimRight(m.renderAssistantMessage(msg.Content), "\n"))
+		}
+	}
+	return strings.Join(lines, "\n\n")
+}
 
-	v := tea.NewView(sb.String())
-	v.AltScreen = true
-	v.KeyboardEnhancements.ReportEventTypes = true
-	return v
+func (m *CodeAgentModel) refreshChatViewport() {
+	m.recalculateLayout()
+	m.chatViewport.SetContent(m.renderChatTranscript())
+	if m.chatAutoScroll {
+		m.chatViewport.GotoBottom()
+	}
 }
 
 // renderUserMessage renders a user message with interaction highlight.
@@ -621,6 +724,82 @@ func (m *CodeAgentModel) renderUserMessage(content string) string {
 		Width(maxWidth).
 		Padding(0, 1).
 		Render(joined)
+}
+
+func (m *CodeAgentModel) renderAssistantMessage(content string) string {
+	maxWidth := m.width - 8
+	if maxWidth < 20 {
+		maxWidth = 20
+	}
+
+	lines := wordWrap(content, maxWidth-2)
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+
+	joined := strings.Join(lines, "\n")
+	return lipgloss.NewStyle().
+		Foreground(m.styles.CommandHighlightStyle.GetForeground()).
+		Width(maxWidth).
+		Render(joined)
+}
+
+func (m *CodeAgentModel) chatHistoryAsLLM() []llm.Message {
+	messages := make([]llm.Message, 0, len(m.chatMessages))
+	for _, msg := range m.chatMessages {
+		if strings.TrimSpace(msg.Content) == "" {
+			continue
+		}
+		messages = append(messages, llm.Message{Role: msg.Role, Content: msg.Content})
+	}
+	return messages
+}
+
+func (m *CodeAgentModel) startChatStream(history []llm.Message) tea.Cmd {
+	if m.chatService == nil {
+		return func() tea.Msg { return chatStreamErrMsg{Err: fmt.Errorf("chat service not available")} }
+	}
+
+	providerID := m.selectedProvider
+	modelID := m.selectedModelID
+	streamCh := make(chan tea.Msg, 256)
+	m.streamCh = streamCh
+
+	go func() {
+		defer close(streamCh)
+		err := m.chatService.Stream(context.Background(), providerID, modelID, history, func(text string) error {
+			streamCh <- chatStreamChunkMsg{Text: text}
+			return nil
+		})
+		if err != nil {
+			streamCh <- chatStreamErrMsg{Err: err}
+			return
+		}
+		streamCh <- chatStreamDoneMsg{}
+	}()
+
+	return waitForStreamMsg(streamCh)
+}
+
+func waitForStreamMsg(ch <-chan tea.Msg) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return chatStreamDoneMsg{}
+		}
+		return msg
+	}
+}
+
+func parseModelSelectionKey(key string) (providerID string, modelID string, ok bool) {
+	parts := strings.SplitN(key, "::", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 // wordWrap wraps text to fit within the given width.
@@ -664,37 +843,25 @@ func max(a, b int) int {
 
 // ─── Model Loading ──────────────────────────────────────────────────
 
-// loadModels loads available models from authenticated providers.
+// loadModels loads available models from all connected providers.
 func (m *CodeAgentModel) loadModels() tea.Cmd {
 	return func() tea.Msg {
-		var models []ModelInfo
-
-		// Check if Kilo is authenticated
-		if m.authStorage != nil && m.authStorage.HasAuth("kilo") {
-			creds, err := m.authStorage.GetOAuthCredentials("kilo")
-			if err == nil {
-				gateway := llm.NewKiloGateway()
-				kiloModels, err := gateway.FetchModels(creds.Access)
-				if err == nil {
-					for _, model := range kiloModels {
-						models = append(models, ModelInfo{
-							ID:   model.ID,
-							Name: model.Name,
-						})
-					}
-				}
-			}
+		if m.chatService == nil {
+			return ModelsLoadedMsg{}
 		}
 
-		// If no authenticated providers, use defaults
-		if len(models) == 0 {
-			defaultModels := llm.KiloDefaultModels()
-			for _, model := range defaultModels {
-				models = append(models, ModelInfo{
-					ID:   model.ID,
-					Name: model.Name,
-				})
-			}
+		available, err := m.chatService.AvailableModels(context.Background())
+		if err != nil {
+			return ModelsLoadErrMsg{Err: err}
+		}
+
+		models := make([]ModelInfo, 0, len(available))
+		for _, model := range available {
+			models = append(models, ModelInfo{
+				Provider: model.Provider,
+				ID:       model.ID,
+				Name:     model.Name,
+			})
 		}
 
 		return ModelsLoadedMsg{Models: models}

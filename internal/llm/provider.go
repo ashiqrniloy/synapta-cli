@@ -35,10 +35,10 @@ func NewOpenAIProvider(id, name, baseURL, apiKey string, headers map[string]stri
 	}
 }
 
-func (p *OpenAIProvider) ID() string   { return p.id }
-func (p *OpenAIProvider) Name() string { return p.name }
+func (p *OpenAIProvider) ID() string       { return p.id }
+func (p *OpenAIProvider) Name() string     { return p.name }
 func (p *OpenAIProvider) Models() []*Model { return p.models }
-func (p *OpenAIProvider) HasAuth() bool { return p.apiKey != "" }
+func (p *OpenAIProvider) HasAuth() bool    { return p.apiKey != "" }
 
 func (p *OpenAIProvider) SetAPIKey(apiKey string) {
 	p.apiKey = apiKey
@@ -158,36 +158,24 @@ func (p *OpenAIProvider) setHeaders(req *http.Request) {
 
 func (p *OpenAIProvider) readStream(reader io.Reader, callback StreamCallback) error {
 	scanner := bufio.NewScanner(reader)
-	var buffer strings.Builder
-
 	for scanner.Scan() {
-		line := scanner.Text()
-
-		if line == "" {
-			if buffer.Len() > 0 {
-				if err := p.processSSELine(buffer.String(), callback); err != nil {
-					return err
-				}
-				buffer.Reset()
-			}
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || !strings.HasPrefix(line, "data:") {
 			continue
 		}
 
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
-			if data == "[DONE]" {
-				return nil
-			}
-			buffer.WriteString(data)
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" {
+			continue
 		}
-	}
+		if data == "[DONE]" {
+			return nil
+		}
 
-	if buffer.Len() > 0 {
-		if err := p.processSSELine(buffer.String(), callback); err != nil {
+		if err := p.processSSELine(data, callback); err != nil {
 			return err
 		}
 	}
-
 	return scanner.Err()
 }
 

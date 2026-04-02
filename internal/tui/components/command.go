@@ -40,19 +40,28 @@ func AvailableProviders() []CommandItem {
 	}
 }
 
-// ModelsFromSlice converts a slice of Model to CommandItems.
+// ModelsFromSlice converts a slice of ModelInfo to CommandItems.
 func ModelsFromSlice(models []ModelInfo) []CommandItem {
 	items := make([]CommandItem, len(models))
 	for i, m := range models {
-		items[i] = CommandItem{ID: m.ID, Name: m.Name}
+		items[i] = CommandItem{ID: m.Key(), Name: m.DisplayName()}
 	}
 	return items
 }
 
 // ModelInfo holds model display information.
 type ModelInfo struct {
-	ID   string
-	Name string
+	Provider string
+	ID       string
+	Name     string
+}
+
+func (m ModelInfo) Key() string {
+	return m.Provider + "::" + m.ID
+}
+
+func (m ModelInfo) DisplayName() string {
+	return m.Name + " (" + m.Provider + ")"
 }
 
 // ─── Messages ──────────────────────────────────────────────────────
@@ -66,12 +75,12 @@ type CommandActionMsg struct {
 
 // CommandPicker manages the inline command picker state.
 type CommandPicker struct {
-	active    bool
-	items     []CommandItem // current list
-	filtered  []CommandItem // filtered list
-	cursor    int           // selected index
-	path      []CommandStep // selections made so far
-	styles    *theme.Styles
+	active     bool
+	items      []CommandItem // current list
+	filtered   []CommandItem // filtered list
+	cursor     int           // selected index
+	path       []CommandStep // selections made so far
+	styles     *theme.Styles
 	maxVisible int // items to show (fixed at 5)
 }
 
