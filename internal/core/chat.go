@@ -2,10 +2,13 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
+	"github.com/synapta/synapta-cli/internal/core/tools"
 	"github.com/synapta/synapta-cli/internal/llm"
 	"github.com/synapta/synapta-cli/internal/oauth"
 )
@@ -15,19 +18,33 @@ const (
 	ProviderGitHubCopilot = "github-copilot"
 )
 
-// ChatService provides a generic interface to send/receive chat messages
-// with whichever LLM provider/model is currently selected.
+type ToolEventType string
+
+const (
+	ToolEventStart  ToolEventType = "start"
+	ToolEventUpdate ToolEventType = "update"
+	ToolEventEnd    ToolEventType = "end"
+)
+
+type ToolEvent struct {
+	Type      ToolEventType
+	CallID    string
+	ToolName  string
+	Output    string
+	IsError   bool
+	IsPartial bool
+}
+
+// ChatService provides chat + tool-calling runtime behavior.
 type ChatService struct {
-	auth *llm.AuthStorage
+	auth  *llm.AuthStorage
+	tools *tools.ToolSet
 }
 
-func NewChatService(auth *llm.AuthStorage) *ChatService {
-	return &ChatService{auth: auth}
+func NewChatService(auth *llm.AuthStorage, toolset *tools.ToolSet) *ChatService {
+	return &ChatService{auth: auth, tools: toolset}
 }
 
-// AvailableModels returns models that can be selected in the UI.
-// - Kilo returns authenticated models when a token is available, otherwise free models.
-// - GitHub Copilot returns models only when authenticated.
 func (s *ChatService) AvailableModels(ctx context.Context) ([]*llm.Model, error) {
 	_ = ctx
 
@@ -50,70 +67,214 @@ func (s *ChatService) AvailableModels(ctx context.Context) ([]*llm.Model, error)
 	return models, nil
 }
 
-// Stream sends messages to the selected provider/model and streams assistant deltas.
+// Stream runs a tool-capable assistant loop (pi-style):
+// assistant response -> execute requested tools -> continue until final assistant text.
 func (s *ChatService) Stream(
 	ctx context.Context,
 	providerID string,
 	modelID string,
 	messages []llm.Message,
 	onDelta func(text string) error,
+	onToolEvent func(event ToolEvent) error,
 ) error {
 	provider, err := s.providerFor(providerID)
 	if err != nil {
 		return err
 	}
 
-	streamReq := llm.ChatRequest{
-		Model:    modelID,
-		Messages: messages,
-		Stream:   true,
+	const maxToolRounds = 8
+
+	for round := 0; round < maxToolRounds; round++ {
+		assistantText, toolCalls, err := s.streamAssistantTurn(ctx, provider, modelID, messages)
+		if err != nil {
+			return err
+		}
+
+		if strings.TrimSpace(assistantText) != "" {
+			if err := onDelta(assistantText); err != nil {
+				return err
+			}
+		}
+
+		if len(toolCalls) == 0 {
+			if strings.TrimSpace(assistantText) == "" {
+				return fmt.Errorf("provider %q model %q returned empty content", providerID, modelID)
+			}
+			return nil
+		}
+
+		messages = append(messages, llm.Message{Role: "assistant", Content: assistantText, ToolCalls: toolCalls})
+
+		for _, tc := range toolCalls {
+			callID := tc.ID
+			if callID == "" {
+				callID = fmt.Sprintf("tool_%d_%s", round, tc.Function.Name)
+			}
+
+			if onToolEvent != nil {
+				_ = onToolEvent(ToolEvent{Type: ToolEventStart, CallID: callID, ToolName: tc.Function.Name})
+			}
+
+			toolResult, execErr := s.executeToolCall(ctx, tc, callID, onToolEvent)
+			if execErr != nil {
+				toolResult = map[string]any{"error": execErr.Error()}
+			}
+
+			payload, _ := json.Marshal(toolResult)
+			messages = append(messages, llm.Message{Role: "tool", ToolCallID: callID, Name: tc.Function.Name, Content: string(payload)})
+
+			if onToolEvent != nil {
+				output := toolResultText(toolResult)
+				_ = onToolEvent(ToolEvent{
+					Type:     ToolEventEnd,
+					CallID:   callID,
+					ToolName: tc.Function.Name,
+					Output:   output,
+					IsError:  execErr != nil,
+				})
+			}
+		}
 	}
 
-	receivedDelta := false
-	err = provider.ChatStream(ctx, streamReq, func(chunk llm.StreamChunk) error {
+	return fmt.Errorf("tool-calling loop exceeded %d rounds", maxToolRounds)
+}
+
+func (s *ChatService) streamAssistantTurn(ctx context.Context, provider llm.Provider, modelID string, messages []llm.Message) (string, []llm.ToolCall, error) {
+	streamReq := llm.ChatRequest{Model: modelID, Messages: messages, Stream: true, Tools: s.toolDefinitions(), ToolChoice: "auto"}
+
+	var contentBuilder strings.Builder
+	toolCallByIndex := map[int]*llm.ToolCall{}
+
+	err := provider.ChatStream(ctx, streamReq, func(chunk llm.StreamChunk) error {
 		for _, choice := range chunk.Choices {
-			piece := choice.Delta.Content
-			if piece == "" {
-				piece = choice.Message.Content
+			if choice.Delta.Content != "" {
+				contentBuilder.WriteString(choice.Delta.Content)
 			}
-			if piece == "" {
-				piece = choice.Text
-			}
-			if piece == "" {
-				continue
-			}
-			receivedDelta = true
-			if err := onDelta(piece); err != nil {
-				return err
+			for _, tc := range choice.Delta.ToolCalls {
+				existing := toolCallByIndex[tc.Index]
+				if existing == nil {
+					copyTC := tc
+					toolCallByIndex[tc.Index] = &copyTC
+					continue
+				}
+				if tc.ID != "" {
+					existing.ID = tc.ID
+				}
+				if tc.Type != "" {
+					existing.Type = tc.Type
+				}
+				if tc.Function.Name != "" {
+					existing.Function.Name = tc.Function.Name
+				}
+				if tc.Function.Arguments != "" {
+					existing.Function.Arguments += tc.Function.Arguments
+				}
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		return err
-	}
-	if receivedDelta {
-		return nil
+		return "", nil, err
 	}
 
-	// Fallback for providers/models that don't emit proper streaming deltas.
-	resp, err := provider.Chat(ctx, llm.ChatRequest{
-		Model:    modelID,
-		Messages: messages,
-		Stream:   false,
-	})
-	if err != nil {
-		return fmt.Errorf("stream produced no deltas and fallback chat failed: %w", err)
-	}
-	if resp == nil || len(resp.Choices) == 0 {
-		return fmt.Errorf("empty response from provider %q model %q", providerID, modelID)
+	toolCalls := make([]llm.ToolCall, 0, len(toolCallByIndex))
+	if len(toolCallByIndex) > 0 {
+		idx := make([]int, 0, len(toolCallByIndex))
+		for k := range toolCallByIndex {
+			idx = append(idx, k)
+		}
+		sort.Ints(idx)
+		for _, i := range idx {
+			toolCalls = append(toolCalls, *toolCallByIndex[i])
+		}
 	}
 
-	content := strings.TrimSpace(resp.Choices[0].Message.Content)
-	if content == "" {
-		return fmt.Errorf("provider %q model %q returned empty content", providerID, modelID)
+	if len(toolCalls) == 0 && strings.TrimSpace(contentBuilder.String()) == "" {
+		resp, err := provider.Chat(ctx, llm.ChatRequest{Model: modelID, Messages: messages, Stream: false, Tools: s.toolDefinitions(), ToolChoice: "auto"})
+		if err != nil {
+			return "", nil, fmt.Errorf("stream produced no output and fallback chat failed: %w", err)
+		}
+		if resp == nil || len(resp.Choices) == 0 {
+			return "", nil, fmt.Errorf("empty response")
+		}
+		return resp.Choices[0].Message.Content, resp.Choices[0].Message.ToolCalls, nil
 	}
-	return onDelta(content)
+
+	return contentBuilder.String(), toolCalls, nil
+}
+
+func (s *ChatService) executeToolCall(ctx context.Context, tc llm.ToolCall, callID string, onToolEvent func(event ToolEvent) error) (any, error) {
+	if s.tools == nil {
+		return nil, fmt.Errorf("tool set not configured")
+	}
+
+	switch tc.Function.Name {
+	case "read":
+		var in tools.ReadInput
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &in); err != nil {
+			return nil, fmt.Errorf("invalid read arguments: %w", err)
+		}
+		return s.tools.Read.Execute(ctx, in)
+	case "write":
+		var in tools.WriteInput
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &in); err != nil {
+			return nil, fmt.Errorf("invalid write arguments: %w", err)
+		}
+		return s.tools.Write.Execute(ctx, in)
+	case "bash":
+		var in tools.BashInput
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &in); err != nil {
+			return nil, fmt.Errorf("invalid bash arguments: %w", err)
+		}
+		return s.tools.Bash.Execute(ctx, in, func(update tools.Result) {
+			if onToolEvent == nil {
+				return
+			}
+			_ = onToolEvent(ToolEvent{
+				Type:      ToolEventUpdate,
+				CallID:    callID,
+				ToolName:  "bash",
+				Output:    toolResultText(update),
+				IsPartial: true,
+			})
+		})
+	default:
+		return nil, fmt.Errorf("unknown tool: %s", tc.Function.Name)
+	}
+}
+
+func toolResultText(v any) string {
+	switch r := v.(type) {
+	case tools.Result:
+		var b strings.Builder
+		for _, c := range r.Content {
+			if c.Type == tools.ContentPartText && c.Text != "" {
+				if b.Len() > 0 {
+					b.WriteString("\n")
+				}
+				b.WriteString(c.Text)
+			}
+		}
+		if b.Len() > 0 {
+			return b.String()
+		}
+		if r.Details != nil {
+			data, _ := json.MarshalIndent(r.Details, "", "  ")
+			return string(data)
+		}
+		return ""
+	default:
+		data, _ := json.MarshalIndent(v, "", "  ")
+		return string(data)
+	}
+}
+
+func (s *ChatService) toolDefinitions() []llm.ToolDefinition {
+	return []llm.ToolDefinition{
+		{Type: "function", Function: llm.ToolFunctionDefinition{Name: "read", Description: s.tools.Read.Description(), Parameters: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string", "description": "Path to the file to read (relative or absolute)"}, "offset": map[string]any{"type": "number", "description": "Line number to start reading from (1-indexed)"}, "limit": map[string]any{"type": "number", "description": "Maximum number of lines to read"}}, "required": []string{"path"}}}},
+		{Type: "function", Function: llm.ToolFunctionDefinition{Name: "write", Description: s.tools.Write.Description(), Parameters: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string", "description": "Path to the file to write (relative or absolute)"}, "content": map[string]any{"type": "string", "description": "Content to write to the file"}}, "required": []string{"path", "content"}}}},
+		{Type: "function", Function: llm.ToolFunctionDefinition{Name: "bash", Description: s.tools.Bash.Description(), Parameters: map[string]any{"type": "object", "properties": map[string]any{"command": map[string]any{"type": "string", "description": "Bash command to execute"}, "timeout": map[string]any{"type": "number", "description": "Timeout in seconds (optional, no default timeout)"}}, "required": []string{"command"}}}},
+	}
 }
 
 func (s *ChatService) providerFor(providerID string) (llm.Provider, error) {
@@ -125,7 +286,6 @@ func (s *ChatService) providerFor(providerID string) (llm.Provider, error) {
 			return nil, fmt.Errorf("creating kilo provider: %w", err)
 		}
 		return provider, nil
-
 	case ProviderGitHubCopilot:
 		token := s.tokenFromAuthOrEnv(ProviderGitHubCopilot, "GITHUB_COPILOT_API_KEY")
 		if token == "" {
@@ -135,9 +295,7 @@ func (s *ChatService) providerFor(providerID string) (llm.Provider, error) {
 		if baseURL == "" {
 			baseURL = "https://api.individual.githubcopilot.com"
 		}
-		provider := llm.NewGitHubCopilotProvider(baseURL, token, llm.GitHubCopilotDefaultModels())
-		return provider, nil
-
+		return llm.NewGitHubCopilotProvider(baseURL, token, llm.GitHubCopilotDefaultModels()), nil
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", providerID)
 	}
@@ -158,7 +316,6 @@ func (s *ChatService) tokenFromAuthOrEnv(providerID, envVar string) string {
 			}
 		}
 	}
-
 	if envVar == "" {
 		return ""
 	}

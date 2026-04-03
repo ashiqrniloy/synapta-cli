@@ -58,17 +58,49 @@ type CompatConfig struct {
 	MaxTokensField           *string `json:"maxTokensField,omitempty"`
 }
 
+// ToolFunctionDefinition describes a callable tool function.
+type ToolFunctionDefinition struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Parameters  any    `json:"parameters,omitempty"`
+}
+
+// ToolDefinition declares a tool for the model.
+type ToolDefinition struct {
+	Type     string                 `json:"type"`
+	Function ToolFunctionDefinition `json:"function"`
+}
+
+// ToolFunctionCall is the model-produced tool call payload.
+type ToolFunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// ToolCall represents a single function tool invocation.
+type ToolCall struct {
+	Index    int              `json:"index,omitempty"`
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function ToolFunctionCall `json:"function"`
+}
+
 // Message represents a chat message.
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Name       string     `json:"name,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // ChatRequest represents a request to the LLM.
 type ChatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream"`
+	Model      string           `json:"model"`
+	Messages   []Message        `json:"messages"`
+	Stream     bool             `json:"stream"`
+	Tools      []ToolDefinition `json:"tools,omitempty"`
+	ToolChoice any              `json:"tool_choice,omitempty"`
 }
 
 // ChatResponse represents a response from the LLM.

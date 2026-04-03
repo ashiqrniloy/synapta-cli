@@ -126,15 +126,37 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req ChatRequest, callba
 func (p *OpenAIProvider) buildRequestBody(req ChatRequest) map[string]any {
 	messages := make([]map[string]any, len(req.Messages))
 	for i, msg := range req.Messages {
-		messages[i] = map[string]any{
+		m := map[string]any{
 			"role":    msg.Role,
 			"content": msg.Content,
 		}
+		if msg.ToolCallID != "" {
+			m["tool_call_id"] = msg.ToolCallID
+		}
+		if msg.Name != "" {
+			m["name"] = msg.Name
+		}
+		if len(msg.ToolCalls) > 0 {
+			m["tool_calls"] = msg.ToolCalls
+		}
+		messages[i] = m
 	}
 
 	body := map[string]any{
 		"model":    req.Model,
 		"messages": messages,
+	}
+
+	if req.Stream {
+		body["stream"] = true
+	}
+	if len(req.Tools) > 0 {
+		body["tools"] = req.Tools
+		if req.ToolChoice != nil {
+			body["tool_choice"] = req.ToolChoice
+		} else {
+			body["tool_choice"] = "auto"
+		}
 	}
 
 	if p.compat != nil && p.compat.MaxTokensField != nil && *p.compat.MaxTokensField == "max_completion_tokens" {

@@ -48,15 +48,27 @@ type ModelSelectedMsg struct {
 	ModelName string
 }
 
-// ChatMessage represents a message in the chat.
+// ChatMessage represents a transcript entry in the chat.
 type ChatMessage struct {
-	Role    string // "user" or "assistant"
-	Content string
+	Role          string // "user", "assistant", "tool"
+	Content       string
+	ToolCallID    string
+	ToolName      string
+	ToolState     string // "running", "done", "error"
+	IsPartial     bool
+	ToolStartedAt time.Time
+	ToolEndedAt   time.Time
 }
 
 type chatStreamChunkMsg struct {
 	Text string
 }
+
+type toolEventMsg struct {
+	Event core.ToolEvent
+}
+
+type toolTickMsg struct{}
 
 type chatStreamDoneMsg struct{}
 
@@ -90,6 +102,8 @@ type CodeAgentModel struct {
 	chatMessages       []ChatMessage
 	isWorking          bool
 	activeAssistantIdx int
+	activeToolIndices  map[string]int
+	toolExpanded       map[string]bool
 	streamCh           <-chan tea.Msg
 	chatService        *core.ChatService
 	chatViewport       viewport.Model
@@ -114,6 +128,9 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	vp.SoftWrap = true
 	vp.FillHeight = true
 
+	cwd, _ := os.Getwd()
+	toolset := core.NewToolSet(cwd)
+
 	model := &CodeAgentModel{
 		styles:             styles,
 		ta:                 buildTextarea(t, cfg),
@@ -121,8 +138,10 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		cfg:                cfg,
 		picker:             NewCommandPicker(styles),
 		authStorage:        authStorage,
-		chatService:        core.NewChatService(authStorage),
+		chatService:        core.NewChatService(authStorage, toolset),
 		activeAssistantIdx: -1,
+		activeToolIndices:  map[string]int{},
+		toolExpanded:       map[string]bool{},
 		chatViewport:       vp,
 		chatAutoScroll:     true,
 	}
@@ -347,6 +366,55 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshChatViewport()
 		return m, waitForStreamMsg(m.streamCh)
 
+	case toolEventMsg:
+		e := msg.Event
+		switch e.Type {
+		case core.ToolEventStart:
+			m.chatMessages = append(m.chatMessages, ChatMessage{
+				Role:          "tool",
+				ToolCallID:    e.CallID,
+				ToolName:      e.ToolName,
+				ToolState:     "running",
+				Content:       "",
+				IsPartial:     true,
+				ToolStartedAt: time.Now(),
+			})
+			m.activeToolIndices[e.CallID] = len(m.chatMessages) - 1
+			m.toolExpanded[e.CallID] = false
+			m.refreshChatViewport()
+			return m, tea.Batch(waitForStreamMsg(m.streamCh), toolTickCmd())
+		case core.ToolEventUpdate:
+			if idx, ok := m.activeToolIndices[e.CallID]; ok && idx >= 0 && idx < len(m.chatMessages) {
+				m.chatMessages[idx].Content = e.Output
+				m.chatMessages[idx].IsPartial = true
+				m.chatMessages[idx].ToolState = "running"
+			}
+		case core.ToolEventEnd:
+			if idx, ok := m.activeToolIndices[e.CallID]; ok && idx >= 0 && idx < len(m.chatMessages) {
+				if strings.TrimSpace(e.Output) != "" {
+					m.chatMessages[idx].Content = e.Output
+				}
+				m.chatMessages[idx].IsPartial = false
+				m.chatMessages[idx].ToolEndedAt = time.Now()
+				if e.IsError {
+					m.chatMessages[idx].ToolState = "error"
+					m.toolExpanded[e.CallID] = true
+				} else {
+					m.chatMessages[idx].ToolState = "done"
+				}
+				delete(m.activeToolIndices, e.CallID)
+			}
+		}
+		m.refreshChatViewport()
+		return m, waitForStreamMsg(m.streamCh)
+
+	case toolTickMsg:
+		if m.hasRunningTool() {
+			m.refreshChatViewport()
+			return m, toolTickCmd()
+		}
+		return m, nil
+
 	case chatStreamDoneMsg:
 		if m.activeAssistantIdx >= 0 && m.activeAssistantIdx < len(m.chatMessages) {
 			if m.chatMessages[m.activeAssistantIdx].Content == assistantPlaceholder {
@@ -363,6 +431,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.firstChunkAt = time.Time{}
 		m.streamChunkCount = 0
 		m.streamCharCount = 0
+		m.activeToolIndices = map[string]int{}
 		m.refreshChatViewport()
 		return m, nil
 
@@ -377,6 +446,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.firstChunkAt = time.Time{}
 		m.streamChunkCount = 0
 		m.streamCharCount = 0
+		m.activeToolIndices = map[string]int{}
 		m.msgs = append(m.msgs, "[Chat] ✗ "+msg.Err.Error())
 		m.refreshChatViewport()
 		return m, nil
@@ -474,6 +544,15 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
+		// Toggle tool output expansion
+		if keyStr == "ctrl+o" {
+			if id, ok := m.lastToolCallID(); ok {
+				m.toolExpanded[id] = !m.toolExpanded[id]
+				m.refreshChatViewport()
+			}
+			return m, nil
+		}
+
 		// Chat scrolling
 		if keyStr == "pgup" || keyStr == "pageup" || keyStr == "ctrl+up" {
 			var cmd tea.Cmd
@@ -523,6 +602,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeAssistantIdx = len(m.chatMessages) - 1
 			m.isWorking = true
 			m.chatAutoScroll = true
+			m.activeToolIndices = map[string]int{}
 			m.streamStartedAt = time.Now()
 			m.firstChunkAt = time.Time{}
 			m.streamChunkCount = 0
@@ -630,7 +710,7 @@ func (m *CodeAgentModel) renderInputBox() string {
 }
 
 func (m *CodeAgentModel) renderInstructions() string {
-	instructionsText := "PgUp/PgDn scroll  │  Shift+Enter newline  │  Enter send  │  :=commands  │  Ctrl+C quit"
+	instructionsText := "PgUp/PgDn scroll  │  Ctrl+O toggle latest tool  │  Shift+Enter newline  │  Enter send  │  :=commands  │  Ctrl+C quit"
 	if m.selectedModelName != "" {
 		instructionsText += "  │  " + m.selectedModelName
 	}
@@ -685,6 +765,8 @@ func (m *CodeAgentModel) renderChatTranscript() string {
 			lines = append(lines, strings.TrimRight(m.renderUserMessage(msg.Content), "\n"))
 		case "assistant":
 			lines = append(lines, strings.TrimRight(m.renderAssistantMessage(msg.Content), "\n"))
+		case "tool":
+			lines = append(lines, strings.TrimRight(m.renderToolMessage(msg), "\n"))
 		}
 	}
 	return strings.Join(lines, "\n\n")
@@ -744,10 +826,78 @@ func (m *CodeAgentModel) renderAssistantMessage(content string) string {
 		Render(joined)
 }
 
+func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
+	maxWidth := m.width - 8
+	if maxWidth < 20 {
+		maxWidth = 20
+	}
+
+	state := msg.ToolState
+	if state == "" {
+		state = "running"
+	}
+
+	header := fmt.Sprintf("[%s] %s", strings.ToUpper(state), msg.ToolName)
+	body := strings.TrimSpace(msg.Content)
+	if body == "" {
+		body = "(no output yet)"
+	}
+
+	body = m.styleToolBody(msg.ToolName, state, body)
+	wrapped := wordWrap(body, maxWidth-4)
+	if len(wrapped) == 0 {
+		wrapped = []string{""}
+	}
+
+	expanded := msg.ToolCallID != "" && m.toolExpanded[msg.ToolCallID]
+	if !expanded {
+		previewLines := m.toolPreviewLines()
+		if len(wrapped) > previewLines {
+			hidden := len(wrapped) - previewLines
+			wrapped = wrapped[len(wrapped)-previewLines:]
+			hint := m.styles.MutedStyle.Render(fmt.Sprintf("... (%d earlier lines, Ctrl+O to expand)", hidden))
+			wrapped = append([]string{hint}, wrapped...)
+		}
+	}
+
+	body = strings.Join(wrapped, "\n")
+
+	var footer string
+	if !msg.ToolStartedAt.IsZero() {
+		end := msg.ToolEndedAt
+		label := "Took"
+		if end.IsZero() {
+			end = time.Now()
+			label = "Elapsed"
+		}
+		footer = "\n" + m.styles.MutedStyle.Render(fmt.Sprintf("%s %s", label, end.Sub(msg.ToolStartedAt).Round(time.Second)))
+	}
+
+	color := m.styles.MutedStyle.GetForeground()
+	if state == "error" {
+		color = lipgloss.Color("9")
+	}
+	if state == "done" {
+		color = m.styles.CommandHighlightStyle.GetForeground()
+	}
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(color).
+		Foreground(color).
+		Padding(0, 1).
+		Width(maxWidth)
+
+	return box.Render(header + "\n" + body + footer)
+}
+
 func (m *CodeAgentModel) chatHistoryAsLLM() []llm.Message {
 	messages := make([]llm.Message, 0, len(m.chatMessages))
 	for _, msg := range m.chatMessages {
-		if strings.TrimSpace(msg.Content) == "" {
+		if msg.Role != "user" && msg.Role != "assistant" {
+			continue
+		}
+		if strings.TrimSpace(msg.Content) == "" || msg.Content == assistantPlaceholder {
 			continue
 		}
 		messages = append(messages, llm.Message{Role: msg.Role, Content: msg.Content})
@@ -767,10 +917,20 @@ func (m *CodeAgentModel) startChatStream(history []llm.Message) tea.Cmd {
 
 	go func() {
 		defer close(streamCh)
-		err := m.chatService.Stream(context.Background(), providerID, modelID, history, func(text string) error {
-			streamCh <- chatStreamChunkMsg{Text: text}
-			return nil
-		})
+		err := m.chatService.Stream(
+			context.Background(),
+			providerID,
+			modelID,
+			history,
+			func(text string) error {
+				streamCh <- chatStreamChunkMsg{Text: text}
+				return nil
+			},
+			func(event core.ToolEvent) error {
+				streamCh <- toolEventMsg{Event: event}
+				return nil
+			},
+		)
 		if err != nil {
 			streamCh <- chatStreamErrMsg{Err: err}
 			return
@@ -792,6 +952,72 @@ func waitForStreamMsg(ch <-chan tea.Msg) tea.Cmd {
 		}
 		return msg
 	}
+}
+
+func toolTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(_ time.Time) tea.Msg {
+		return toolTickMsg{}
+	})
+}
+
+func (m *CodeAgentModel) hasRunningTool() bool {
+	for _, msg := range m.chatMessages {
+		if msg.Role == "tool" && msg.ToolState == "running" {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *CodeAgentModel) lastToolCallID() (string, bool) {
+	for i := len(m.chatMessages) - 1; i >= 0; i-- {
+		msg := m.chatMessages[i]
+		if msg.Role == "tool" && msg.ToolCallID != "" {
+			return msg.ToolCallID, true
+		}
+	}
+	return "", false
+}
+
+func (m *CodeAgentModel) toolPreviewLines() int {
+	h := m.chatViewport.Height()
+	if h <= 0 {
+		return 10
+	}
+	lines := h / 3
+	if lines < 5 {
+		lines = 5
+	}
+	if lines > 20 {
+		lines = 20
+	}
+	return lines
+}
+
+func (m *CodeAgentModel) styleToolBody(toolName, state, body string) string {
+	if state == "error" {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(body)
+	}
+	switch toolName {
+	case "write":
+		if strings.Contains(strings.ToLower(body), "successfully wrote") {
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render(body)
+		}
+	case "read":
+		lines := strings.Split(body, "\n")
+		for i, line := range lines {
+			trim := strings.TrimSpace(line)
+			if strings.HasPrefix(trim, "[") && strings.HasSuffix(trim, "]") {
+				lines[i] = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Render(line)
+			}
+		}
+		return strings.Join(lines, "\n")
+	case "bash":
+		if strings.Contains(body, "Full output:") {
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Render(body)
+		}
+	}
+	return body
 }
 
 func parseModelSelectionKey(key string) (providerID string, modelID string, ok bool) {
