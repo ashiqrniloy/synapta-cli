@@ -19,6 +19,7 @@ type Styles struct {
 	BaseStyle                 lipgloss.Style
 	CommandHighlightStyle     lipgloss.Style
 	InteractionHighlightStyle lipgloss.Style
+	SystemMessageStyle        lipgloss.Style
 }
 
 // NewStyles creates a Styles set from the given theme config.
@@ -58,6 +59,17 @@ func NewStyles(t config.Theme) *Styles {
 	intHlColor := lipgloss.Color(interactionHighlightColor)
 	interactionBg := blendToward(intHlColor, baseBgColor, 1.0-interactionHighlightOpacity)
 
+	systemMessageColor := t.SystemMessageColor
+	if systemMessageColor == "" {
+		systemMessageColor = t.Secondary
+	}
+	systemMessageOpacity := t.SystemMessageOpacity
+	if systemMessageOpacity == 0 {
+		systemMessageOpacity = 0.22
+	}
+	sysColor := lipgloss.Color(systemMessageColor)
+	systemBg := blendToward(sysColor, baseBgColor, 1.0-systemMessageOpacity)
+
 	return &Styles{
 		BaseStyle: lipgloss.NewStyle(),
 		TitleStyle: lipgloss.NewStyle().
@@ -83,6 +95,12 @@ func NewStyles(t config.Theme) *Styles {
 		InteractionHighlightStyle: lipgloss.NewStyle().
 			Foreground(fgColor).
 			Background(interactionBg),
+		SystemMessageStyle: lipgloss.NewStyle().
+			Foreground(fgColor).
+			Background(systemBg).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(sysColor).
+			Padding(0, 1),
 	}
 }
 

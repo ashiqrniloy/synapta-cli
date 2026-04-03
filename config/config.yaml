@@ -45,3 +45,5 @@ themes:
     highlight_opacity: 0.2       # Opacity of highlight background (0.0-1.0)
     interaction_highlight_color: "#d8a657"   # Base color for user messages
     interaction_highlight_opacity: 0.15      # Opacity of message background (0.0-1.0)
+    system_message_color: "#89b482"          # Base color for contextual system messages
+    system_message_opacity: 0.22             # Opacity of system message background (0.0-1.0)

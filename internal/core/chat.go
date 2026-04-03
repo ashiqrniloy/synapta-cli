@@ -82,9 +82,10 @@ func (s *ChatService) Stream(
 		return err
 	}
 
-	const maxToolRounds = 8
-
-	for round := 0; round < maxToolRounds; round++ {
+	for round := 0; ; round++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		assistantText, toolCalls, err := s.streamAssistantTurn(ctx, provider, modelID, messages, onDelta)
 		if err != nil {
 			return err
@@ -130,7 +131,6 @@ func (s *ChatService) Stream(
 		}
 	}
 
-	return fmt.Errorf("tool-calling loop exceeded %d rounds", maxToolRounds)
 }
 
 func (s *ChatService) streamAssistantTurn(ctx context.Context, provider llm.Provider, modelID string, messages []llm.Message, onDelta func(text string) error) (string, []llm.ToolCall, error) {

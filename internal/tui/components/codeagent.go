@@ -52,8 +52,9 @@ type ModelSelectedMsg struct {
 
 // ChatMessage represents a transcript entry in the chat.
 type ChatMessage struct {
-	Role          string // "user", "assistant", "tool"
+	Role          string // "user", "assistant", "tool", "system"
 	Content       string
+	SystemKind    string // "info", "working", "done", "error"
 	ToolCallID    string
 	ToolName      string
 	ToolState     string // "running", "done", "error"
@@ -90,9 +91,8 @@ type bashCommandDoneMsg struct {
 }
 
 const (
-	assistantPlaceholder = "Working..."
-	inputModeChat        = "chat"
-	inputModeBash        = "bash"
+	inputModeChat = "chat"
+	inputModeBash = "bash"
 )
 
 // CodeAgentModel is the main TUI model for the Synapta Code agent.
@@ -103,7 +103,6 @@ type CodeAgentModel struct {
 	ta          textarea.Model
 	quit        bool
 	borderColor string
-	msgs        []string
 	cfg         *config.AppConfig
 	authStorage *llm.AuthStorage
 
@@ -116,19 +115,20 @@ type CodeAgentModel struct {
 	selectedProvider  string
 
 	// Chat messages
-	chatMessages       []ChatMessage
-	isWorking          bool
-	activeAssistantIdx int
-	activeToolIndices  map[string]int
-	toolExpanded       map[string]bool
-	streamCh           <-chan tea.Msg
-	chatService        *core.ChatService
-	chatViewport       viewport.Model
-	chatAutoScroll     bool
-	streamStartedAt    time.Time
-	firstChunkAt       time.Time
-	streamChunkCount   int
-	streamCharCount    int
+	chatMessages          []ChatMessage
+	isWorking             bool
+	activeAssistantIdx    int
+	activeSystemStatusIdx int
+	activeToolIndices     map[string]int
+	toolExpanded          map[string]bool
+	streamCh              <-chan tea.Msg
+	chatService           *core.ChatService
+	chatViewport          viewport.Model
+	chatAutoScroll        bool
+	streamStartedAt       time.Time
+	firstChunkAt          time.Time
+	streamChunkCount      int
+	streamCharCount       int
 
 	inputMode       string
 	currentCwd      string
@@ -154,20 +154,21 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	toolset := core.NewToolSet(cwd)
 
 	model := &CodeAgentModel{
-		styles:             styles,
-		ta:                 buildTextarea(t, cfg),
-		borderColor:        t.Border,
-		cfg:                cfg,
-		picker:             NewCommandPicker(styles),
-		authStorage:        authStorage,
-		chatService:        core.NewChatService(authStorage, toolset),
-		activeAssistantIdx: -1,
-		activeToolIndices:  map[string]int{},
-		toolExpanded:       map[string]bool{},
-		chatViewport:       vp,
-		chatAutoScroll:     true,
-		inputMode:          inputModeChat,
-		currentCwd:         cwd,
+		styles:                styles,
+		ta:                    buildTextarea(t, cfg),
+		borderColor:           t.Border,
+		cfg:                   cfg,
+		picker:                NewCommandPicker(styles),
+		authStorage:           authStorage,
+		chatService:           core.NewChatService(authStorage, toolset),
+		activeAssistantIdx:    -1,
+		activeSystemStatusIdx: -1,
+		activeToolIndices:     map[string]int{},
+		toolExpanded:          map[string]bool{},
+		chatViewport:          vp,
+		chatAutoScroll:        true,
+		inputMode:             inputModeChat,
+		currentCwd:            cwd,
 	}
 
 	if cfg.Provider.Default != "" && cfg.Provider.Model != "" {
@@ -178,7 +179,7 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 
 	// Check if already authenticated and show model count
 	if authStorage != nil && authStorage.HasAuth("kilo") {
-		model.msgs = append(model.msgs, "[Kilo] ✓ Authenticated")
+		model.appendSystemMessage("[Kilo] ✓ Authenticated", "done")
 	}
 
 	model.applyInputMode(inputModeChat)
@@ -313,7 +314,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "bash":
 			m.clearCommandMode()
 			m.applyInputMode(inputModeBash)
-			m.msgs = append(m.msgs, "[Bash] Mode enabled. Enter a command and press Enter.")
+			m.appendSystemMessage("[Bash] Mode enabled. Enter a command and press Enter.", "info")
 			return m, nil
 		case "add-provider":
 			m.clearCommandMode()
@@ -321,16 +322,16 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				providerID := msg.Path[1].ID
 				if providerID == "kilo" {
 					// Start Kilo Gateway OAuth flow
-					m.msgs = append(m.msgs, "[Kilo] Starting authentication...")
+					m.appendSystemMessage("[Kilo] Starting authentication...", "working")
 					return m, m.startKiloAuth()
 				}
-				m.msgs = append(m.msgs, "[Add Provider] Selected: "+msg.Path[1].Name)
+				m.appendSystemMessage("[Add Provider] Selected: "+msg.Path[1].Name, "info")
 			}
 		case "set-model":
 			if len(msg.Path) > 1 {
 				providerID, modelID, ok := parseModelSelectionKey(msg.Path[1].ID)
 				if !ok {
-					m.msgs = append(m.msgs, "[Model] Invalid selection")
+					m.appendSystemMessage("[Model] Invalid selection", "error")
 					m.clearCommandMode()
 					return m, nil
 				}
@@ -340,11 +341,11 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedModelName = msg.Path[1].Name
 				if m.cfg != nil {
 					if err := m.cfg.SetProvider(providerID, modelID); err != nil {
-						m.msgs = append(m.msgs, "[Model] Warning: failed to save config: "+err.Error())
+						m.appendSystemMessage("[Model] Warning: failed to save config: "+err.Error(), "error")
 					}
 				}
 				m.clearCommandMode()
-				m.msgs = append(m.msgs, "[Model] Selected: "+msg.Path[1].Name)
+				m.appendSystemMessage("[Model] Selected: "+msg.Path[1].Name, "done")
 			} else {
 				// Need to load models first
 				return m, m.loadModels()
@@ -354,7 +355,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ModelsLoadedMsg:
 		if len(msg.Models) == 0 {
-			m.msgs = append(m.msgs, "[Model] No models available. Add a provider first.")
+			m.appendSystemMessage("[Model] No models available. Add a provider first.", "info")
 			m.clearCommandMode()
 			return m, nil
 		}
@@ -366,25 +367,25 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ModelsLoadErrMsg:
-		m.msgs = append(m.msgs, "[Model] ✗ "+msg.Err.Error())
+		m.appendSystemMessage("[Model] ✗ "+msg.Err.Error(), "error")
 		m.clearCommandMode()
 		return m, nil
 
 	case KiloAuthProgressMsg:
-		m.msgs = append(m.msgs, "[Kilo] "+string(msg))
+		m.appendSystemMessage("[Kilo] "+string(msg), "info")
 		return m, nil
 
 	case KiloAuthCompleteMsg:
 		if msg.Err != nil {
 			// Split error message into multiple lines for readability
 			errLines := strings.Split(msg.Err.Error(), "\n")
-			m.msgs = append(m.msgs, "[Kilo] ✗ Authentication failed:")
+			m.appendSystemMessage("[Kilo] ✗ Authentication failed:", "error")
 			for _, line := range errLines {
-				m.msgs = append(m.msgs, "[Kilo]   "+line)
+				m.appendSystemMessage("[Kilo]   "+line, "error")
 			}
 		} else {
-			m.msgs = append(m.msgs, "[Kilo] ✓ Authentication successful! "+msg.Email)
-			m.msgs = append(m.msgs, "[Kilo] ✓ "+fmt.Sprintf("%d models available", msg.ModelCount))
+			m.appendSystemMessage("[Kilo] ✓ Authentication successful! "+msg.Email, "done")
+			m.appendSystemMessage("[Kilo] ✓ "+fmt.Sprintf("%d models available", msg.ModelCount), "done")
 		}
 		return m, nil
 
@@ -395,14 +396,9 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamChunkCount++
 		m.streamCharCount += len(msg.Text)
 		if m.activeAssistantIdx < 0 || m.activeAssistantIdx >= len(m.chatMessages) {
-			m.chatMessages = append(m.chatMessages, ChatMessage{Role: "assistant", Content: ""})
-			m.activeAssistantIdx = len(m.chatMessages) - 1
+			m.activeAssistantIdx = m.appendChatMessage(ChatMessage{Role: "assistant", Content: ""})
 		}
-		if m.chatMessages[m.activeAssistantIdx].Content == assistantPlaceholder {
-			m.chatMessages[m.activeAssistantIdx].Content = msg.Text
-		} else {
-			m.chatMessages[m.activeAssistantIdx].Content += msg.Text
-		}
+		m.chatMessages[m.activeAssistantIdx].Content += msg.Text
 		m.refreshChatViewport()
 		return m, waitForStreamMsg(m.streamCh)
 
@@ -410,11 +406,8 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		e := msg.Event
 		switch e.Type {
 		case core.ToolEventStart:
-			if m.activeAssistantIdx >= 0 && m.activeAssistantIdx < len(m.chatMessages) && m.chatMessages[m.activeAssistantIdx].Content == assistantPlaceholder {
-				m.chatMessages = append(m.chatMessages[:m.activeAssistantIdx], m.chatMessages[m.activeAssistantIdx+1:]...)
-			}
 			m.activeAssistantIdx = -1
-			m.chatMessages = append(m.chatMessages, ChatMessage{
+			idx := m.appendChatMessage(ChatMessage{
 				Role:          "tool",
 				ToolCallID:    e.CallID,
 				ToolName:      e.ToolName,
@@ -423,7 +416,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				IsPartial:     true,
 				ToolStartedAt: time.Now(),
 			})
-			m.activeToolIndices[e.CallID] = len(m.chatMessages) - 1
+			m.activeToolIndices[e.CallID] = idx
 			m.toolExpanded[e.CallID] = false
 			m.refreshChatViewport()
 			return m, tea.Batch(waitForStreamMsg(m.streamCh), toolTickCmd())
@@ -460,11 +453,6 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case chatStreamDoneMsg:
-		if m.activeAssistantIdx >= 0 && m.activeAssistantIdx < len(m.chatMessages) {
-			if m.chatMessages[m.activeAssistantIdx].Content == assistantPlaceholder {
-				m.chatMessages[m.activeAssistantIdx].Content = ""
-			}
-		}
 		elapsed := time.Duration(0)
 		if !m.streamStartedAt.IsZero() {
 			elapsed = time.Since(m.streamStartedAt)
@@ -479,9 +467,9 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamCharCount = 0
 		m.activeToolIndices = map[string]int{}
 		if elapsed > 0 {
-			m.msgs = append(m.msgs, fmt.Sprintf("[Chat] ✓ Done in %s", elapsed.Round(time.Millisecond)))
+			m.finalizeWorkingSystemMessage(fmt.Sprintf("[Chat] ✓ Done in %s", elapsed.Round(time.Millisecond)), "done")
 		} else {
-			m.msgs = append(m.msgs, "[Chat] ✓ Done")
+			m.finalizeWorkingSystemMessage("[Chat] ✓ Done", "done")
 		}
 		m.refreshChatViewport()
 		return m, nil
@@ -496,7 +484,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamChunkCount = 0
 		m.streamCharCount = 0
 		m.activeToolIndices = map[string]int{}
-		m.msgs = append(m.msgs, "[Chat] ✗ "+msg.Err.Error())
+		m.finalizeWorkingSystemMessage("[Chat] ✗ "+msg.Err.Error(), "error")
 		m.refreshChatViewport()
 		return m, nil
 
@@ -517,7 +505,12 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			state = "error"
 		}
-		m.chatMessages = append(m.chatMessages, ChatMessage{
+		if msg.Err != nil {
+			m.finalizeWorkingSystemMessage("[Bash] ✗ Command failed", "error")
+		} else {
+			m.finalizeWorkingSystemMessage("[Bash] ✓ Command finished", "done")
+		}
+		m.appendChatMessage(ChatMessage{
 			Role:          "tool",
 			ToolName:      "bash",
 			ToolState:     state,
@@ -526,7 +519,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ToolEndedAt:   msg.EndedAt,
 		})
 		if msg.IsCD && msg.Err == nil {
-			m.msgs = append(m.msgs, "[Bash] cwd: "+m.currentCwd)
+			m.appendSystemMessage("[Bash] cwd: "+m.currentCwd, "info")
 		}
 		m.refreshChatViewport()
 		return m, nil
@@ -534,6 +527,11 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case workingTickMsg:
 		if m.isWorking || m.isExecutingBash {
 			m.workingFrame = (m.workingFrame + 1) % 4
+			if m.isWorking {
+				m.updateWorkingSystemMessage(m.chatWorkingStatusText())
+			} else if m.isExecutingBash {
+				m.updateWorkingSystemMessage(m.bashWorkingStatusText())
+			}
 			m.refreshChatViewport()
 			return m, workingTickCmd()
 		}
@@ -634,7 +632,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if keyStr == "esc" && m.inputMode == inputModeBash && strings.TrimSpace(m.ta.Value()) == "" {
 			m.applyInputMode(inputModeChat)
-			m.msgs = append(m.msgs, "[Bash] Mode disabled")
+			m.appendSystemMessage("[Bash] Mode disabled", "info")
 			return m, nil
 		}
 
@@ -687,24 +685,24 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			if m.inputMode == inputModeBash {
 				started := time.Now()
-				m.chatMessages = append(m.chatMessages, ChatMessage{Role: "user", Content: "$ " + text})
+				m.appendChatMessage(ChatMessage{Role: "user", Content: "$ " + text})
 				m.ta.SetValue("")
 				m.isExecutingBash = true
 				m.workingFrame = 0
+				m.setWorkingSystemMessage(m.bashWorkingStatusText())
 				m.refreshChatViewport()
 				return m, tea.Batch(m.executeBashCommand(text, started), workingTickCmd())
 			}
 
 			if m.selectedProvider == "" || m.selectedModelID == "" {
-				m.msgs = append(m.msgs, "[Chat] Select a model first via :set-model")
+				m.appendSystemMessage("[Chat] Select a model first via :set-model", "error")
 				return m, nil
 			}
 
-			m.chatMessages = append(m.chatMessages, ChatMessage{Role: "user", Content: text})
+			m.appendChatMessage(ChatMessage{Role: "user", Content: text})
 			history := m.chatHistoryAsLLM()
 
-			m.chatMessages = append(m.chatMessages, ChatMessage{Role: "assistant", Content: assistantPlaceholder})
-			m.activeAssistantIdx = len(m.chatMessages) - 1
+			m.activeAssistantIdx = -1
 			m.isWorking = true
 			m.chatAutoScroll = true
 			m.activeToolIndices = map[string]int{}
@@ -712,9 +710,9 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.firstChunkAt = time.Time{}
 			m.streamChunkCount = 0
 			m.streamCharCount = 0
-			m.msgs = append(m.msgs, fmt.Sprintf("[Chat] Working with %s/%s...", m.selectedProvider, m.selectedModelID))
 			m.ta.SetValue("")
 			m.workingFrame = 0
+			m.setWorkingSystemMessage(m.chatWorkingStatusText())
 			m.recalculateLayout()
 			m.refreshChatViewport()
 
@@ -756,8 +754,7 @@ func (m CodeAgentModel) View() tea.View {
 		return v
 	}
 
-	title := strings.TrimRight(m.styles.TitleStyle.Render("Synapta Code"), "\n")
-	statusView := strings.TrimRight(m.renderStatusView(), "\n")
+	title := strings.TrimRight(m.renderProminentTitle(), "\n")
 	pickerView := ""
 	if m.picker.IsActive() {
 		pickerView = strings.TrimRight(m.picker.View(max(m.width-6, 20)), "\n")
@@ -766,11 +763,7 @@ func (m CodeAgentModel) View() tea.View {
 	instructions := strings.TrimRight(m.renderInstructions(), "\n")
 
 	var sections []string
-	sections = append(sections, title)
-	if statusView != "" {
-		sections = append(sections, statusView)
-	}
-	sections = append(sections, "", m.chatViewport.View(), "")
+	sections = append(sections, "", title, "", m.chatViewport.View(), "")
 	if pickerView != "" {
 		sections = append(sections, pickerView)
 	}
@@ -791,34 +784,14 @@ func countLines(s string) int {
 	return strings.Count(s, "\n") + 1
 }
 
-func (m *CodeAgentModel) renderStatusView() string {
-	start := 0
-	if len(m.msgs) > 6 {
-		start = len(m.msgs) - 6
-	}
-	lines := make([]string, 0, 8)
-	for _, msg := range m.msgs[start:] {
-		lines = append(lines, m.styles.MutedStyle.Render(msg))
-	}
-
-	if m.isWorking {
-		spinner := []string{"⠋", "⠙", "⠹", "⠸"}[m.workingFrame%4]
-		elapsed := time.Since(m.streamStartedAt).Round(time.Second)
-		if m.streamStartedAt.IsZero() {
-			elapsed = 0
-		}
-		status := fmt.Sprintf("[Chat] %s Working... %s", spinner, elapsed)
-		lines = append(lines, m.styles.MutedStyle.Render(status))
-	} else if m.isExecutingBash {
-		spinner := []string{"⠋", "⠙", "⠹", "⠸"}[m.workingFrame%4]
-		status := fmt.Sprintf("[Bash] %s Running command...", spinner)
-		lines = append(lines, m.styles.MutedStyle.Render(status))
-	}
-
-	if len(lines) == 0 {
-		return ""
-	}
-	return strings.Join(lines, "\n")
+func (m *CodeAgentModel) renderProminentTitle() string {
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Align(lipgloss.Center).
+		Bold(true).
+		Foreground(m.styles.CommandHighlightStyle.GetForeground()).
+		Background(m.styles.CommandHighlightStyle.GetBackground()).
+		Render("█ SYNAPTA CODE █")
 }
 
 func (m *CodeAgentModel) renderInputBox() string {
@@ -856,8 +829,6 @@ func (m *CodeAgentModel) recalculateLayout() {
 
 	m.ta.SetWidth(max(m.width-6, 40))
 
-	titleH := countLines(m.styles.TitleStyle.Render("Synapta Code"))
-	statusH := countLines(m.renderStatusView())
 	pickerH := 0
 	if m.picker.IsActive() {
 		pickerH = countLines(m.picker.View(max(m.width-6, 20)))
@@ -865,10 +836,7 @@ func (m *CodeAgentModel) recalculateLayout() {
 	inputH := countLines(m.renderInputBox())
 	instructionsH := countLines(m.renderInstructions())
 
-	reserved := titleH + statusH + inputH + instructionsH + 2 // two spacer lines around chat
-	if statusH > 0 {
-		reserved++
-	}
+	reserved := 3 + inputH + instructionsH + 2 // 3 title rows + spacers around chat
 	if pickerH > 0 {
 		reserved += pickerH
 	}
@@ -895,6 +863,8 @@ func (m *CodeAgentModel) renderChatTranscript() string {
 			lines = append(lines, strings.TrimRight(m.renderAssistantMessage(msg.Content), "\n"))
 		case "tool":
 			lines = append(lines, strings.TrimRight(m.renderToolMessage(msg), "\n"))
+		case "system":
+			lines = append(lines, strings.TrimRight(m.renderSystemMessage(msg), "\n"))
 		}
 	}
 	return strings.Join(lines, "\n\n")
@@ -906,6 +876,77 @@ func (m *CodeAgentModel) refreshChatViewport() {
 	if m.chatAutoScroll {
 		m.chatViewport.GotoBottom()
 	}
+}
+
+func (m *CodeAgentModel) appendChatMessage(msg ChatMessage) int {
+	insertAt := len(m.chatMessages)
+	if m.activeSystemStatusIdx >= 0 && m.activeSystemStatusIdx < len(m.chatMessages) {
+		insertAt = m.activeSystemStatusIdx
+		m.chatMessages = append(m.chatMessages, ChatMessage{})
+		copy(m.chatMessages[insertAt+1:], m.chatMessages[insertAt:])
+		m.chatMessages[insertAt] = msg
+		m.activeSystemStatusIdx++
+		if m.activeAssistantIdx >= insertAt {
+			m.activeAssistantIdx++
+		}
+		for id, idx := range m.activeToolIndices {
+			if idx >= insertAt {
+				m.activeToolIndices[id] = idx + 1
+			}
+		}
+	} else {
+		m.chatMessages = append(m.chatMessages, msg)
+	}
+	m.chatAutoScroll = true
+	return insertAt
+}
+
+func (m *CodeAgentModel) appendSystemMessage(content, kind string) {
+	m.appendChatMessage(ChatMessage{Role: "system", Content: content, SystemKind: kind})
+	m.refreshChatViewport()
+}
+
+func (m *CodeAgentModel) setWorkingSystemMessage(content string) {
+	if m.activeSystemStatusIdx >= 0 && m.activeSystemStatusIdx < len(m.chatMessages) {
+		m.chatMessages[m.activeSystemStatusIdx].Content = content
+		m.chatMessages[m.activeSystemStatusIdx].SystemKind = "working"
+		return
+	}
+	m.activeSystemStatusIdx = len(m.chatMessages)
+	m.chatMessages = append(m.chatMessages, ChatMessage{Role: "system", Content: content, SystemKind: "working"})
+	m.chatAutoScroll = true
+}
+
+func (m *CodeAgentModel) updateWorkingSystemMessage(content string) {
+	if m.activeSystemStatusIdx >= 0 && m.activeSystemStatusIdx < len(m.chatMessages) {
+		m.chatMessages[m.activeSystemStatusIdx].Content = content
+		m.chatMessages[m.activeSystemStatusIdx].SystemKind = "working"
+	}
+}
+
+func (m *CodeAgentModel) finalizeWorkingSystemMessage(content, kind string) {
+	if m.activeSystemStatusIdx >= 0 && m.activeSystemStatusIdx < len(m.chatMessages) {
+		m.chatMessages[m.activeSystemStatusIdx].Content = content
+		m.chatMessages[m.activeSystemStatusIdx].SystemKind = kind
+		m.activeSystemStatusIdx = -1
+		m.chatAutoScroll = true
+		return
+	}
+	m.appendSystemMessage(content, kind)
+}
+
+func (m *CodeAgentModel) chatWorkingStatusText() string {
+	spinner := []string{"⠋", "⠙", "⠹", "⠸"}[m.workingFrame%4]
+	elapsed := time.Since(m.streamStartedAt).Round(time.Second)
+	if m.streamStartedAt.IsZero() {
+		elapsed = 0
+	}
+	return fmt.Sprintf("[Chat] %s Working with %s/%s... %s", spinner, m.selectedProvider, m.selectedModelID, elapsed)
+}
+
+func (m *CodeAgentModel) bashWorkingStatusText() string {
+	spinner := []string{"⠋", "⠙", "⠹", "⠸"}[m.workingFrame%4]
+	return fmt.Sprintf("[Bash] %s Running command...", spinner)
 }
 
 // renderUserMessage renders a user message with interaction highlight.
@@ -952,6 +993,32 @@ func (m *CodeAgentModel) renderAssistantMessage(content string) string {
 		Foreground(m.styles.CommandHighlightStyle.GetForeground()).
 		Width(maxWidth).
 		Render(joined)
+}
+
+func (m *CodeAgentModel) renderSystemMessage(msg ChatMessage) string {
+	maxWidth := m.width - 8
+	if maxWidth < 20 {
+		maxWidth = 20
+	}
+
+	lines := wordWrap(strings.TrimSpace(msg.Content), maxWidth-4)
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+
+	rendered := strings.Join(lines, "\n")
+	style := m.styles.SystemMessageStyle.Width(maxWidth)
+
+	switch msg.SystemKind {
+	case "error":
+		style = style.BorderForeground(lipgloss.Color("9"))
+	case "done":
+		style = style.BorderForeground(m.styles.SuccessStyle.GetForeground())
+	case "working":
+		style = style.BorderForeground(m.styles.CommandHighlightStyle.GetForeground())
+	}
+
+	return style.Render(rendered)
 }
 
 func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
@@ -1031,7 +1098,7 @@ func (m *CodeAgentModel) chatHistoryAsLLM() []llm.Message {
 		if msg.Role != "user" && msg.Role != "assistant" {
 			continue
 		}
-		if strings.TrimSpace(msg.Content) == "" || msg.Content == assistantPlaceholder {
+		if strings.TrimSpace(msg.Content) == "" {
 			continue
 		}
 		messages = append(messages, llm.Message{Role: msg.Role, Content: msg.Content})

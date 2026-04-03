@@ -43,6 +43,8 @@ type Theme struct {
 	HighlightOpacity            float64 `mapstructure:"highlight_opacity"`
 	InteractionHighlightColor   string  `mapstructure:"interaction_highlight_color"`
 	InteractionHighlightOpacity float64 `mapstructure:"interaction_highlight_opacity"`
+	SystemMessageColor          string  `mapstructure:"system_message_color"`
+	SystemMessageOpacity        float64 `mapstructure:"system_message_opacity"`
 }
 
 func defaultTheme() Theme {
@@ -62,8 +64,10 @@ func defaultTheme() Theme {
 		CursorBG:                    "#a9b665",
 		HighlightColor:              "#a9b665",
 		HighlightOpacity:            0.2,
-		InteractionHighlightColor:    "#d8a657",
+		InteractionHighlightColor:   "#d8a657",
 		InteractionHighlightOpacity: 0.15,
+		SystemMessageColor:          "#89b482",
+		SystemMessageOpacity:        0.22,
 	}
 }
 
