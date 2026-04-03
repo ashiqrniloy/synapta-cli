@@ -28,6 +28,7 @@ type CommandStep struct {
 func DefaultCommands() []CommandItem {
 	return []CommandItem{
 		{ID: "add-provider", Name: "Add Provider"},
+		{ID: "bash", Name: "Bash"},
 		{ID: "set-model", Name: "Set Model"},
 	}
 }

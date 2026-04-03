@@ -85,15 +85,9 @@ func (s *ChatService) Stream(
 	const maxToolRounds = 8
 
 	for round := 0; round < maxToolRounds; round++ {
-		assistantText, toolCalls, err := s.streamAssistantTurn(ctx, provider, modelID, messages)
+		assistantText, toolCalls, err := s.streamAssistantTurn(ctx, provider, modelID, messages, onDelta)
 		if err != nil {
 			return err
-		}
-
-		if strings.TrimSpace(assistantText) != "" {
-			if err := onDelta(assistantText); err != nil {
-				return err
-			}
 		}
 
 		if len(toolCalls) == 0 {
@@ -139,7 +133,7 @@ func (s *ChatService) Stream(
 	return fmt.Errorf("tool-calling loop exceeded %d rounds", maxToolRounds)
 }
 
-func (s *ChatService) streamAssistantTurn(ctx context.Context, provider llm.Provider, modelID string, messages []llm.Message) (string, []llm.ToolCall, error) {
+func (s *ChatService) streamAssistantTurn(ctx context.Context, provider llm.Provider, modelID string, messages []llm.Message, onDelta func(text string) error) (string, []llm.ToolCall, error) {
 	streamReq := llm.ChatRequest{Model: modelID, Messages: messages, Stream: true, Tools: s.toolDefinitions(), ToolChoice: "auto"}
 
 	var contentBuilder strings.Builder
@@ -149,6 +143,11 @@ func (s *ChatService) streamAssistantTurn(ctx context.Context, provider llm.Prov
 		for _, choice := range chunk.Choices {
 			if choice.Delta.Content != "" {
 				contentBuilder.WriteString(choice.Delta.Content)
+				if onDelta != nil {
+					if err := onDelta(choice.Delta.Content); err != nil {
+						return err
+					}
+				}
 			}
 			for _, tc := range choice.Delta.ToolCalls {
 				existing := toolCallByIndex[tc.Index]
@@ -197,7 +196,13 @@ func (s *ChatService) streamAssistantTurn(ctx context.Context, provider llm.Prov
 		if resp == nil || len(resp.Choices) == 0 {
 			return "", nil, fmt.Errorf("empty response")
 		}
-		return resp.Choices[0].Message.Content, resp.Choices[0].Message.ToolCalls, nil
+		fallbackText := resp.Choices[0].Message.Content
+		if strings.TrimSpace(fallbackText) != "" && onDelta != nil {
+			if err := onDelta(fallbackText); err != nil {
+				return "", nil, err
+			}
+		}
+		return fallbackText, resp.Choices[0].Message.ToolCalls, nil
 	}
 
 	return contentBuilder.String(), toolCalls, nil

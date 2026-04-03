@@ -50,10 +50,19 @@ func (t *WriteTool) Execute(ctx context.Context, in WriteInput) (Result, error) 
 		return Result{}, err
 	}
 
+	preview, trunc := truncateHead(in.Content, 60, 8*1024)
+	message := fmt.Sprintf("Successfully wrote %d bytes to %s", len(in.Content), in.Path)
+	if strings.TrimSpace(preview) != "" {
+		message += "\n\n--- file preview ---\n" + preview
+		if trunc.Truncated {
+			message += fmt.Sprintf("\n\n[Preview truncated to %d lines / %s]", trunc.OutputLines, formatSize(trunc.OutputBytes))
+		}
+	}
+
 	return Result{
 		Content: []ContentPart{{
 			Type: ContentPartText,
-			Text: fmt.Sprintf("Successfully wrote %d bytes to %s", len(in.Content), in.Path),
+			Text: message,
 		}},
 	}, nil
 }

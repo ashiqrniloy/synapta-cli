@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/synapta/synapta-cli/internal/config"
 	"github.com/synapta/synapta-cli/internal/core"
+	"github.com/synapta/synapta-cli/internal/core/tools"
 	"github.com/synapta/synapta-cli/internal/llm"
 	"github.com/synapta/synapta-cli/internal/tui/theme"
 )
@@ -69,6 +71,7 @@ type toolEventMsg struct {
 }
 
 type toolTickMsg struct{}
+type workingTickMsg struct{}
 
 type chatStreamDoneMsg struct{}
 
@@ -76,7 +79,21 @@ type chatStreamErrMsg struct {
 	Err error
 }
 
-const assistantPlaceholder = "Working..."
+type bashCommandDoneMsg struct {
+	Command   string
+	Output    string
+	Err       error
+	StartedAt time.Time
+	EndedAt   time.Time
+	NewCwd    string
+	IsCD      bool
+}
+
+const (
+	assistantPlaceholder = "Working..."
+	inputModeChat        = "chat"
+	inputModeBash        = "bash"
+)
 
 // CodeAgentModel is the main TUI model for the Synapta Code agent.
 type CodeAgentModel struct {
@@ -112,6 +129,11 @@ type CodeAgentModel struct {
 	firstChunkAt       time.Time
 	streamChunkCount   int
 	streamCharCount    int
+
+	inputMode       string
+	currentCwd      string
+	isExecutingBash bool
+	workingFrame    int
 }
 
 // NewCodeAgentModel creates the model using the loaded AppConfig.
@@ -144,6 +166,8 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		toolExpanded:       map[string]bool{},
 		chatViewport:       vp,
 		chatAutoScroll:     true,
+		inputMode:          inputModeChat,
+		currentCwd:         cwd,
 	}
 
 	if cfg.Provider.Default != "" && cfg.Provider.Model != "" {
@@ -157,6 +181,7 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		model.msgs = append(model.msgs, "[Kilo] ✓ Authenticated")
 	}
 
+	model.applyInputMode(inputModeChat)
 	return model
 }
 
@@ -250,6 +275,17 @@ func (m *CodeAgentModel) clearCommandMode() {
 	m.recalculateLayout()
 }
 
+func (m *CodeAgentModel) applyInputMode(mode string) {
+	m.inputMode = mode
+	switch mode {
+	case inputModeBash:
+		m.ta.Placeholder = "bash> Enter command (Enter=run, Esc=exit bash mode)"
+	default:
+		m.inputMode = inputModeChat
+		m.ta.Placeholder = "Type your message... (Enter=send, Shift+Enter=newline)"
+	}
+}
+
 // ─── tea.Model ───────────────────────────────────────────────────────
 
 func (m CodeAgentModel) Init() tea.Cmd {
@@ -274,6 +310,11 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		commandID := msg.Path[0].ID
 		switch commandID {
+		case "bash":
+			m.clearCommandMode()
+			m.applyInputMode(inputModeBash)
+			m.msgs = append(m.msgs, "[Bash] Mode enabled. Enter a command and press Enter.")
+			return m, nil
 		case "add-provider":
 			m.clearCommandMode()
 			if len(msg.Path) > 1 {
@@ -350,18 +391,17 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatStreamChunkMsg:
 		if m.firstChunkAt.IsZero() {
 			m.firstChunkAt = time.Now()
-			if !m.streamStartedAt.IsZero() {
-				m.msgs = append(m.msgs, fmt.Sprintf("[Chat dbg] first chunk in %s", m.firstChunkAt.Sub(m.streamStartedAt).Round(time.Millisecond)))
-			}
 		}
 		m.streamChunkCount++
 		m.streamCharCount += len(msg.Text)
-		if m.activeAssistantIdx >= 0 && m.activeAssistantIdx < len(m.chatMessages) {
-			if m.chatMessages[m.activeAssistantIdx].Content == assistantPlaceholder {
-				m.chatMessages[m.activeAssistantIdx].Content = msg.Text
-			} else {
-				m.chatMessages[m.activeAssistantIdx].Content += msg.Text
-			}
+		if m.activeAssistantIdx < 0 || m.activeAssistantIdx >= len(m.chatMessages) {
+			m.chatMessages = append(m.chatMessages, ChatMessage{Role: "assistant", Content: ""})
+			m.activeAssistantIdx = len(m.chatMessages) - 1
+		}
+		if m.chatMessages[m.activeAssistantIdx].Content == assistantPlaceholder {
+			m.chatMessages[m.activeAssistantIdx].Content = msg.Text
+		} else {
+			m.chatMessages[m.activeAssistantIdx].Content += msg.Text
 		}
 		m.refreshChatViewport()
 		return m, waitForStreamMsg(m.streamCh)
@@ -370,6 +410,10 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		e := msg.Event
 		switch e.Type {
 		case core.ToolEventStart:
+			if m.activeAssistantIdx >= 0 && m.activeAssistantIdx < len(m.chatMessages) && m.chatMessages[m.activeAssistantIdx].Content == assistantPlaceholder {
+				m.chatMessages = append(m.chatMessages[:m.activeAssistantIdx], m.chatMessages[m.activeAssistantIdx+1:]...)
+			}
+			m.activeAssistantIdx = -1
 			m.chatMessages = append(m.chatMessages, ChatMessage{
 				Role:          "tool",
 				ToolCallID:    e.CallID,
@@ -421,10 +465,12 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.chatMessages[m.activeAssistantIdx].Content = ""
 			}
 		}
+		elapsed := time.Duration(0)
 		if !m.streamStartedAt.IsZero() {
-			m.msgs = append(m.msgs, fmt.Sprintf("[Chat dbg] done in %s (%d chunks, %d chars)", time.Since(m.streamStartedAt).Round(time.Millisecond), m.streamChunkCount, m.streamCharCount))
+			elapsed = time.Since(m.streamStartedAt)
 		}
 		m.isWorking = false
+		m.workingFrame = 0
 		m.activeAssistantIdx = -1
 		m.streamCh = nil
 		m.streamStartedAt = time.Time{}
@@ -432,14 +478,17 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamChunkCount = 0
 		m.streamCharCount = 0
 		m.activeToolIndices = map[string]int{}
+		if elapsed > 0 {
+			m.msgs = append(m.msgs, fmt.Sprintf("[Chat] ✓ Done in %s", elapsed.Round(time.Millisecond)))
+		} else {
+			m.msgs = append(m.msgs, "[Chat] ✓ Done")
+		}
 		m.refreshChatViewport()
 		return m, nil
 
 	case chatStreamErrMsg:
-		if !m.streamStartedAt.IsZero() {
-			m.msgs = append(m.msgs, fmt.Sprintf("[Chat dbg] error after %s (%d chunks, %d chars)", time.Since(m.streamStartedAt).Round(time.Millisecond), m.streamChunkCount, m.streamCharCount))
-		}
 		m.isWorking = false
+		m.workingFrame = 0
 		m.activeAssistantIdx = -1
 		m.streamCh = nil
 		m.streamStartedAt = time.Time{}
@@ -449,6 +498,45 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activeToolIndices = map[string]int{}
 		m.msgs = append(m.msgs, "[Chat] ✗ "+msg.Err.Error())
 		m.refreshChatViewport()
+		return m, nil
+
+	case bashCommandDoneMsg:
+		m.isExecutingBash = false
+		m.workingFrame = 0
+		if msg.IsCD && msg.Err == nil {
+			if err := os.Chdir(msg.NewCwd); err != nil {
+				msg.Err = err
+				msg.Output = "Failed to change directory: " + err.Error()
+			} else {
+				m.currentCwd = msg.NewCwd
+				m.chatService = core.NewChatService(m.authStorage, core.NewToolSet(m.currentCwd))
+			}
+		}
+
+		state := "done"
+		if msg.Err != nil {
+			state = "error"
+		}
+		m.chatMessages = append(m.chatMessages, ChatMessage{
+			Role:          "tool",
+			ToolName:      "bash",
+			ToolState:     state,
+			Content:       msg.Output,
+			ToolStartedAt: msg.StartedAt,
+			ToolEndedAt:   msg.EndedAt,
+		})
+		if msg.IsCD && msg.Err == nil {
+			m.msgs = append(m.msgs, "[Bash] cwd: "+m.currentCwd)
+		}
+		m.refreshChatViewport()
+		return m, nil
+
+	case workingTickMsg:
+		if m.isWorking || m.isExecutingBash {
+			m.workingFrame = (m.workingFrame + 1) % 4
+			m.refreshChatViewport()
+			return m, workingTickCmd()
+		}
 		return m, nil
 
 	case tea.MouseWheelMsg:
@@ -544,6 +632,12 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
+		if keyStr == "esc" && m.inputMode == inputModeBash && strings.TrimSpace(m.ta.Value()) == "" {
+			m.applyInputMode(inputModeChat)
+			m.msgs = append(m.msgs, "[Bash] Mode disabled")
+			return m, nil
+		}
+
 		// Toggle tool output expansion
 		if keyStr == "ctrl+o" {
 			if id, ok := m.lastToolCallID(); ok {
@@ -582,7 +676,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Check for submit key (default: enter)
 		submitKey := m.getSubmitKey()
 		if keyStr == submitKey {
-			if m.isWorking {
+			if m.isWorking || m.isExecutingBash {
 				return m, nil
 			}
 
@@ -590,6 +684,17 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if text == "" || strings.HasPrefix(text, ":") {
 				return m, nil
 			}
+
+			if m.inputMode == inputModeBash {
+				started := time.Now()
+				m.chatMessages = append(m.chatMessages, ChatMessage{Role: "user", Content: "$ " + text})
+				m.ta.SetValue("")
+				m.isExecutingBash = true
+				m.workingFrame = 0
+				m.refreshChatViewport()
+				return m, tea.Batch(m.executeBashCommand(text, started), workingTickCmd())
+			}
+
 			if m.selectedProvider == "" || m.selectedModelID == "" {
 				m.msgs = append(m.msgs, "[Chat] Select a model first via :set-model")
 				return m, nil
@@ -607,13 +712,14 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.firstChunkAt = time.Time{}
 			m.streamChunkCount = 0
 			m.streamCharCount = 0
-			m.msgs = append(m.msgs, fmt.Sprintf("[Chat dbg] start %s/%s", m.selectedProvider, m.selectedModelID))
+			m.msgs = append(m.msgs, fmt.Sprintf("[Chat] Working with %s/%s...", m.selectedProvider, m.selectedModelID))
 			m.ta.SetValue("")
+			m.workingFrame = 0
 			m.recalculateLayout()
 			m.refreshChatViewport()
 
 			cmd := m.startChatStream(history)
-			return m, cmd
+			return m, tea.Batch(cmd, workingTickCmd())
 		}
 
 		// Handle Shift+Enter for newline
@@ -686,16 +792,31 @@ func countLines(s string) int {
 }
 
 func (m *CodeAgentModel) renderStatusView() string {
-	if len(m.msgs) == 0 {
-		return ""
-	}
 	start := 0
 	if len(m.msgs) > 6 {
 		start = len(m.msgs) - 6
 	}
-	var lines []string
+	lines := make([]string, 0, 8)
 	for _, msg := range m.msgs[start:] {
 		lines = append(lines, m.styles.MutedStyle.Render(msg))
+	}
+
+	if m.isWorking {
+		spinner := []string{"⠋", "⠙", "⠹", "⠸"}[m.workingFrame%4]
+		elapsed := time.Since(m.streamStartedAt).Round(time.Second)
+		if m.streamStartedAt.IsZero() {
+			elapsed = 0
+		}
+		status := fmt.Sprintf("[Chat] %s Working... %s", spinner, elapsed)
+		lines = append(lines, m.styles.MutedStyle.Render(status))
+	} else if m.isExecutingBash {
+		spinner := []string{"⠋", "⠙", "⠹", "⠸"}[m.workingFrame%4]
+		status := fmt.Sprintf("[Bash] %s Running command...", spinner)
+		lines = append(lines, m.styles.MutedStyle.Render(status))
+	}
+
+	if len(lines) == 0 {
+		return ""
 	}
 	return strings.Join(lines, "\n")
 }
@@ -710,8 +831,15 @@ func (m *CodeAgentModel) renderInputBox() string {
 }
 
 func (m *CodeAgentModel) renderInstructions() string {
-	instructionsText := "PgUp/PgDn scroll  │  Ctrl+O toggle latest tool  │  Shift+Enter newline  │  Enter send  │  :=commands  │  Ctrl+C quit"
-	if m.selectedModelName != "" {
+	enterAction := "Enter send"
+	if m.inputMode == inputModeBash {
+		enterAction = "Enter run bash"
+	}
+	instructionsText := "PgUp/PgDn scroll  │  Ctrl+O toggle latest tool  │  Shift+Enter newline  │  " + enterAction + "  │  :=commands  │  Ctrl+C quit"
+	if m.currentCwd != "" {
+		instructionsText += "  │  cwd: " + m.currentCwd
+	}
+	if m.inputMode == inputModeChat && m.selectedModelName != "" {
 		instructionsText += "  │  " + m.selectedModelName
 	}
 	return lipgloss.NewStyle().
@@ -854,9 +982,15 @@ func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
 		previewLines := m.toolPreviewLines()
 		if len(wrapped) > previewLines {
 			hidden := len(wrapped) - previewLines
-			wrapped = wrapped[len(wrapped)-previewLines:]
-			hint := m.styles.MutedStyle.Render(fmt.Sprintf("... (%d earlier lines, Ctrl+O to expand)", hidden))
-			wrapped = append([]string{hint}, wrapped...)
+			if msg.ToolName == "write" || msg.ToolName == "read" {
+				wrapped = wrapped[:previewLines]
+				hint := m.styles.MutedStyle.Render(fmt.Sprintf("... (%d more lines, Ctrl+O to expand)", hidden))
+				wrapped = append(wrapped, hint)
+			} else {
+				wrapped = wrapped[len(wrapped)-previewLines:]
+				hint := m.styles.MutedStyle.Render(fmt.Sprintf("... (%d earlier lines, Ctrl+O to expand)", hidden))
+				wrapped = append([]string{hint}, wrapped...)
+			}
 		}
 	}
 
@@ -960,6 +1094,12 @@ func toolTickCmd() tea.Cmd {
 	})
 }
 
+func workingTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(_ time.Time) tea.Msg {
+		return workingTickMsg{}
+	})
+}
+
 func (m *CodeAgentModel) hasRunningTool() bool {
 	for _, msg := range m.chatMessages {
 		if msg.Role == "tool" && msg.ToolState == "running" {
@@ -1026,6 +1166,116 @@ func parseModelSelectionKey(key string) (providerID string, modelID string, ok b
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+func (m *CodeAgentModel) executeBashCommand(command string, startedAt time.Time) tea.Cmd {
+	cwd := m.currentCwd
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+
+	return func() tea.Msg {
+		if target, ok := parseCDCommand(command); ok {
+			resolved, err := resolveCDTarget(cwd, target)
+			ended := time.Now()
+			if err != nil {
+				return bashCommandDoneMsg{
+					Command:   command,
+					Output:    "cd: " + err.Error(),
+					Err:       err,
+					StartedAt: startedAt,
+					EndedAt:   ended,
+					IsCD:      true,
+				}
+			}
+			return bashCommandDoneMsg{
+				Command:   command,
+				Output:    "Changed directory to " + resolved,
+				StartedAt: startedAt,
+				EndedAt:   ended,
+				NewCwd:    resolved,
+				IsCD:      true,
+			}
+		}
+
+		bashTool := tools.NewBashTool(cwd)
+		res, err := bashTool.Execute(context.Background(), tools.BashInput{Command: command}, nil)
+		output := toolResultPlainText(res)
+		if strings.TrimSpace(output) == "" && err != nil {
+			output = err.Error()
+		}
+
+		return bashCommandDoneMsg{
+			Command:   command,
+			Output:    output,
+			Err:       err,
+			StartedAt: startedAt,
+			EndedAt:   time.Now(),
+		}
+	}
+}
+
+func parseCDCommand(command string) (target string, ok bool) {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "cd" {
+		return "~", true
+	}
+	if !strings.HasPrefix(trimmed, "cd ") {
+		return "", false
+	}
+	target = strings.TrimSpace(strings.TrimPrefix(trimmed, "cd"))
+	if target == "" {
+		return "~", true
+	}
+	if strings.Contains(target, "&&") || strings.Contains(target, "||") || strings.ContainsAny(target, ";|><`") {
+		return "", false
+	}
+	if (strings.HasPrefix(target, "\"") && strings.HasSuffix(target, "\"")) || (strings.HasPrefix(target, "'") && strings.HasSuffix(target, "'")) {
+		target = target[1 : len(target)-1]
+	}
+	return target, true
+}
+
+func resolveCDTarget(baseCwd, target string) (string, error) {
+	if strings.HasPrefix(target, "~") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		if target == "~" {
+			target = home
+		} else {
+			target = filepath.Join(home, strings.TrimPrefix(target, "~/"))
+		}
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(baseCwd, target)
+	}
+	resolved, err := filepath.Abs(filepath.Clean(target))
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", resolved)
+	}
+	return resolved, nil
+}
+
+func toolResultPlainText(result tools.Result) string {
+	var b strings.Builder
+	for _, c := range result.Content {
+		if c.Type == tools.ContentPartText && c.Text != "" {
+			if b.Len() > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(c.Text)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // wordWrap wraps text to fit within the given width.
