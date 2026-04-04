@@ -60,6 +60,13 @@ type sessionEntry struct {
 	TokensBefore          int          `json:"tokensBefore,omitempty"`
 }
 
+type contextMessageRef struct {
+	Message      llm.Message
+	EntryIndex   int
+	MessageIndex int
+	IsCompaction bool
+}
+
 // SessionStore persists and compacts conversation history in a pi-style append-only JSONL file.
 //
 // Sessions are grouped by agent and CWD and stored as separate JSONL files:
@@ -443,16 +450,29 @@ func (s *SessionStore) ContextMessages() []llm.Message {
 }
 
 func (s *SessionStore) contextMessagesLocked() []llm.Message {
+	refs := s.contextMessageRefsLocked()
+	out := make([]llm.Message, 0, len(refs))
+	for _, ref := range refs {
+		out = append(out, ref.Message)
+	}
+	return out
+}
+
+func (s *SessionStore) contextMessageRefsLocked() []contextMessageRef {
 	messages := s.messageEntriesLocked()
+	messageEntryIndices := s.messageEntryIndicesLocked()
 	lastCompaction := s.latestCompactionLocked()
 	if lastCompaction == nil {
-		out := make([]llm.Message, len(messages))
-		copy(out, messages)
+		out := make([]contextMessageRef, 0, len(messages))
+		for i, msg := range messages {
+			entryIdx := -1
+			if i >= 0 && i < len(messageEntryIndices) {
+				entryIdx = messageEntryIndices[i]
+			}
+			out = append(out, contextMessageRef{Message: msg, EntryIndex: entryIdx, MessageIndex: i})
+		}
 		return out
 	}
-
-	result := make([]llm.Message, 0, len(messages)+1)
-	result = append(result, llm.Message{Role: "user", Content: compactionSummaryPrefix + strings.TrimSpace(lastCompaction.Summary) + compactionSummarySuffix})
 
 	start := lastCompaction.FirstKeptMessageIndex
 	if start < 0 {
@@ -461,8 +481,81 @@ func (s *SessionStore) contextMessagesLocked() []llm.Message {
 	if start > len(messages) {
 		start = len(messages)
 	}
-	result = append(result, messages[start:]...)
+
+	result := make([]contextMessageRef, 0, len(messages)-start+1)
+	result = append(result, contextMessageRef{
+		Message:      llm.Message{Role: "user", Content: compactionSummaryPrefix + strings.TrimSpace(lastCompaction.Summary) + compactionSummarySuffix},
+		EntryIndex:   -1,
+		MessageIndex: -1,
+		IsCompaction: true,
+	})
+	for i := start; i < len(messages); i++ {
+		entryIdx := -1
+		if i >= 0 && i < len(messageEntryIndices) {
+			entryIdx = messageEntryIndices[i]
+		}
+		result = append(result, contextMessageRef{Message: messages[i], EntryIndex: entryIdx, MessageIndex: i})
+	}
 	return result
+}
+
+func (s *SessionStore) messageEntryIndicesLocked() []int {
+	indices := make([]int, 0)
+	for i, e := range s.entries {
+		if e.Type == "message" && e.Message != nil {
+			indices = append(indices, i)
+		}
+	}
+	return indices
+}
+
+func (s *SessionStore) UpdateContextMessageAt(index int, content string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	refs := s.contextMessageRefsLocked()
+	if index < 0 || index >= len(refs) {
+		return fmt.Errorf("context index out of range")
+	}
+	ref := refs[index]
+	if ref.IsCompaction || ref.EntryIndex < 0 {
+		return fmt.Errorf("selected context entry is not editable")
+	}
+	if ref.EntryIndex >= len(s.entries) || s.entries[ref.EntryIndex].Type != "message" || s.entries[ref.EntryIndex].Message == nil {
+		return fmt.Errorf("selected context entry not found")
+	}
+	s.entries[ref.EntryIndex].Message.Content = content
+	return s.rewriteAllLocked()
+}
+
+func (s *SessionStore) RemoveContextMessageAt(index int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	refs := s.contextMessageRefsLocked()
+	if index < 0 || index >= len(refs) {
+		return fmt.Errorf("context index out of range")
+	}
+	ref := refs[index]
+	if ref.IsCompaction || ref.EntryIndex < 0 {
+		return fmt.Errorf("selected context entry is not removable")
+	}
+	if ref.EntryIndex >= len(s.entries) || s.entries[ref.EntryIndex].Type != "message" || s.entries[ref.EntryIndex].Message == nil {
+		return fmt.Errorf("selected context entry not found")
+	}
+
+	s.entries = append(s.entries[:ref.EntryIndex], s.entries[ref.EntryIndex+1:]...)
+	if ref.MessageIndex >= 0 {
+		for i := range s.entries {
+			if s.entries[i].Type != "compaction" {
+				continue
+			}
+			if s.entries[i].FirstKeptMessageIndex > ref.MessageIndex {
+				s.entries[i].FirstKeptMessageIndex--
+			}
+		}
+	}
+	return s.rewriteAllLocked()
 }
 
 func (s *SessionStore) CompactIfNeeded(ctx context.Context, contextWindow int, summarizer CompactionSummarizer) (bool, error) {

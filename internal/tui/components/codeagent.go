@@ -71,6 +71,23 @@ type ChatMessage struct {
 	ToolEndedAt   time.Time
 }
 
+type ContextAction struct {
+	At      time.Time
+	Message string
+}
+
+type ContextEntry struct {
+	Order           int
+	ContextIndex    int
+	Category        string
+	Role            string
+	Content         string
+	HistoryIndex    int // index in SessionStore.ContextMessages()/filtered history
+	RawHistoryIndex int // index in m.conversationHistory
+	Editable        bool
+	Removable       bool
+}
+
 type chatStreamChunkMsg struct {
 	Text string
 }
@@ -131,8 +148,11 @@ type CodeAgentModel struct {
 	cfg         *config.AppConfig
 	authStorage *llm.AuthStorage
 
-	// Inline command picker
-	picker *CommandPicker
+	// Inline command / skill pickers
+	picker      *CommandPicker
+	skillPicker *SkillPicker
+
+	availableSkills []core.Skill
 
 	// Selected model
 	selectedModelName string
@@ -161,10 +181,21 @@ type CodeAgentModel struct {
 	streamChunkCount      int
 	streamCharCount       int
 
-	inputMode       string
-	currentCwd      string
-	isExecutingBash bool
-	workingFrame    int
+	inputMode        string
+	currentCwd       string
+	isExecutingBash  bool
+	workingFrame     int
+	chatPaneWidth    int
+	contextPaneWidth int
+
+	contextActions         []ContextAction
+	contextModalOpen       bool
+	contextModalEditMode   bool
+	contextModalSelection  int
+	contextModalEntries    []ContextEntry
+	contextModalEditor     textarea.Model
+	contextModalEditorHint string
+	contextOverrideActive  bool
 }
 
 // NewCodeAgentModel creates the model using the loaded AppConfig.
@@ -198,6 +229,7 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		borderColor:           t.Border,
 		cfg:                   cfg,
 		picker:                NewCommandPicker(styles),
+		skillPicker:           NewSkillPicker(styles),
 		authStorage:           authStorage,
 		chatService:           core.NewChatService(authStorage, toolset),
 		systemPromptStore:     systemPromptStore,
@@ -222,11 +254,15 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	}
 
 	model.rebuildTranscriptFromHistory()
+	model.reloadAvailableSkills()
+	model.recordContextAction("System prompt loaded")
 
 	// Check if already authenticated and show model count
 	if authStorage != nil && authStorage.HasAuth("kilo") {
 		model.appendSystemMessage("[Kilo] ✓ Authenticated", "done")
 	}
+	model.contextModalEditor = buildTextarea(t, cfg)
+	model.contextModalEditor.Placeholder = "Edit selected context (Ctrl+S to save, Esc to cancel)"
 
 	model.applyInputMode(inputModeChat)
 	return model
@@ -306,6 +342,13 @@ func (m *CodeAgentModel) getQuitKey() string {
 	return "ctrl+c"
 }
 
+func (m *CodeAgentModel) getContextKey() string {
+	if m.cfg != nil && m.cfg.Keybindings.Context != "" {
+		return normalizeKeyName(m.cfg.Keybindings.Context)
+	}
+	return "ctrl+k"
+}
+
 // getFilterText returns the text used for filtering (after the ':' prefix).
 func (m *CodeAgentModel) getFilterText() string {
 	value := m.ta.Value()
@@ -319,11 +362,17 @@ func (m *CodeAgentModel) getFilterText() string {
 func (m *CodeAgentModel) clearCommandMode() {
 	m.ta.SetValue("")
 	m.picker.Deactivate()
+	if m.skillPicker != nil {
+		m.skillPicker.Deactivate()
+	}
 	m.applyInputMode(m.inputMode)
 	m.recalculateLayout()
 }
 
 func (m *CodeAgentModel) enterCommandMode() {
+	if m.skillPicker != nil {
+		m.skillPicker.Deactivate()
+	}
 	m.picker.Activate()
 	m.ta.SetValue(":")
 	m.ta.Placeholder = "Command mode… type to filter"
@@ -334,11 +383,212 @@ func (m *CodeAgentModel) applyInputMode(mode string) {
 	m.inputMode = mode
 	switch mode {
 	case inputModeBash:
+		if m.skillPicker != nil {
+			m.skillPicker.Deactivate()
+		}
 		m.ta.Placeholder = "bash> Enter command (Enter=run, Esc=exit bash mode)"
 	default:
 		m.inputMode = inputModeChat
 		m.ta.Placeholder = "Type your message... (Enter=send, Shift+Enter=newline)"
 	}
+}
+
+func (m *CodeAgentModel) reloadAvailableSkills() {
+	result := core.LoadSkills(core.LoadSkillsOptions{
+		CWD:             m.currentCwd,
+		AgentDir:        m.agentDir,
+		IncludeDefaults: true,
+	})
+	m.availableSkills = result.Skills
+}
+
+func (m *CodeAgentModel) activateSkillPicker() {
+	if m.skillPicker == nil || m.inputMode != inputModeChat || len(m.availableSkills) == 0 {
+		return
+	}
+	m.skillPicker.Activate(m.availableSkills)
+}
+
+func (m *CodeAgentModel) updateSkillPickerFromInput() {
+	if m.skillPicker == nil || !m.skillPicker.IsActive() {
+		return
+	}
+	query, ok := activeSkillMentionQuery(m.ta.Value())
+	if !ok {
+		m.skillPicker.Deactivate()
+		return
+	}
+	m.skillPicker.Filter(query)
+}
+
+func activeSkillMentionQuery(text string) (string, bool) {
+	idx := strings.LastIndex(text, "@")
+	if idx < 0 || idx >= len(text)-1 {
+		if idx >= 0 && idx == len(text)-1 {
+			return "", true
+		}
+		return "", false
+	}
+	if idx > 0 {
+		prev := text[idx-1]
+		if prev != ' ' && prev != '\n' && prev != '\t' {
+			return "", false
+		}
+	}
+	query := text[idx+1:]
+	if strings.ContainsAny(query, " \n\t") {
+		return "", false
+	}
+	return query, true
+}
+
+func replaceActiveSkillMention(text, skillName string) string {
+	idx := strings.LastIndex(text, "@")
+	if idx < 0 {
+		return text
+	}
+	prefix := text[:idx]
+	return prefix + "@" + skillName + " "
+}
+
+func (m *CodeAgentModel) recordContextAction(message string) {
+	m.contextActions = append(m.contextActions, ContextAction{At: time.Now(), Message: message})
+	if len(m.contextActions) > 200 {
+		m.contextActions = m.contextActions[len(m.contextActions)-200:]
+	}
+}
+
+func (m *CodeAgentModel) openContextModal() {
+	m.contextModalOpen = true
+	m.contextModalEditMode = false
+	m.contextModalSelection = 0
+	m.contextModalEntries = m.buildContextEntries()
+}
+
+func (m *CodeAgentModel) closeContextModal() {
+	m.contextModalOpen = false
+	m.contextModalEditMode = false
+	m.contextModalEntries = nil
+	m.contextModalEditorHint = ""
+}
+
+func (m *CodeAgentModel) buildContextEntries() []ContextEntry {
+	if m.contextManager == nil {
+		return nil
+	}
+	msgs, err := m.contextManager.Build(m.conversationHistory)
+	if err != nil {
+		return nil
+	}
+	historyIdx := make([]int, 0)
+	for i, msg := range m.conversationHistory {
+		if (msg.Role == "user" || msg.Role == "assistant" || msg.Role == "tool") && strings.TrimSpace(msg.Content) != "" {
+			historyIdx = append(historyIdx, i)
+		}
+	}
+	entries := make([]ContextEntry, 0, len(msgs))
+	hPos := 0
+	for i, msg := range msgs {
+		entry := ContextEntry{
+			Order:           i + 1,
+			ContextIndex:    i,
+			Role:            msg.Role,
+			Content:         strings.TrimSpace(msg.Content),
+			HistoryIndex:    -1,
+			RawHistoryIndex: -1,
+			Category:        categorizeContextMessage(msg),
+		}
+		if msg.Role != "system" && hPos < len(historyIdx) {
+			entry.HistoryIndex = hPos
+			entry.RawHistoryIndex = historyIdx[hPos]
+			entry.Editable = true
+			entry.Removable = true
+			hPos++
+		}
+		if entry.Category == "compacted-output" {
+			entry.Editable = false
+			entry.Removable = false
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func categorizeContextMessage(msg llm.Message) string {
+	content := strings.TrimSpace(msg.Content)
+	if msg.Role == "system" {
+		return "system-prompt"
+	}
+	if strings.HasPrefix(content, "The conversation history before this point was compacted") {
+		return "compacted-output"
+	}
+	if strings.Contains(content, "<skill name=") {
+		return "skills"
+	}
+	if msg.Role == "tool" {
+		switch strings.ToLower(strings.TrimSpace(msg.Name)) {
+		case "read":
+			return "files-read"
+		case "write":
+			return "files-written"
+		case "bash":
+			return "tool-bash"
+		default:
+			return "tool-output"
+		}
+	}
+	if msg.Role == "user" && strings.HasPrefix(content, "Ran `") {
+		return "bash-output"
+	}
+	if msg.Role == "assistant" {
+		return "llm-output"
+	}
+	if msg.Role == "user" {
+		return "user-input"
+	}
+	return "context"
+}
+
+func (m *CodeAgentModel) applyContextEntryEdit(entry ContextEntry, content string) {
+	if entry.HistoryIndex < 0 {
+		return
+	}
+	if m.sessionStore != nil && !m.contextOverrideActive {
+		if err := m.sessionStore.UpdateContextMessageAt(entry.HistoryIndex, content); err == nil {
+			m.conversationHistory = m.sessionStore.ContextMessages()
+			m.rebuildTranscriptFromHistory()
+			m.recordContextAction(fmt.Sprintf("Context edited: #%d %s", entry.Order, entry.Category))
+			return
+		}
+	}
+	if entry.RawHistoryIndex < 0 || entry.RawHistoryIndex >= len(m.conversationHistory) {
+		return
+	}
+	m.conversationHistory[entry.RawHistoryIndex].Content = content
+	m.contextOverrideActive = true
+	m.rebuildTranscriptFromHistory()
+	m.recordContextAction(fmt.Sprintf("Context edited (session-local): #%d %s", entry.Order, entry.Category))
+}
+
+func (m *CodeAgentModel) removeContextEntry(entry ContextEntry) {
+	if entry.HistoryIndex < 0 {
+		return
+	}
+	if m.sessionStore != nil && !m.contextOverrideActive {
+		if err := m.sessionStore.RemoveContextMessageAt(entry.HistoryIndex); err == nil {
+			m.conversationHistory = m.sessionStore.ContextMessages()
+			m.rebuildTranscriptFromHistory()
+			m.recordContextAction(fmt.Sprintf("Context removed: #%d %s", entry.Order, entry.Category))
+			return
+		}
+	}
+	if entry.RawHistoryIndex < 0 || entry.RawHistoryIndex >= len(m.conversationHistory) {
+		return
+	}
+	m.conversationHistory = append(m.conversationHistory[:entry.RawHistoryIndex], m.conversationHistory[entry.RawHistoryIndex+1:]...)
+	m.contextOverrideActive = true
+	m.rebuildTranscriptFromHistory()
+	m.recordContextAction(fmt.Sprintf("Context removed (session-local): #%d %s", entry.Order, entry.Category))
 }
 
 // ─── tea.Model ───────────────────────────────────────────────────────
@@ -607,6 +857,7 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Compacted {
 			m.appendSystemMessage("[Compact] ✓ Session compacted", "done")
+			m.recordContextAction("Compaction applied")
 		} else {
 			m.appendSystemMessage("[Compact] No compaction needed", "info")
 		}
@@ -623,6 +874,7 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentAssistantText.Reset()
 		m.rebuildTranscriptFromHistory()
 		m.appendSystemMessage("[Session] ✓ New session started ("+msg.SessionID+")", "done")
+		m.recordContextAction("New session started")
 		return m, nil
 
 	case resumeSessionDoneMsg:
@@ -639,10 +891,12 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.contextManager != nil {
 			m.contextManager.SetCWD(m.currentCwd)
 		}
+		m.reloadAvailableSkills()
 		m.conversationHistory = m.sessionStore.ContextMessages()
 		m.currentAssistantText.Reset()
 		m.rebuildTranscriptFromHistory()
 		m.appendSystemMessage("[Session] ✓ Session resumed ("+m.sessionStore.SessionID()+")", "done")
+		m.recordContextAction("Session resumed")
 		return m, nil
 
 	case bashCommandDoneMsg:
@@ -658,6 +912,7 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.contextManager != nil {
 					m.contextManager.SetCWD(m.currentCwd)
 				}
+				m.reloadAvailableSkills()
 			}
 		}
 
@@ -717,6 +972,80 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		keyStr := msg.String()
 		quitKey := m.getQuitKey()
+		contextKey := m.getContextKey()
+
+		if m.contextModalOpen {
+			if keyStr == "esc" {
+				if m.contextModalEditMode {
+					m.contextModalEditMode = false
+					m.contextModalEditorHint = ""
+				} else {
+					m.closeContextModal()
+				}
+				return m, nil
+			}
+			if m.contextModalEditMode {
+				if keyStr == "ctrl+s" {
+					if m.contextModalSelection >= 0 && m.contextModalSelection < len(m.contextModalEntries) {
+						entry := m.contextModalEntries[m.contextModalSelection]
+						m.applyContextEntryEdit(entry, strings.TrimSpace(m.contextModalEditor.Value()))
+						m.contextModalEntries = m.buildContextEntries()
+						m.contextModalEditMode = false
+						m.contextModalEditorHint = "Saved"
+					}
+					return m, nil
+				}
+				var cmd tea.Cmd
+				m.contextModalEditor, cmd = m.contextModalEditor.Update(msg)
+				return m, cmd
+			}
+
+			if keyStr == "up" && m.contextModalSelection > 0 {
+				m.contextModalSelection--
+				return m, nil
+			}
+			if keyStr == "down" && m.contextModalSelection < len(m.contextModalEntries)-1 {
+				m.contextModalSelection++
+				return m, nil
+			}
+			if keyStr == "d" || keyStr == "backspace" {
+				if m.contextModalSelection >= 0 && m.contextModalSelection < len(m.contextModalEntries) {
+					entry := m.contextModalEntries[m.contextModalSelection]
+					if entry.Removable {
+						m.removeContextEntry(entry)
+						m.contextModalEntries = m.buildContextEntries()
+						if m.contextModalSelection >= len(m.contextModalEntries) && m.contextModalSelection > 0 {
+							m.contextModalSelection--
+						}
+					}
+				}
+				return m, nil
+			}
+			if keyStr == "e" || keyStr == "enter" {
+				if m.contextModalSelection >= 0 && m.contextModalSelection < len(m.contextModalEntries) {
+					entry := m.contextModalEntries[m.contextModalSelection]
+					if entry.Editable {
+						m.contextModalEditMode = true
+						m.contextModalEditor.SetValue(entry.Content)
+						m.contextModalEditor.CursorEnd()
+						m.contextModalEditorHint = ""
+					}
+				}
+				return m, nil
+			}
+			if keyStr == "c" {
+				m.recordContextAction("Manual compaction triggered from context manager")
+				m.closeContextModal()
+				m.appendSystemMessage("[Compact] Running manual compaction...", "working")
+				return m, m.manualCompactCmd()
+			}
+			return m, nil
+		}
+
+		if keyStr == contextKey {
+			m.openContextModal()
+			return m, nil
+		}
 
 		// ─── Command Mode Active ────────────────────────────────
 		if m.picker.IsActive() {
@@ -793,6 +1122,38 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		// ─── Skill Picker Active ───────────────────────────────
+		if m.skillPicker != nil && m.skillPicker.IsActive() {
+			if keyStr == "esc" {
+				m.skillPicker.Deactivate()
+				m.recalculateLayout()
+				return m, nil
+			}
+			if keyStr == "up" {
+				m.skillPicker.MoveUp()
+				return m, nil
+			}
+			if keyStr == "down" {
+				m.skillPicker.MoveDown()
+				return m, nil
+			}
+			if keyStr == "enter" {
+				selected := m.skillPicker.Selected()
+				if selected != nil {
+					m.ta.SetValue(replaceActiveSkillMention(m.ta.Value(), selected.Name))
+				}
+				m.skillPicker.Deactivate()
+				m.recalculateLayout()
+				return m, nil
+			}
+
+			var cmd tea.Cmd
+			m.ta, cmd = m.ta.Update(msg)
+			m.updateSkillPickerFromInput()
+			m.recalculateLayout()
+			return m, cmd
+		}
+
 		// ─── Normal Mode ────────────────────────────────────────
 
 		// Check for quit key (default: ctrl+c)
@@ -839,6 +1200,15 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		if keyStr == "@" && m.inputMode == inputModeChat && m.skillPicker != nil && len(m.availableSkills) > 0 {
+			var cmd tea.Cmd
+			m.ta, cmd = m.ta.Update(msg)
+			m.activateSkillPicker()
+			m.updateSkillPickerFromInput()
+			m.recalculateLayout()
+			return m, cmd
+		}
+
 		// Check for submit key (default: enter)
 		submitKey := m.getSubmitKey()
 		if keyStr == submitKey {
@@ -849,6 +1219,17 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text := strings.TrimSpace(m.ta.Value())
 			if text == "" || strings.HasPrefix(text, ":") {
 				return m, nil
+			}
+
+			expandedText := text
+			usedSkills := []core.Skill{}
+			if m.inputMode == inputModeChat {
+				var err error
+				expandedText, usedSkills, err = core.ExpandSkillReferences(text, m.availableSkills)
+				if err != nil {
+					m.appendSystemMessage("[Skills] ✗ "+err.Error(), "error")
+					return m, nil
+				}
 			}
 
 			if m.inputMode == inputModeBash {
@@ -868,9 +1249,17 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			m.appendChatMessage(ChatMessage{Role: "user", Content: text})
-			m.conversationHistory = append(m.conversationHistory, llm.Message{Role: "user", Content: text})
+			if len(usedSkills) > 0 {
+				names := make([]string, 0, len(usedSkills))
+				for _, skill := range usedSkills {
+					names = append(names, "@"+skill.Name)
+				}
+				m.appendSystemMessage("[Skills] Loaded "+strings.Join(names, ", "), "info")
+				m.recordContextAction("Skills loaded: " + strings.Join(names, ", "))
+			}
+			m.conversationHistory = append(m.conversationHistory, llm.Message{Role: "user", Content: expandedText})
 			if m.sessionStore != nil {
-				_ = m.sessionStore.AppendMessage(llm.Message{Role: "user", Content: text})
+				_ = m.sessionStore.AppendMessage(llm.Message{Role: "user", Content: expandedText})
 			}
 			history, err := m.chatHistoryAsLLM()
 			if err != nil {
@@ -935,10 +1324,18 @@ func (m *CodeAgentModel) View() tea.View {
 	inputBox := strings.TrimRight(m.renderInputBox(), "\n")
 	instructions := strings.TrimRight(m.renderInstructions(), "\n")
 
-	var sections []string
-	sections = append(sections, "", title, "", m.chatViewport.View(), "", inputBox, instructions)
+	chatView := lipgloss.NewStyle().Width(m.chatPaneWidth).Render(m.chatViewport.View())
+	contextView := m.renderContextPane(m.chatViewport.Height())
+	middle := lipgloss.JoinHorizontal(lipgloss.Top, chatView, contextView)
 
-	v := tea.NewView(strings.Join(sections, "\n"))
+	var sections []string
+	sections = append(sections, "", title, "", middle, "", inputBox, instructions)
+	base := strings.Join(sections, "\n")
+	if m.contextModalOpen {
+		base = m.renderContextModal()
+	}
+
+	v := tea.NewView(base)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	v.KeyboardEnhancements.ReportEventTypes = true
@@ -973,6 +1370,13 @@ func (m *CodeAgentModel) renderInputBox() string {
 			divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(innerWidth-2, 1)))
 			taView += "\n" + divider + "\n" + pickerView
 		}
+	} else if m.skillPicker != nil && m.skillPicker.IsActive() {
+		taView = lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(taView)
+		pickerView := strings.TrimRight(m.skillPicker.View(innerWidth), "\n")
+		if pickerView != "" {
+			divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(innerWidth-2, 1)))
+			taView += "\n" + divider + "\n" + pickerView
+		}
 	}
 	borderStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -986,7 +1390,7 @@ func (m *CodeAgentModel) renderInstructions() string {
 	if m.inputMode == inputModeBash {
 		enterAction = "Enter run bash"
 	}
-	instructionsText := "PgUp/PgDn scroll  │  Ctrl+O toggle latest tool  │  Shift+Enter newline  │  " + enterAction + "  │  :=commands  │  Ctrl+C quit"
+	instructionsText := "PgUp/PgDn scroll  │  Ctrl+O toggle latest tool  │  Shift+Enter newline  │  " + enterAction + "  │  :=commands  │  @skills  │  Ctrl+K context  │  Ctrl+C quit"
 	if m.currentCwd != "" {
 		instructionsText += "  │  cwd: " + m.currentCwd
 	}
@@ -1000,10 +1404,197 @@ func (m *CodeAgentModel) renderInstructions() string {
 		Render(instructionsText)
 }
 
+func (m *CodeAgentModel) renderContextPane(height int) string {
+	width := max(m.contextPaneWidth, 20)
+	innerWidth := max(width-4, 10)
+	innerHeight := max(height-2, 8)
+	actionsH := max((innerHeight*30)/100, 3)
+	contextH := max(innerHeight-actionsH-3, 3)
+
+	actionLines := make([]string, 0, actionsH)
+	for i := len(m.contextActions) - 1; i >= 0 && len(actionLines) < actionsH; i-- {
+		a := m.contextActions[i]
+		line := fmt.Sprintf("%s  %s", a.At.Format("15:04:05"), a.Message)
+		actionLines = append([]string{truncateLine(line, innerWidth)}, actionLines...)
+	}
+	for len(actionLines) < actionsH {
+		actionLines = append(actionLines, "")
+	}
+
+	entries := m.buildContextEntries()
+	contextLines := make([]string, 0, contextH)
+	for _, e := range entries {
+		badge := renderContextBadge(e.Category)
+		preview := strings.ReplaceAll(strings.TrimSpace(e.Content), "\n", " ")
+		line := fmt.Sprintf("%2d %s %s", e.Order, badge, preview)
+		contextLines = append(contextLines, truncateLine(line, innerWidth))
+		if len(contextLines) >= contextH {
+			break
+		}
+	}
+	for len(contextLines) < contextH {
+		contextLines = append(contextLines, "")
+	}
+
+	lines := []string{lipgloss.NewStyle().Bold(true).Render("Context")}
+	lines = append(lines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Actions (30%)"))
+	lines = append(lines, actionLines...)
+	lines = append(lines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Current context (70%)"))
+	lines = append(lines, contextLines...)
+
+	content := strings.Join(lines, "\n")
+	return lipgloss.NewStyle().
+		Width(width).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(m.borderColor)).
+		Padding(0, 1).
+		Render(content)
+}
+
+func (m *CodeAgentModel) renderContextModal() string {
+	width := min(max((m.width*70)/100, 80), m.width-4)
+	height := min(max((m.height*70)/100, 18), m.height-4)
+
+	if m.contextModalEntries == nil {
+		m.contextModalEntries = m.buildContextEntries()
+	}
+
+	var body string
+	if m.contextModalEditMode {
+		m.contextModalEditor.SetWidth(max(width-8, 40))
+		m.contextModalEditor.SetHeight(max(height-8, 8))
+		body = m.contextModalEditor.View()
+	} else {
+		if m.contextModalSelection < 0 {
+			m.contextModalSelection = 0
+		}
+		if m.contextModalSelection >= len(m.contextModalEntries) && len(m.contextModalEntries) > 0 {
+			m.contextModalSelection = len(m.contextModalEntries) - 1
+		}
+
+		leftW := max((width-10)*45/100, 30)
+		rightW := max((width-10)-leftW, 30)
+		innerH := max(height-8, 8)
+
+		listLines := []string{lipgloss.NewStyle().Bold(true).Render("Context Entries")}
+		for i, e := range m.contextModalEntries {
+			prefix := "  "
+			if i == m.contextModalSelection {
+				prefix = "▸ "
+			}
+			badge := renderContextBadge(e.Category)
+			preview := strings.ReplaceAll(strings.TrimSpace(e.Content), "\n", " ")
+			line := fmt.Sprintf("%s%2d %s %s", prefix, e.Order, badge, preview)
+			listLines = append(listLines, truncateLine(line, leftW-2))
+		}
+		listContent := strings.Join(limitLines(listLines, innerH), "\n")
+		leftPane := lipgloss.NewStyle().
+			Width(leftW).
+			Height(innerH).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(m.borderColor)).
+			Padding(0, 1).
+			Render(listContent)
+
+		previewLines := []string{lipgloss.NewStyle().Bold(true).Render("Selected Entry")}
+		if len(m.contextModalEntries) > 0 && m.contextModalSelection >= 0 && m.contextModalSelection < len(m.contextModalEntries) {
+			e := m.contextModalEntries[m.contextModalSelection]
+			previewLines = append(previewLines,
+				fmt.Sprintf("#%d  %s", e.Order, renderContextBadge(e.Category)),
+				lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Role: "+e.Role),
+				"",
+			)
+			wrapped := wordWrap(strings.TrimSpace(e.Content), max(rightW-4, 20))
+			previewLines = append(previewLines, wrapped...)
+		} else {
+			previewLines = append(previewLines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("No context entries"))
+		}
+		previewContent := strings.Join(limitLines(previewLines, innerH), "\n")
+		rightPane := lipgloss.NewStyle().
+			Width(rightW).
+			Height(innerH).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(m.styles.CommandHighlightStyle.GetForeground()).
+			Padding(0, 1).
+			Render(previewContent)
+
+		head := "Context Manager"
+		foot := "↑↓ select  Enter/E edit  D remove  C compact  Esc close"
+		body = head + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, leftPane, " ", rightPane) + "\n\n" + foot
+	}
+	if m.contextModalEditorHint != "" {
+		body += "\n\n" + m.contextModalEditorHint
+	}
+	modal := lipgloss.NewStyle().
+		Width(width).
+		Height(height).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(m.styles.CommandHighlightStyle.GetForeground()).
+		Padding(1, 2).
+		Render(body)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
+}
+
+func renderContextBadge(category string) string {
+	bg := lipgloss.Color("240")
+	switch category {
+	case "system-prompt":
+		bg = lipgloss.Color("61")
+	case "skills":
+		bg = lipgloss.Color("99")
+	case "compacted-output":
+		bg = lipgloss.Color("172")
+	case "files-read":
+		bg = lipgloss.Color("31")
+	case "files-written":
+		bg = lipgloss.Color("29")
+	case "tool-bash", "bash-output":
+		bg = lipgloss.Color("130")
+	case "llm-output":
+		bg = lipgloss.Color("64")
+	case "user-input":
+		bg = lipgloss.Color("95")
+	case "tool-output":
+		bg = lipgloss.Color("67")
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(bg).Bold(true).Padding(0, 1).Render(category)
+}
+
+func limitLines(lines []string, maxLines int) []string {
+	if maxLines <= 0 {
+		return []string{}
+	}
+	if len(lines) <= maxLines {
+		return lines
+	}
+	if maxLines == 1 {
+		return []string{truncateLine(lines[0], 1)}
+	}
+	out := append([]string{}, lines[:maxLines-1]...)
+	out = append(out, lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("…"))
+	return out
+}
+
+func truncateLine(s string, maxLen int) string {
+	if maxLen <= 0 || len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 1 {
+		return "…"
+	}
+	return s[:maxLen-1] + "…"
+}
+
 func (m *CodeAgentModel) recalculateLayout() {
 	if m.width < 1 || m.height < 1 {
 		return
 	}
+
+	m.contextPaneWidth = max(m.width/4, 28)
+	if m.contextPaneWidth > m.width-40 {
+		m.contextPaneWidth = max(m.width-40, 20)
+	}
+	m.chatPaneWidth = max(m.width-m.contextPaneWidth, 20)
 
 	m.ta.SetWidth(max(m.width-6, 40))
 
@@ -1017,7 +1608,7 @@ func (m *CodeAgentModel) recalculateLayout() {
 		chatH = 3
 	}
 
-	m.chatViewport.SetWidth(max(m.width-4, 20))
+	m.chatViewport.SetWidth(max(m.chatPaneWidth-4, 20))
 	m.chatViewport.SetHeight(chatH)
 }
 
@@ -1123,7 +1714,7 @@ func (m *CodeAgentModel) bashWorkingStatusText() string {
 // renderUserMessage renders a user message with interaction highlight.
 func (m *CodeAgentModel) renderUserMessage(content string) string {
 	// Calculate available width for the message
-	maxWidth := m.width - 8
+	maxWidth := m.chatPaneWidth - 8
 	if maxWidth < 20 {
 		maxWidth = 20
 	}
@@ -1149,7 +1740,7 @@ func (m *CodeAgentModel) renderUserMessage(content string) string {
 }
 
 func (m *CodeAgentModel) renderAssistantMessage(content string) string {
-	maxWidth := m.width - 8
+	maxWidth := m.chatPaneWidth - 8
 	if maxWidth < 20 {
 		maxWidth = 20
 	}
@@ -1167,7 +1758,7 @@ func (m *CodeAgentModel) renderAssistantMessage(content string) string {
 }
 
 func (m *CodeAgentModel) renderSystemMessage(msg ChatMessage) string {
-	maxWidth := m.width - 8
+	maxWidth := m.chatPaneWidth - 8
 	if maxWidth < 20 {
 		maxWidth = 20
 	}
@@ -1193,7 +1784,7 @@ func (m *CodeAgentModel) renderSystemMessage(msg ChatMessage) string {
 }
 
 func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
-	maxWidth := m.width - 8
+	maxWidth := m.chatPaneWidth - 8
 	if maxWidth < 20 {
 		maxWidth = 20
 	}
@@ -1265,7 +1856,7 @@ func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
 
 func (m *CodeAgentModel) chatHistoryAsLLM() ([]llm.Message, error) {
 	baseHistory := m.conversationHistory
-	if m.sessionStore != nil {
+	if m.sessionStore != nil && !m.contextOverrideActive {
 		contextWindow := 128000
 		if m.chatService != nil && m.selectedProvider != "" && m.selectedModelID != "" {
 			if cw, err := m.chatService.ModelContextWindow(context.Background(), m.selectedProvider, m.selectedModelID); err == nil && cw > 0 {
@@ -1278,8 +1869,12 @@ func (m *CodeAgentModel) chatHistoryAsLLM() ([]llm.Message, error) {
 			}
 			return m.chatService.SummarizeCompaction(ctx, m.selectedProvider, m.selectedModelID, toSummarize, previousSummary)
 		}
-		if _, err := m.sessionStore.CompactIfNeeded(context.Background(), contextWindow, summarizer); err != nil {
+		compacted, err := m.sessionStore.CompactIfNeeded(context.Background(), contextWindow, summarizer)
+		if err != nil {
 			return nil, err
+		}
+		if compacted {
+			m.recordContextAction("Auto compaction applied")
 		}
 		baseHistory = m.sessionStore.ContextMessages()
 		m.conversationHistory = append([]llm.Message(nil), baseHistory...)

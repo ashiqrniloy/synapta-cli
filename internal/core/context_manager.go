@@ -102,6 +102,11 @@ func (m *ContextManager) buildSystemPrompt() (string, error) {
 		}
 	}
 
+	skills := LoadSkills(LoadSkillsOptions{CWD: m.cwd, AgentDir: m.agentDir, IncludeDefaults: true})
+	if formattedSkills := FormatSkillsForPrompt(skills.Skills); strings.TrimSpace(formattedSkills) != "" {
+		b.WriteString(formattedSkills)
+	}
+
 	promptCwd := strings.ReplaceAll(m.cwd, "\\", "/")
 	date := time.Now().Format("2006-01-02")
 	b.WriteString("\nCurrent date: ")

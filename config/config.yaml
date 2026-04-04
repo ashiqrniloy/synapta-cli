@@ -18,6 +18,7 @@ keybindings:
   submit: "enter"         # Enter submits
   quit: "ctrl+c"          # Ctrl+C quits
   command: "ctrl+p"       # Ctrl+P opens command palette
+  context: "ctrl+k"       # Ctrl+K opens context manager modal
   # Alternative submit options (uncomment if needed):
   # submit: "ctrl+enter"  # Ctrl+Enter submits
   # submit: "ctrl+j"      # Ctrl+J submits (fallback for terminals without Kitty)

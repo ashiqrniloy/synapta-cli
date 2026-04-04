@@ -22,6 +22,7 @@ type Keybindings struct {
 	Submit  string `mapstructure:"submit"`
 	Quit    string `mapstructure:"quit"`
 	Command string `mapstructure:"command"`
+	Context string `mapstructure:"context"`
 }
 
 // Theme defines a complete colour palette for a named theme.
@@ -115,6 +116,7 @@ func defaultKeybindings() Keybindings {
 		Submit:  "enter",
 		Quit:    "ctrl+c",
 		Command: "ctrl+p",
+		Context: "ctrl+k",
 	}
 }
 
@@ -174,6 +176,9 @@ func LoadConfig() (*AppConfig, error) {
 		}
 		if v, ok := kb["command"]; ok && v != "" {
 			cfg.Keybindings.Command = v
+		}
+		if v, ok := kb["context"]; ok && v != "" {
+			cfg.Keybindings.Context = v
 		}
 	}
 
