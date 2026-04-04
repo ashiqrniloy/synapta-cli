@@ -1,54 +1,131 @@
 package core
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
-	"time"
+	"sync"
 
 	"github.com/synapta/synapta-cli/internal/llm"
 )
 
 // ContextManager builds the full message context sent to the LLM.
 //
-// It mirrors pi's defaults:
-// - prepend system prompt every turn (if any)
-// - include project context files in the system prompt
-// - append current date and working directory to system prompt
-// - include complete in-session conversation history messages
+// Prompt assembly is layered to maximize prompt-prefix stability:
+// 1) Stable system prefix (agent prompt + project context + skills catalog)
+// 2) Dynamic conversation history
 //
-// This is generic and can be reused by future Synapta agents.
+// Stable fragments are cached and invalidated explicitly when environment changes.
 type ContextManager struct {
 	agentID           string
 	agentDir          string
 	cwd               string
 	systemPromptStore *SystemPromptStore
+
+	mu sync.Mutex
+
+	skillCache *SkillCatalogCache
+
+	stablePrefixFragment fragmentCache
+	projectFragment      fragmentCache
+	skillsFragment       fragmentCache
+
+	stablePrefixDirty bool
+	projectDirty      bool
+	skillsDirty       bool
+
+	lastFingerprint PromptFingerprint
+}
+
+type fragmentCache struct {
+	signature string
+	content   string
+}
+
+type PromptFingerprint struct {
+	StablePrefixHash string
+	MetadataHash     string
+	HistoryHash      string
+	PromptHash       string
+	MessageCount     int
 }
 
 func NewContextManager(agentID, agentDir, cwd string, systemPromptStore *SystemPromptStore) *ContextManager {
 	return &ContextManager{
-		agentID:           agentID,
-		agentDir:          agentDir,
-		cwd:               cwd,
-		systemPromptStore: systemPromptStore,
+		agentID:              agentID,
+		agentDir:             agentDir,
+		cwd:                  cwd,
+		systemPromptStore:    systemPromptStore,
+		skillCache:           NewSkillCatalogCache(),
+		stablePrefixDirty:    true,
+		projectDirty:         true,
+		skillsDirty:          true,
+		lastFingerprint:      PromptFingerprint{},
+		stablePrefixFragment: fragmentCache{},
+		projectFragment:      fragmentCache{},
+		skillsFragment:       fragmentCache{},
 	}
 }
 
 func (m *ContextManager) SetCWD(cwd string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cwd == cwd {
+		return
+	}
 	m.cwd = cwd
+	m.projectDirty = true
+	m.skillsDirty = true
+	m.stablePrefixDirty = true
+}
+
+func (m *ContextManager) InvalidateSystemPrompt() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stablePrefixDirty = true
+}
+
+func (m *ContextManager) InvalidateProjectContext() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.projectDirty = true
+	m.stablePrefixDirty = true
+}
+
+func (m *ContextManager) InvalidateSkills() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.skillsDirty = true
+	m.stablePrefixDirty = true
+	if m.skillCache != nil {
+		m.skillCache.Invalidate()
+	}
+}
+
+func (m *ContextManager) LastPromptFingerprint() PromptFingerprint {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastFingerprint
 }
 
 // Build returns the exact messages to send to the LLM for the next interaction.
 func (m *ContextManager) Build(history []llm.Message) ([]llm.Message, error) {
-	messages := make([]llm.Message, 0, len(history)+1)
-
-	systemPrompt, err := m.buildSystemPrompt()
+	stablePrefix, err := m.buildStablePrefix()
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(systemPrompt) != "" {
-		messages = append(messages, llm.Message{Role: "system", Content: systemPrompt})
+	metadata := m.buildRuntimeMetadata()
+
+	messages := make([]llm.Message, 0, len(history)+2)
+	if strings.TrimSpace(stablePrefix) != "" {
+		messages = append(messages, llm.Message{Role: "system", Content: stablePrefix})
+	}
+	if strings.TrimSpace(metadata) != "" {
+		messages = append(messages, llm.Message{Role: "system", Content: metadata})
 	}
 
 	for _, msg := range history {
@@ -58,8 +135,18 @@ func (m *ContextManager) Build(history []llm.Message) ([]llm.Message, error) {
 		if strings.TrimSpace(msg.Content) == "" {
 			continue
 		}
-		messages = append(messages, llm.Message{Role: msg.Role, Content: msg.Content})
+		messages = append(messages, llm.Message{Role: msg.Role, Content: msg.Content, Name: msg.Name, ToolCallID: msg.ToolCallID})
 	}
+
+	m.mu.Lock()
+	m.lastFingerprint = PromptFingerprint{
+		StablePrefixHash: hashText(stablePrefix),
+		MetadataHash:     hashText(metadata),
+		HistoryHash:      hashMessages(history),
+		PromptHash:       hashMessages(messages),
+		MessageCount:     len(messages),
+	}
+	m.mu.Unlock()
 
 	return messages, nil
 }
@@ -73,74 +160,101 @@ func isContextRole(role string) bool {
 	}
 }
 
-func (m *ContextManager) buildSystemPrompt() (string, error) {
-	if m.systemPromptStore == nil {
+func (m *ContextManager) buildStablePrefix() (string, error) {
+	m.mu.Lock()
+	cwd := m.cwd
+	agentDir := m.agentDir
+	agentID := m.agentID
+	store := m.systemPromptStore
+	skillCache := m.skillCache
+	m.mu.Unlock()
+
+	if store == nil {
 		return "", nil
 	}
 
-	basePrompt, err := m.systemPromptStore.Load(m.agentID)
+	basePrompt, err := store.Load(agentID)
 	if err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(basePrompt) == "" {
+	basePrompt = strings.TrimSpace(basePrompt)
+	if basePrompt == "" {
 		return "", nil
 	}
 
-	var b strings.Builder
-	b.WriteString(strings.TrimSpace(basePrompt))
+	projectPaths := discoverProjectContextPaths(agentDir, cwd)
+	projectSig := signatureFromPaths(projectPaths)
 
-	contextFiles := loadProjectContextFiles(m.agentDir, m.cwd)
-	if len(contextFiles) > 0 {
-		b.WriteString("\n\n# Project Context\n\n")
-		b.WriteString("Project-specific instructions and guidelines:\n\n")
-		for _, cf := range contextFiles {
-			b.WriteString("## ")
-			b.WriteString(cf.Path)
-			b.WriteString("\n\n")
-			b.WriteString(strings.TrimSpace(cf.Content))
-			b.WriteString("\n\n")
+	skillOptions := LoadSkillsOptions{CWD: cwd, AgentDir: agentDir, IncludeDefaults: true}
+	skillsSig := skillsLoadSignature(skillOptions)
+
+	m.mu.Lock()
+	if m.projectFragment.signature != projectSig || m.projectDirty {
+		m.projectFragment.content = renderProjectContextFromPaths(projectPaths)
+		m.projectFragment.signature = projectSig
+		m.projectDirty = false
+		m.stablePrefixDirty = true
+	}
+	if m.skillsFragment.signature != skillsSig || m.skillsDirty {
+		var skillsResult SkillsResult
+		if skillCache != nil {
+			skillsResult = skillCache.Load(skillOptions)
+		} else {
+			skillsResult = LoadSkills(skillOptions)
 		}
+		m.skillsFragment.content = FormatSkillsForPrompt(skillsResult.Skills)
+		m.skillsFragment.signature = skillsSig
+		m.skillsDirty = false
+		m.stablePrefixDirty = true
 	}
 
-	skills := LoadSkills(LoadSkillsOptions{CWD: m.cwd, AgentDir: m.agentDir, IncludeDefaults: true})
-	if formattedSkills := FormatSkillsForPrompt(skills.Skills); strings.TrimSpace(formattedSkills) != "" {
-		b.WriteString(formattedSkills)
+	stableSig := hashText(basePrompt + "\n" + m.projectFragment.signature + "\n" + m.skillsFragment.signature)
+	if !m.stablePrefixDirty && m.stablePrefixFragment.signature == stableSig {
+		content := m.stablePrefixFragment.content
+		m.mu.Unlock()
+		return content, nil
 	}
 
-	promptCwd := strings.ReplaceAll(m.cwd, "\\", "/")
-	date := time.Now().Format("2006-01-02")
-	b.WriteString("\nCurrent date: ")
-	b.WriteString(date)
-	b.WriteString("\nCurrent working directory: ")
-	b.WriteString(promptCwd)
+	var b strings.Builder
+	b.WriteString(basePrompt)
+	if strings.TrimSpace(m.projectFragment.content) != "" {
+		b.WriteString("\n\n")
+		b.WriteString(strings.TrimSpace(m.projectFragment.content))
+	}
+	if strings.TrimSpace(m.skillsFragment.content) != "" {
+		b.WriteString("\n")
+		b.WriteString(strings.TrimSpace(m.skillsFragment.content))
+	}
 
-	return b.String(), nil
+	m.stablePrefixFragment = fragmentCache{signature: stableSig, content: b.String()}
+	m.stablePrefixDirty = false
+	content := m.stablePrefixFragment.content
+	m.mu.Unlock()
+	return content, nil
 }
 
-type contextFile struct {
-	Path    string
-	Content string
+func (m *ContextManager) buildRuntimeMetadata() string {
+	return ""
 }
 
-func loadProjectContextFiles(agentDir, cwd string) []contextFile {
-	files := make([]contextFile, 0)
-	seen := make(map[string]struct{})
+func discoverProjectContextPaths(agentDir, cwd string) []string {
+	paths := make([]string, 0)
+	seen := map[string]struct{}{}
 
-	if cf, ok := loadContextFileFromDir(agentDir); ok {
-		files = append(files, cf)
-		seen[cf.Path] = struct{}{}
+	if p, ok := findContextFileInDir(agentDir); ok {
+		paths = append(paths, p)
+		seen[p] = struct{}{}
 	}
 
-	ancestorFiles := make([]contextFile, 0)
+	ancestorPaths := make([]string, 0)
 	currentDir := cwd
 	for {
-		if cf, ok := loadContextFileFromDir(currentDir); ok {
-			if _, exists := seen[cf.Path]; !exists {
-				ancestorFiles = append([]contextFile{cf}, ancestorFiles...)
-				seen[cf.Path] = struct{}{}
+		if p, ok := findContextFileInDir(currentDir); ok {
+			if _, exists := seen[p]; !exists {
+				ancestorPaths = append([]string{p}, ancestorPaths...)
+				seen[p] = struct{}{}
 			}
 		}
-
 		parent := filepath.Dir(currentDir)
 		if parent == currentDir {
 			break
@@ -148,29 +262,78 @@ func loadProjectContextFiles(agentDir, cwd string) []contextFile {
 		currentDir = parent
 	}
 
-	files = append(files, ancestorFiles...)
-	return files
+	paths = append(paths, ancestorPaths...)
+	return paths
 }
 
-func loadContextFileFromDir(dir string) (contextFile, bool) {
+func findContextFileInDir(dir string) (string, bool) {
 	if strings.TrimSpace(dir) == "" {
-		return contextFile{}, false
+		return "", false
 	}
-
-	candidates := []string{"AGENTS.md", "CLAUDE.md"}
-	for _, name := range candidates {
+	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
 		p := filepath.Join(dir, name)
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+func renderProjectContextFromPaths(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("# Project Context\n\n")
+	b.WriteString("Project-specific instructions and guidelines:\n\n")
+	for _, p := range paths {
 		data, err := os.ReadFile(p)
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
 			continue
 		}
-		return contextFile{Path: p, Content: string(data)}, true
+		b.WriteString("## ")
+		b.WriteString(p)
+		b.WriteString("\n\n")
+		b.WriteString(strings.TrimSpace(string(data)))
+		b.WriteString("\n\n")
 	}
+	return strings.TrimSpace(b.String())
+}
 
-	return contextFile{}, false
+func signatureFromPaths(paths []string) string {
+	if len(paths) == 0 {
+		return "empty"
+	}
+	sigs := make([]string, 0, len(paths))
+	for _, p := range paths {
+		sigs = append(sigs, fileStatSignature(p))
+	}
+	sort.Strings(sigs)
+	return strings.Join(sigs, "|")
+}
+
+func hashMessages(messages []llm.Message) string {
+	if len(messages) == 0 {
+		return hashText("")
+	}
+	var b strings.Builder
+	for _, m := range messages {
+		b.WriteString("<")
+		b.WriteString(m.Role)
+		b.WriteString(":")
+		b.WriteString(m.Name)
+		b.WriteString(":")
+		b.WriteString(m.ToolCallID)
+		b.WriteString(">")
+		b.WriteString(m.Content)
+		b.WriteString("\n")
+	}
+	return hashText(b.String())
+}
+
+func hashText(text string) string {
+	s := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(s[:])
 }
 
 // BashExecutionToText formats a shell command execution as a user-context message.
@@ -193,5 +356,6 @@ func (m *ContextManager) DebugDescribe(history []llm.Message) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("context messages: %d", len(msgs)), nil
+	fp := m.LastPromptFingerprint()
+	return fmt.Sprintf("context messages: %d stable=%s metadata=%s history=%s", len(msgs), fp.StablePrefixHash[:12], fp.MetadataHash[:12], fp.HistoryHash[:12]), nil
 }

@@ -261,6 +261,23 @@ func FormatSkillsForPrompt(skills []Skill) string {
 }
 
 func ExpandSkillReferences(text string, skills []Skill) (string, []Skill, error) {
+	return expandSkillReferencesWithLoader(text, skills, func(skill Skill) (string, error) {
+		raw, err := os.ReadFile(skill.FilePath)
+		if err != nil {
+			return "", fmt.Errorf("reading skill %q: %w", skill.Name, err)
+		}
+		return StripFrontmatter(string(raw)), nil
+	})
+}
+
+func ExpandSkillReferencesWithCache(text string, skills []Skill, cache *SkillCatalogCache) (string, []Skill, error) {
+	if cache == nil {
+		return ExpandSkillReferences(text, skills)
+	}
+	return expandSkillReferencesWithLoader(text, skills, cache.SkillBody)
+}
+
+func expandSkillReferencesWithLoader(text string, skills []Skill, loadBody func(skill Skill) (string, error)) (string, []Skill, error) {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" || len(skills) == 0 {
 		return text, nil, nil
@@ -278,7 +295,7 @@ func ExpandSkillReferences(text string, skills []Skill) (string, []Skill, error)
 		if !ok {
 			return text, nil, nil
 		}
-		block, err := buildSkillInvocationBlock(skill)
+		block, err := buildSkillInvocationBlock(skill, loadBody)
 		if err != nil {
 			return "", nil, err
 		}
@@ -317,7 +334,7 @@ func ExpandSkillReferences(text string, skills []Skill) (string, []Skill, error)
 
 	blocks := make([]string, 0, len(used))
 	for _, skill := range used {
-		block, err := buildSkillInvocationBlock(skill)
+		block, err := buildSkillInvocationBlock(skill, loadBody)
 		if err != nil {
 			return "", nil, err
 		}
@@ -326,12 +343,11 @@ func ExpandSkillReferences(text string, skills []Skill) (string, []Skill, error)
 	return strings.Join(blocks, "\n\n") + "\n\n" + text, used, nil
 }
 
-func buildSkillInvocationBlock(skill Skill) (string, error) {
-	raw, err := os.ReadFile(skill.FilePath)
+func buildSkillInvocationBlock(skill Skill, loadBody func(skill Skill) (string, error)) (string, error) {
+	body, err := loadBody(skill)
 	if err != nil {
-		return "", fmt.Errorf("reading skill %q: %w", skill.Name, err)
+		return "", err
 	}
-	body := StripFrontmatter(string(raw))
 	var b strings.Builder
 	b.WriteString("<skill name=\"")
 	b.WriteString(escapeXML(skill.Name))

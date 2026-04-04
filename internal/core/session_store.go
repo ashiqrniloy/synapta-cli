@@ -49,15 +49,25 @@ type SessionInfo struct {
 }
 
 type sessionEntry struct {
-	Type                  string       `json:"type"`
-	Version               int          `json:"version,omitempty"`
-	ID                    string       `json:"id,omitempty"`
-	Timestamp             string       `json:"timestamp,omitempty"`
-	CWD                   string       `json:"cwd,omitempty"`
-	Message               *llm.Message `json:"message,omitempty"`
-	Summary               string       `json:"summary,omitempty"`
-	FirstKeptMessageIndex int          `json:"firstKeptMessageIndex,omitempty"`
-	TokensBefore          int          `json:"tokensBefore,omitempty"`
+	Type                  string            `json:"type"`
+	Version               int               `json:"version,omitempty"`
+	ID                    string            `json:"id,omitempty"`
+	Timestamp             string            `json:"timestamp,omitempty"`
+	CWD                   string            `json:"cwd,omitempty"`
+	Message               *llm.Message      `json:"message,omitempty"`
+	Summary               string            `json:"summary,omitempty"`
+	FirstKeptMessageIndex int               `json:"firstKeptMessageIndex,omitempty"`
+	TokensBefore          int               `json:"tokensBefore,omitempty"`
+	Operation             *ContextOperation `json:"operation,omitempty"`
+}
+
+type ContextOperation struct {
+	Action       string `json:"action"`
+	ContextIndex int    `json:"contextIndex"`
+	Role         string `json:"role,omitempty"`
+	Category     string `json:"category,omitempty"`
+	BeforeHash   string `json:"beforeHash,omitempty"`
+	AfterHash    string `json:"afterHash,omitempty"`
 }
 
 type contextMessageRef struct {
@@ -430,6 +440,18 @@ func (s *SessionStore) CWD() string {
 	return s.cwd
 }
 
+func (s *SessionStore) ContextOperations() []ContextOperation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ops := make([]ContextOperation, 0)
+	for _, e := range s.entries {
+		if e.Type == "context_op" && e.Operation != nil {
+			ops = append(ops, *e.Operation)
+		}
+	}
+	return ops
+}
+
 func (s *SessionStore) AppendMessage(msg llm.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -524,7 +546,20 @@ func (s *SessionStore) UpdateContextMessageAt(index int, content string) error {
 	if ref.EntryIndex >= len(s.entries) || s.entries[ref.EntryIndex].Type != "message" || s.entries[ref.EntryIndex].Message == nil {
 		return fmt.Errorf("selected context entry not found")
 	}
+	before := s.entries[ref.EntryIndex].Message.Content
 	s.entries[ref.EntryIndex].Message.Content = content
+	op := sessionEntry{
+		Type:      "context_op",
+		Timestamp: time.Now().Format(time.RFC3339),
+		Operation: &ContextOperation{
+			Action:       "edit",
+			ContextIndex: index,
+			Role:         ref.Message.Role,
+			BeforeHash:   hashText(before),
+			AfterHash:    hashText(content),
+		},
+	}
+	s.entries = append(s.entries, op)
 	return s.rewriteAllLocked()
 }
 
@@ -544,6 +579,7 @@ func (s *SessionStore) RemoveContextMessageAt(index int) error {
 		return fmt.Errorf("selected context entry not found")
 	}
 
+	removed := s.entries[ref.EntryIndex].Message
 	s.entries = append(s.entries[:ref.EntryIndex], s.entries[ref.EntryIndex+1:]...)
 	if ref.MessageIndex >= 0 {
 		for i := range s.entries {
@@ -555,6 +591,17 @@ func (s *SessionStore) RemoveContextMessageAt(index int) error {
 			}
 		}
 	}
+	op := sessionEntry{
+		Type:      "context_op",
+		Timestamp: time.Now().Format(time.RFC3339),
+		Operation: &ContextOperation{
+			Action:       "remove",
+			ContextIndex: index,
+			Role:         removed.Role,
+			BeforeHash:   hashText(removed.Content),
+		},
+	}
+	s.entries = append(s.entries, op)
 	return s.rewriteAllLocked()
 }
 

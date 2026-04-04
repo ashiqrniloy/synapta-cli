@@ -152,7 +152,8 @@ type CodeAgentModel struct {
 	picker      *CommandPicker
 	skillPicker *SkillPicker
 
-	availableSkills []core.Skill
+	availableSkills   []core.Skill
+	skillCatalogCache *core.SkillCatalogCache
 
 	// Selected model
 	selectedModelName string
@@ -188,14 +189,19 @@ type CodeAgentModel struct {
 	chatPaneWidth    int
 	contextPaneWidth int
 
-	contextActions         []ContextAction
-	contextModalOpen       bool
-	contextModalEditMode   bool
-	contextModalSelection  int
-	contextModalEntries    []ContextEntry
-	contextModalEditor     textarea.Model
-	contextModalEditorHint string
-	contextOverrideActive  bool
+	contextActions          []ContextAction
+	contextModalOpen        bool
+	contextModalEditMode    bool
+	contextModalSelection   int
+	contextModalEntries     []ContextEntry
+	contextModalEditor      textarea.Model
+	contextModalEditorHint  string
+	contextOverrideActive   bool
+	lastPromptHash          string
+	lastPromptFingerprint   core.PromptFingerprint
+	likelyPromptCacheHit    bool
+	promptBuildCount        int
+	stablePrefixChangeCount int
 }
 
 // NewCodeAgentModel creates the model using the loaded AppConfig.
@@ -223,6 +229,8 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		conversationHistory = sessionStore.ContextMessages()
 	}
 
+	skillCatalogCache := core.NewSkillCatalogCache()
+
 	model := &CodeAgentModel{
 		styles:                styles,
 		ta:                    buildTextarea(t, cfg),
@@ -230,6 +238,7 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		cfg:                   cfg,
 		picker:                NewCommandPicker(styles),
 		skillPicker:           NewSkillPicker(styles),
+		skillCatalogCache:     skillCatalogCache,
 		authStorage:           authStorage,
 		chatService:           core.NewChatService(authStorage, toolset),
 		systemPromptStore:     systemPromptStore,
@@ -394,12 +403,21 @@ func (m *CodeAgentModel) applyInputMode(mode string) {
 }
 
 func (m *CodeAgentModel) reloadAvailableSkills() {
-	result := core.LoadSkills(core.LoadSkillsOptions{
+	opts := core.LoadSkillsOptions{
 		CWD:             m.currentCwd,
 		AgentDir:        m.agentDir,
 		IncludeDefaults: true,
-	})
-	m.availableSkills = result.Skills
+	}
+	if m.skillCatalogCache != nil {
+		result := m.skillCatalogCache.Load(opts)
+		m.availableSkills = result.Skills
+	} else {
+		result := core.LoadSkills(opts)
+		m.availableSkills = result.Skills
+	}
+	if m.contextManager != nil {
+		m.contextManager.InvalidateSkills()
+	}
 }
 
 func (m *CodeAgentModel) activateSkillPicker() {
@@ -1225,7 +1243,7 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			usedSkills := []core.Skill{}
 			if m.inputMode == inputModeChat {
 				var err error
-				expandedText, usedSkills, err = core.ExpandSkillReferences(text, m.availableSkills)
+				expandedText, usedSkills, err = core.ExpandSkillReferencesWithCache(text, m.availableSkills, m.skillCatalogCache)
 				if err != nil {
 					m.appendSystemMessage("[Skills] ✗ "+err.Error(), "error")
 					return m, nil
@@ -1409,7 +1427,8 @@ func (m *CodeAgentModel) renderContextPane(height int) string {
 	innerWidth := max(width-4, 10)
 	innerHeight := max(height-2, 8)
 	actionsH := max((innerHeight*30)/100, 3)
-	contextH := max(innerHeight-actionsH-3, 3)
+	diagnosticsH := 6
+	contextH := max(innerHeight-actionsH-diagnosticsH-4, 3)
 
 	actionLines := make([]string, 0, actionsH)
 	for i := len(m.contextActions) - 1; i >= 0 && len(actionLines) < actionsH; i-- {
@@ -1436,10 +1455,14 @@ func (m *CodeAgentModel) renderContextPane(height int) string {
 		contextLines = append(contextLines, "")
 	}
 
+	diagLines := m.renderContextDiagnostics(innerWidth, diagnosticsH)
+
 	lines := []string{lipgloss.NewStyle().Bold(true).Render("Context")}
 	lines = append(lines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Actions (30%)"))
 	lines = append(lines, actionLines...)
-	lines = append(lines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Current context (70%)"))
+	lines = append(lines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Diagnostics"))
+	lines = append(lines, diagLines...)
+	lines = append(lines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Current context"))
 	lines = append(lines, contextLines...)
 
 	content := strings.Join(lines, "\n")
@@ -1449,6 +1472,38 @@ func (m *CodeAgentModel) renderContextPane(height int) string {
 		BorderForeground(lipgloss.Color(m.borderColor)).
 		Padding(0, 1).
 		Render(content)
+}
+
+func (m *CodeAgentModel) renderContextDiagnostics(width int, height int) []string {
+	fp := m.lastPromptFingerprint
+	lines := []string{}
+	if fp.PromptHash == "" {
+		lines = append(lines, "Prompt: (not built yet)")
+	} else {
+		cacheState := "miss"
+		if m.likelyPromptCacheHit {
+			cacheState = "hit-candidate"
+		}
+		lines = append(lines, truncateLine("Prompt hash: "+shortHash(fp.PromptHash), width))
+		lines = append(lines, truncateLine("Stable: "+shortHash(fp.StablePrefixHash), width))
+		lines = append(lines, truncateLine("History: "+shortHash(fp.HistoryHash), width))
+		lines = append(lines, truncateLine(fmt.Sprintf("Cache: %s  builds:%d  stableΔ:%d", cacheState, m.promptBuildCount, m.stablePrefixChangeCount), width))
+		lines = append(lines, truncateLine(fmt.Sprintf("Messages: %d", fp.MessageCount), width))
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return lines
+}
+
+func shortHash(s string) string {
+	if len(s) <= 12 {
+		return s
+	}
+	return s[:12]
 }
 
 func (m *CodeAgentModel) renderContextModal() string {
@@ -1882,7 +1937,24 @@ func (m *CodeAgentModel) chatHistoryAsLLM() ([]llm.Message, error) {
 	if m.contextManager == nil {
 		return append([]llm.Message(nil), baseHistory...), nil
 	}
-	return m.contextManager.Build(baseHistory)
+	msgs, err := m.contextManager.Build(baseHistory)
+	if err != nil {
+		return nil, err
+	}
+	fp := m.contextManager.LastPromptFingerprint()
+	if fp.PromptHash != "" {
+		m.promptBuildCount++
+		m.likelyPromptCacheHit = m.lastPromptFingerprint.StablePrefixHash != "" && fp.StablePrefixHash == m.lastPromptFingerprint.StablePrefixHash
+		if m.lastPromptFingerprint.StablePrefixHash != "" && fp.StablePrefixHash != m.lastPromptFingerprint.StablePrefixHash {
+			m.stablePrefixChangeCount++
+		}
+		if fp.PromptHash != m.lastPromptHash {
+			m.lastPromptHash = fp.PromptHash
+			m.recordContextAction(fmt.Sprintf("Prompt fingerprint updated: %s", fp.PromptHash[:12]))
+		}
+		m.lastPromptFingerprint = fp
+	}
+	return msgs, nil
 }
 
 func (m *CodeAgentModel) startChatStream(history []llm.Message) tea.Cmd {
