@@ -33,6 +33,8 @@ type ToolEvent struct {
 	Output    string
 	IsError   bool
 	IsPartial bool
+	Path      string
+	Command   string
 }
 
 // ChatService provides chat + tool-calling runtime behavior.
@@ -149,9 +151,10 @@ func (s *ChatService) Stream(
 			if callID == "" {
 				callID = fmt.Sprintf("tool_%d_%s", round, tc.Function.Name)
 			}
+			path, command := toolEventMetadata(tc.Function.Name, tc.Function.Arguments)
 
 			if onToolEvent != nil {
-				_ = onToolEvent(ToolEvent{Type: ToolEventStart, CallID: callID, ToolName: tc.Function.Name})
+				_ = onToolEvent(ToolEvent{Type: ToolEventStart, CallID: callID, ToolName: tc.Function.Name, Path: path, Command: command})
 			}
 
 			toolResult, execErr := s.executeToolCall(ctx, tc, callID, onToolEvent)
@@ -170,6 +173,8 @@ func (s *ChatService) Stream(
 					ToolName: tc.Function.Name,
 					Output:   output,
 					IsError:  execErr != nil,
+					Path:     path,
+					Command:  command,
 				})
 			}
 		}
@@ -250,6 +255,27 @@ func (s *ChatService) streamAssistantTurn(ctx context.Context, provider llm.Prov
 	}
 
 	return contentBuilder.String(), toolCalls, nil
+}
+
+func toolEventMetadata(toolName, args string) (path string, command string) {
+	switch toolName {
+	case "read":
+		var in tools.ReadInput
+		if err := json.Unmarshal([]byte(args), &in); err == nil {
+			return strings.TrimSpace(in.Path), ""
+		}
+	case "write":
+		var in tools.WriteInput
+		if err := json.Unmarshal([]byte(args), &in); err == nil {
+			return strings.TrimSpace(in.Path), ""
+		}
+	case "bash":
+		var in tools.BashInput
+		if err := json.Unmarshal([]byte(args), &in); err == nil {
+			return "", strings.TrimSpace(in.Command)
+		}
+	}
+	return "", ""
 }
 
 func (s *ChatService) executeToolCall(ctx context.Context, tc llm.ToolCall, callID string, onToolEvent func(event ToolEvent) error) (any, error) {

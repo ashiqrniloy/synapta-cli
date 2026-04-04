@@ -20,6 +20,11 @@
       "source": "ingpoc/skills",
       "sourceType": "github",
       "computedHash": "5cd498b9b626ebebb2d6961fb49d52e8ae24bf863a9625b5d7c39dcd247d2051"
+    },
+    "ui-ux-pro-max": {
+      "source": "nextlevelbuilder/ui-ux-pro-max-skill",
+      "sourceType": "github",
+      "computedHash": "0a413bf988d06481f69bb81df2070741c3ba12dd9f1be2706d57f259c905992d"
     }
   }
 }

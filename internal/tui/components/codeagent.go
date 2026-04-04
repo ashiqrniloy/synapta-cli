@@ -80,6 +80,7 @@ type ContextEntry struct {
 	Order           int
 	ContextIndex    int
 	Category        string
+	Label           string
 	Role            string
 	Content         string
 	HistoryIndex    int // index in SessionStore.ContextMessages()/filtered history
@@ -507,6 +508,7 @@ func (m *CodeAgentModel) buildContextEntries() []ContextEntry {
 	entries := make([]ContextEntry, 0, len(msgs))
 	hPos := 0
 	for i, msg := range msgs {
+		category := categorizeContextMessage(msg)
 		entry := ContextEntry{
 			Order:           i + 1,
 			ContextIndex:    i,
@@ -514,7 +516,8 @@ func (m *CodeAgentModel) buildContextEntries() []ContextEntry {
 			Content:         strings.TrimSpace(msg.Content),
 			HistoryIndex:    -1,
 			RawHistoryIndex: -1,
-			Category:        categorizeContextMessage(msg),
+			Category:        category,
+			Label:           contextEntryLabel(msg, category),
 		}
 		if msg.Role != "system" && hPos < len(historyIdx) {
 			entry.HistoryIndex = hPos
@@ -555,9 +558,6 @@ func categorizeContextMessage(msg llm.Message) string {
 			return "tool-output"
 		}
 	}
-	if msg.Role == "user" && strings.HasPrefix(content, "Ran `") {
-		return "bash-output"
-	}
 	if msg.Role == "assistant" {
 		return "llm-output"
 	}
@@ -565,6 +565,67 @@ func categorizeContextMessage(msg llm.Message) string {
 		return "user-input"
 	}
 	return "context"
+}
+
+func contextEntryLabel(msg llm.Message, category string) string {
+	content := strings.TrimSpace(msg.Content)
+	switch category {
+	case "user-input":
+		return "User Input"
+	case "llm-output":
+		return "LLM Output"
+	case "compacted-output":
+		return "Compacted Summary"
+	case "skills":
+		if name := extractBetween(content, "<skill name=\"", "\""); name != "" {
+			return "Skill: " + name
+		}
+		return "Skill"
+	case "files-read":
+		if p := extractAfterPrefixLine(content, "Path: "); p != "" {
+			return "Tool Output (File Read): " + p
+		}
+		return "Tool Output (File Read)"
+	case "files-written":
+		if p := extractAfterPrefixLine(content, "Path: "); p != "" {
+			return "Tool Output (File Write): " + p
+		}
+		return "Tool Output (File Write)"
+	case "tool-bash":
+		if cmd := extractAfterPrefixLine(content, "Command: "); cmd != "" {
+			return "Tool Output (Bash): " + cmd
+		}
+		return "Tool Output (Bash)"
+	case "tool-output":
+		return "Tool Output"
+	case "system-prompt":
+		return "System Prompt"
+	default:
+		return "Context"
+	}
+}
+
+func extractAfterPrefixLine(text, prefix string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return ""
+}
+
+func extractBetween(text, start, end string) string {
+	i := strings.Index(text, start)
+	if i < 0 {
+		return ""
+	}
+	s := text[i+len(start):]
+	j := strings.Index(s, end)
+	if j < 0 {
+		return ""
+	}
+	return strings.TrimSpace(s[:j])
 }
 
 func (m *CodeAgentModel) applyContextEntryEdit(entry ContextEntry, content string) {
@@ -808,6 +869,11 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				delete(m.activeToolIndices, e.CallID)
 			}
+			toolCtx := llm.Message{Role: "tool", Name: e.ToolName, ToolCallID: e.CallID, Content: formatToolContextContent(e)}
+			m.conversationHistory = append(m.conversationHistory, toolCtx)
+			if m.sessionStore != nil {
+				_ = m.sessionStore.AppendMessage(toolCtx)
+			}
 		}
 		m.refreshChatViewport()
 		return m, waitForStreamMsg(m.streamCh)
@@ -951,14 +1017,7 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ToolStartedAt: msg.StartedAt,
 			ToolEndedAt:   msg.EndedAt,
 		})
-		bashMsg := llm.Message{
-			Role:    "user",
-			Content: core.BashExecutionToText(msg.Command, msg.Output, msg.Err != nil),
-		}
-		m.conversationHistory = append(m.conversationHistory, bashMsg)
-		if m.sessionStore != nil {
-			_ = m.sessionStore.AppendMessage(bashMsg)
-		}
+		// User-invoked bash mode output is intentionally not added to LLM context history.
 		if msg.IsCD && msg.Err == nil {
 			m.appendSystemMessage("[Bash] cwd: "+m.currentCwd, "info")
 		}
@@ -1427,8 +1486,8 @@ func (m *CodeAgentModel) renderContextPane(height int) string {
 	innerWidth := max(width-4, 10)
 	innerHeight := max(height-2, 8)
 	actionsH := max((innerHeight*30)/100, 3)
-	diagnosticsH := 6
-	contextH := max(innerHeight-actionsH-diagnosticsH-4, 3)
+	skillsH := max((innerHeight*20)/100, 3)
+	contextH := max(innerHeight-actionsH-skillsH-4, 3)
 
 	actionLines := make([]string, 0, actionsH)
 	for i := len(m.contextActions) - 1; i >= 0 && len(actionLines) < actionsH; i-- {
@@ -1440,12 +1499,23 @@ func (m *CodeAgentModel) renderContextPane(height int) string {
 		actionLines = append(actionLines, "")
 	}
 
+	skillLines := make([]string, 0, skillsH)
+	for _, s := range m.availableSkills {
+		skillLines = append(skillLines, truncateLine("@"+s.Name+" — "+s.Description, innerWidth))
+		if len(skillLines) >= skillsH {
+			break
+		}
+	}
+	for len(skillLines) < skillsH {
+		skillLines = append(skillLines, "")
+	}
+
 	entries := m.buildContextEntries()
 	contextLines := make([]string, 0, contextH)
 	for _, e := range entries {
 		badge := renderContextBadge(e.Category)
 		preview := strings.ReplaceAll(strings.TrimSpace(e.Content), "\n", " ")
-		line := fmt.Sprintf("%2d %s %s", e.Order, badge, preview)
+		line := fmt.Sprintf("%2d %s %s — %s", e.Order, badge, e.Label, preview)
 		contextLines = append(contextLines, truncateLine(line, innerWidth))
 		if len(contextLines) >= contextH {
 			break
@@ -1455,13 +1525,11 @@ func (m *CodeAgentModel) renderContextPane(height int) string {
 		contextLines = append(contextLines, "")
 	}
 
-	diagLines := m.renderContextDiagnostics(innerWidth, diagnosticsH)
-
 	lines := []string{lipgloss.NewStyle().Bold(true).Render("Context")}
 	lines = append(lines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Actions (30%)"))
 	lines = append(lines, actionLines...)
-	lines = append(lines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Diagnostics"))
-	lines = append(lines, diagLines...)
+	lines = append(lines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Known skills"))
+	lines = append(lines, skillLines...)
 	lines = append(lines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Current context"))
 	lines = append(lines, contextLines...)
 
@@ -1481,7 +1549,9 @@ func (m *CodeAgentModel) renderContextDiagnostics(width int, height int) []strin
 		lines = append(lines, "Prompt: (not built yet)")
 	} else {
 		cacheState := "miss"
-		if m.likelyPromptCacheHit {
+		if m.promptBuildCount <= 1 {
+			cacheState = "cold-start"
+		} else if m.likelyPromptCacheHit {
 			cacheState = "hit-candidate"
 		}
 		lines = append(lines, truncateLine("Prompt hash: "+shortHash(fp.PromptHash), width))
@@ -1507,8 +1577,8 @@ func shortHash(s string) string {
 }
 
 func (m *CodeAgentModel) renderContextModal() string {
-	width := min(max((m.width*70)/100, 80), m.width-4)
-	height := min(max((m.height*70)/100, 18), m.height-4)
+	width := m.width
+	height := m.height
 
 	if m.contextModalEntries == nil {
 		m.contextModalEntries = m.buildContextEntries()
@@ -1539,7 +1609,7 @@ func (m *CodeAgentModel) renderContextModal() string {
 			}
 			badge := renderContextBadge(e.Category)
 			preview := strings.ReplaceAll(strings.TrimSpace(e.Content), "\n", " ")
-			line := fmt.Sprintf("%s%2d %s %s", prefix, e.Order, badge, preview)
+			line := fmt.Sprintf("%s%2d %s %s — %s", prefix, e.Order, badge, e.Label, preview)
 			listLines = append(listLines, truncateLine(line, leftW-2))
 		}
 		listContent := strings.Join(limitLines(listLines, innerH), "\n")
@@ -1551,7 +1621,10 @@ func (m *CodeAgentModel) renderContextModal() string {
 			Padding(0, 1).
 			Render(listContent)
 
-		previewLines := []string{lipgloss.NewStyle().Bold(true).Render("Selected Entry")}
+		diag := m.renderContextDiagnostics(rightW-4, 5)
+		previewLines := []string{lipgloss.NewStyle().Bold(true).Render("Diagnostics")}
+		previewLines = append(previewLines, diag...)
+		previewLines = append(previewLines, "", lipgloss.NewStyle().Bold(true).Render("Selected Entry"))
 		if len(m.contextModalEntries) > 0 && m.contextModalSelection >= 0 && m.contextModalSelection < len(m.contextModalEntries) {
 			e := m.contextModalEntries[m.contextModalSelection]
 			previewLines = append(previewLines,
@@ -1587,32 +1660,33 @@ func (m *CodeAgentModel) renderContextModal() string {
 		BorderForeground(m.styles.CommandHighlightStyle.GetForeground()).
 		Padding(1, 2).
 		Render(body)
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
+	return modal
 }
 
 func renderContextBadge(category string) string {
 	bg := lipgloss.Color("240")
+	label := category
 	switch category {
 	case "system-prompt":
-		bg = lipgloss.Color("61")
+		bg, label = lipgloss.Color("61"), "System"
 	case "skills":
-		bg = lipgloss.Color("99")
+		bg, label = lipgloss.Color("99"), "Skill"
 	case "compacted-output":
-		bg = lipgloss.Color("172")
+		bg, label = lipgloss.Color("172"), "Compacted"
 	case "files-read":
-		bg = lipgloss.Color("31")
+		bg, label = lipgloss.Color("31"), "Tool:Read"
 	case "files-written":
-		bg = lipgloss.Color("29")
-	case "tool-bash", "bash-output":
-		bg = lipgloss.Color("130")
+		bg, label = lipgloss.Color("29"), "Tool:Write"
+	case "tool-bash":
+		bg, label = lipgloss.Color("130"), "Tool:Bash"
 	case "llm-output":
-		bg = lipgloss.Color("64")
+		bg, label = lipgloss.Color("64"), "LLM"
 	case "user-input":
-		bg = lipgloss.Color("95")
+		bg, label = lipgloss.Color("95"), "User"
 	case "tool-output":
-		bg = lipgloss.Color("67")
+		bg, label = lipgloss.Color("67"), "Tool"
 	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(bg).Bold(true).Padding(0, 1).Render(category)
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(bg).Bold(true).Padding(0, 1).Render(label)
 }
 
 func limitLines(lines []string, maxLines int) []string {
@@ -1645,9 +1719,9 @@ func (m *CodeAgentModel) recalculateLayout() {
 		return
 	}
 
-	m.contextPaneWidth = max(m.width/4, 28)
-	if m.contextPaneWidth > m.width-40 {
-		m.contextPaneWidth = max(m.width-40, 20)
+	m.contextPaneWidth = max((m.width*40)/100, 32)
+	if m.contextPaneWidth > m.width-30 {
+		m.contextPaneWidth = max(m.width-30, 20)
 	}
 	m.chatPaneWidth = max(m.width-m.contextPaneWidth, 20)
 
@@ -1907,6 +1981,36 @@ func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
 		Width(maxWidth)
 
 	return box.Render(header + "\n" + body + footer)
+}
+
+func formatToolContextContent(e core.ToolEvent) string {
+	var b strings.Builder
+	b.WriteString("Tool: ")
+	b.WriteString(strings.TrimSpace(e.ToolName))
+	b.WriteString("\n")
+	if strings.TrimSpace(e.Path) != "" {
+		b.WriteString("Path: ")
+		b.WriteString(strings.TrimSpace(e.Path))
+		b.WriteString("\n")
+	}
+	if strings.TrimSpace(e.Command) != "" {
+		b.WriteString("Command: ")
+		b.WriteString(strings.TrimSpace(e.Command))
+		b.WriteString("\n")
+	}
+	b.WriteString("State: ")
+	if e.IsError {
+		b.WriteString("error\n")
+	} else {
+		b.WriteString("done\n")
+	}
+	b.WriteString("\nOutput:\n")
+	if strings.TrimSpace(e.Output) == "" {
+		b.WriteString("(no output)")
+	} else {
+		b.WriteString(strings.TrimSpace(e.Output))
+	}
+	return b.String()
 }
 
 func (m *CodeAgentModel) chatHistoryAsLLM() ([]llm.Message, error) {
