@@ -74,8 +74,7 @@ func NewStyles(t config.Theme) *Styles {
 		BaseStyle: lipgloss.NewStyle(),
 		TitleStyle: lipgloss.NewStyle().
 			Foreground(primary).
-			Bold(true).
-			PaddingLeft(1),
+			Bold(true),
 		SubtitleStyle: lipgloss.NewStyle().
 			Foreground(muted),
 		BorderStyle: lipgloss.NewStyle().
@@ -98,8 +97,6 @@ func NewStyles(t config.Theme) *Styles {
 		SystemMessageStyle: lipgloss.NewStyle().
 			Foreground(fgColor).
 			Background(systemBg).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(sysColor).
 			Padding(0, 1),
 	}
 }

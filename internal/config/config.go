@@ -23,6 +23,7 @@ type Keybindings struct {
 	Quit    string `mapstructure:"quit"`
 	Command string `mapstructure:"command"`
 	Context string `mapstructure:"context"`
+	Help    string `mapstructure:"help"`
 }
 
 // Theme defines a complete colour palette for a named theme.
@@ -49,6 +50,30 @@ type Theme struct {
 }
 
 func defaultTheme() Theme {
+	return Theme{
+		Name:                        "Nord Aurora Dark",
+		Background:                  "#1f2430",
+		Foreground:                  "#d8dee9",
+		Primary:                     "#88c0d0",
+		Secondary:                   "#a3be8c",
+		Accent:                      "#b48ead",
+		Muted:                       "#6b7488",
+		Border:                      "#3b4252",
+		Selection:                   "#2b303b",
+		Error:                       "#bf616a",
+		Success:                     "#a3be8c",
+		CursorFG:                    "#1f2430",
+		CursorBG:                    "#88c0d0",
+		HighlightColor:              "#88c0d0",
+		HighlightOpacity:            0.24,
+		InteractionHighlightColor:   "#b48ead",
+		InteractionHighlightOpacity: 0.14,
+		SystemMessageColor:          "#81a1c1",
+		SystemMessageOpacity:        0.14,
+	}
+}
+
+func gruvboxMaterialTheme() Theme {
 	return Theme{
 		Name:                        "Gruvbox Material Dark",
 		Background:                  "#282828",
@@ -84,15 +109,20 @@ type ProviderConfig struct {
 	Model   string `mapstructure:"model"`   // Model ID (e.g., "gpt-4o", "claude-sonnet-4-20250514")
 }
 
+type UIConfig struct {
+	Density string `mapstructure:"density"` // compact | comfortable
+}
+
 // AppConfig is the top-level configuration structure.
 type AppConfig struct {
 	Keybindings Keybindings    `mapstructure:"keybindings"`
 	Themes      RawThemes      `mapstructure:"themes"`
 	Provider    ProviderConfig `mapstructure:"provider"`
+	UI          UIConfig       `mapstructure:"ui"`
 }
 
 // ActiveTheme returns the currently selected Theme, falling back to the
-// built-in Gruvbox Material Dark default.
+// built-in default theme.
 func (c *AppConfig) ActiveTheme() Theme {
 	key := c.Themes.Default
 	if key == "" {
@@ -117,12 +147,14 @@ func defaultKeybindings() Keybindings {
 		Quit:    "ctrl+c",
 		Command: "ctrl+p",
 		Context: "ctrl+k",
+		Help:    "ctrl+j",
 	}
 }
 
 func defaultThemesMap() map[string]Theme {
 	return map[string]Theme{
-		"gruvbox-material-dark": defaultTheme(),
+		"nord-aurora-dark":      defaultTheme(),
+		"gruvbox-material-dark": gruvboxMaterialTheme(),
 	}
 }
 
@@ -131,9 +163,10 @@ func DefaultConfig() *AppConfig {
 	return &AppConfig{
 		Keybindings: defaultKeybindings(),
 		Themes: RawThemes{
-			Default: "gruvbox-material-dark",
+			Default: "nord-aurora-dark",
 			Map:     defaultThemesMap(),
 		},
+		UI: UIConfig{Density: "comfortable"},
 	}
 }
 
@@ -180,6 +213,9 @@ func LoadConfig() (*AppConfig, error) {
 		if v, ok := kb["context"]; ok && v != "" {
 			cfg.Keybindings.Context = v
 		}
+		if v, ok := kb["help"]; ok && v != "" {
+			cfg.Keybindings.Help = v
+		}
 	}
 
 	// Provider config
@@ -188,6 +224,13 @@ func LoadConfig() (*AppConfig, error) {
 	}
 	if m := v.GetString("provider.model"); m != "" {
 		cfg.Provider.Model = m
+	}
+
+	// UI config
+	if d := strings.ToLower(strings.TrimSpace(v.GetString("ui.density"))); d != "" {
+		if d == "compact" || d == "comfortable" {
+			cfg.UI.Density = d
+		}
 	}
 
 	// Active theme key

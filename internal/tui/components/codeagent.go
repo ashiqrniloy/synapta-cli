@@ -65,6 +65,8 @@ type ChatMessage struct {
 	SystemKind    string // "info", "working", "done", "error"
 	ToolCallID    string
 	ToolName      string
+	ToolPath      string
+	ToolCommand   string
 	ToolState     string // "running", "done", "error"
 	IsPartial     bool
 	ToolStartedAt time.Time
@@ -133,6 +135,18 @@ type bashCommandDoneMsg struct {
 	IsCD      bool
 }
 
+type providerBalanceMsg struct {
+	ProviderID string
+	Balance    string
+	Err        error
+}
+
+type keybindingRow struct {
+	Action      string
+	Binding     string
+	Description string
+}
+
 const (
 	inputModeChat = "chat"
 	inputModeBash = "bash"
@@ -157,9 +171,11 @@ type CodeAgentModel struct {
 	skillCatalogCache *core.SkillCatalogCache
 
 	// Selected model
-	selectedModelName string
-	selectedModelID   string
-	selectedProvider  string
+	selectedModelName     string
+	selectedModelID       string
+	selectedProvider      string
+	selectedThinkingLevel string
+	providerBalance       string
 
 	// Chat messages
 	chatMessages          []ChatMessage
@@ -198,6 +214,9 @@ type CodeAgentModel struct {
 	contextModalEditor      textarea.Model
 	contextModalEditorHint  string
 	contextOverrideActive   bool
+	keybindingsModalOpen    bool
+	keybindingsSearch       string
+	keybindingsSelection    int
 	lastPromptHash          string
 	lastPromptFingerprint   core.PromptFingerprint
 	likelyPromptCacheHit    bool
@@ -261,6 +280,7 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		model.selectedProvider = cfg.Provider.Default
 		model.selectedModelID = cfg.Provider.Model
 		model.selectedModelName = cfg.Provider.Model
+		model.selectedThinkingLevel = inferThinkingLevel(cfg.Provider.Model, cfg.Provider.Model)
 	}
 
 	model.rebuildTranscriptFromHistory()
@@ -357,6 +377,20 @@ func (m *CodeAgentModel) getContextKey() string {
 		return normalizeKeyName(m.cfg.Keybindings.Context)
 	}
 	return "ctrl+k"
+}
+
+func (m *CodeAgentModel) getCommandKey() string {
+	if m.cfg != nil && m.cfg.Keybindings.Command != "" {
+		return normalizeKeyName(m.cfg.Keybindings.Command)
+	}
+	return "ctrl+p"
+}
+
+func (m *CodeAgentModel) getHelpKey() string {
+	if m.cfg != nil && m.cfg.Keybindings.Help != "" {
+		return normalizeKeyName(m.cfg.Keybindings.Help)
+	}
+	return "ctrl+j"
 }
 
 // getFilterText returns the text used for filtering (after the ':' prefix).
@@ -673,6 +707,9 @@ func (m *CodeAgentModel) removeContextEntry(entry ContextEntry) {
 // ─── tea.Model ───────────────────────────────────────────────────────
 
 func (m *CodeAgentModel) Init() tea.Cmd {
+	if m.selectedProvider == "kilo" {
+		return tea.Batch(textarea.Blink, m.fetchProviderBalanceCmd("kilo"))
+	}
 	return textarea.Blink
 }
 
@@ -722,6 +759,7 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedProvider = providerID
 				m.selectedModelID = modelID
 				m.selectedModelName = msg.Path[1].Name
+				m.selectedThinkingLevel = inferThinkingLevel(modelID, msg.Path[1].Name)
 				if m.cfg != nil {
 					if err := m.cfg.SetProvider(providerID, modelID); err != nil {
 						m.appendSystemMessage("[Model] Warning: failed to save config: "+err.Error(), "error")
@@ -729,6 +767,10 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.clearCommandMode()
 				m.appendSystemMessage("[Model] Selected: "+msg.Path[1].Name, "done")
+				m.providerBalance = ""
+				if providerID == "kilo" {
+					return m, m.fetchProviderBalanceCmd("kilo")
+				}
 			} else {
 				// Need to load models first
 				return m, m.loadModels()
@@ -802,6 +844,16 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendSystemMessage("[Kilo] "+string(msg), "info")
 		return m, nil
 
+	case providerBalanceMsg:
+		if msg.ProviderID == m.selectedProvider {
+			if msg.Err != nil {
+				m.providerBalance = ""
+			} else {
+				m.providerBalance = msg.Balance
+			}
+		}
+		return m, nil
+
 	case KiloAuthCompleteMsg:
 		if msg.Err != nil {
 			// Split error message into multiple lines for readability
@@ -810,11 +862,11 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for _, line := range errLines {
 				m.appendSystemMessage("[Kilo]   "+line, "error")
 			}
-		} else {
-			m.appendSystemMessage("[Kilo] ✓ Authentication successful! "+msg.Email, "done")
-			m.appendSystemMessage("[Kilo] ✓ "+fmt.Sprintf("%d models available", msg.ModelCount), "done")
+			return m, nil
 		}
-		return m, nil
+		m.appendSystemMessage("[Kilo] ✓ Authentication successful! "+msg.Email, "done")
+		m.appendSystemMessage("[Kilo] ✓ "+fmt.Sprintf("%d models available", msg.ModelCount), "done")
+		return m, m.fetchProviderBalanceCmd("kilo")
 
 	case chatStreamChunkMsg:
 		if m.firstChunkAt.IsZero() {
@@ -839,6 +891,8 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Role:          "tool",
 				ToolCallID:    e.CallID,
 				ToolName:      e.ToolName,
+				ToolPath:      e.Path,
+				ToolCommand:   e.Command,
 				ToolState:     "running",
 				Content:       "",
 				IsPartial:     true,
@@ -858,6 +912,12 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if idx, ok := m.activeToolIndices[e.CallID]; ok && idx >= 0 && idx < len(m.chatMessages) {
 				if strings.TrimSpace(e.Output) != "" {
 					m.chatMessages[idx].Content = e.Output
+				}
+				if strings.TrimSpace(e.Path) != "" {
+					m.chatMessages[idx].ToolPath = e.Path
+				}
+				if strings.TrimSpace(e.Command) != "" {
+					m.chatMessages[idx].ToolCommand = e.Command
 				}
 				m.chatMessages[idx].IsPartial = false
 				m.chatMessages[idx].ToolEndedAt = time.Now()
@@ -1012,6 +1072,7 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendChatMessage(ChatMessage{
 			Role:          "tool",
 			ToolName:      "bash",
+			ToolCommand:   msg.Command,
 			ToolState:     state,
 			Content:       msg.Output,
 			ToolStartedAt: msg.StartedAt,
@@ -1050,6 +1111,54 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		keyStr := msg.String()
 		quitKey := m.getQuitKey()
 		contextKey := m.getContextKey()
+		helpKey := m.getHelpKey()
+
+		if m.keybindingsModalOpen {
+			if keyStr == "esc" || keyStr == helpKey {
+				m.keybindingsModalOpen = false
+				return m, nil
+			}
+			if keyStr == "up" && m.keybindingsSelection > 0 {
+				m.keybindingsSelection--
+				return m, nil
+			}
+			if keyStr == "down" {
+				rows := m.filteredKeybindingRows()
+				if m.keybindingsSelection < len(rows)-1 {
+					m.keybindingsSelection++
+				}
+				return m, nil
+			}
+			if keyStr == "pgup" || keyStr == "pageup" {
+				m.keybindingsSelection -= 8
+				if m.keybindingsSelection < 0 {
+					m.keybindingsSelection = 0
+				}
+				return m, nil
+			}
+			if keyStr == "pgdown" || keyStr == "pagedown" {
+				rows := m.filteredKeybindingRows()
+				m.keybindingsSelection += 8
+				if m.keybindingsSelection >= len(rows) {
+					m.keybindingsSelection = max(len(rows)-1, 0)
+				}
+				return m, nil
+			}
+			if keyStr == "backspace" {
+				r := []rune(m.keybindingsSearch)
+				if len(r) > 0 {
+					m.keybindingsSearch = string(r[:len(r)-1])
+					m.keybindingsSelection = 0
+				}
+				return m, nil
+			}
+			if len([]rune(keyStr)) == 1 && !msg.Mod.Contains(tea.ModCtrl) && !msg.Mod.Contains(tea.ModAlt) {
+				m.keybindingsSearch += keyStr
+				m.keybindingsSelection = 0
+				return m, nil
+			}
+			return m, nil
+		}
 
 		if m.contextModalOpen {
 			if keyStr == "esc" {
@@ -1116,6 +1225,13 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.appendSystemMessage("[Compact] Running manual compaction...", "working")
 				return m, m.manualCompactCmd()
 			}
+			return m, nil
+		}
+
+		if keyStr == helpKey {
+			m.keybindingsModalOpen = true
+			m.keybindingsSearch = ""
+			m.keybindingsSelection = 0
 			return m, nil
 		}
 
@@ -1268,7 +1384,11 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
-		// Check for ':' as first character to enter command mode
+		// Enter command mode via configured key or ':' prefix.
+		if keyStr == m.getCommandKey() {
+			m.enterCommandMode()
+			return m, nil
+		}
 		if keyStr == ":" {
 			value := m.ta.Value()
 			if value == "" {
@@ -1397,19 +1517,30 @@ func (m *CodeAgentModel) View() tea.View {
 		return v
 	}
 
-	title := strings.TrimRight(m.renderProminentTitle(), "\n")
+	header := strings.TrimRight(m.renderHeaderBar(), "\n")
 	inputBox := strings.TrimRight(m.renderInputBox(), "\n")
-	instructions := strings.TrimRight(m.renderInstructions(), "\n")
+	modelFooter := strings.TrimRight(m.renderModelFooter(), "\n")
 
 	chatView := lipgloss.NewStyle().Width(m.chatPaneWidth).Render(m.chatViewport.View())
 	contextView := m.renderContextPane(m.chatViewport.Height())
-	middle := lipgloss.JoinHorizontal(lipgloss.Top, chatView, contextView)
+	middle := lipgloss.JoinHorizontal(lipgloss.Top, chatView, " ", contextView)
 
+	divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(m.width, 1)))
 	var sections []string
-	sections = append(sections, "", title, "", middle, "", inputBox, instructions)
+	sections = append(sections, header, divider, middle)
+	if !m.isCompactDensity() {
+		sections = append(sections, "")
+	}
+	sections = append(sections, inputBox)
+	if modelFooter != "" {
+		sections = append(sections, modelFooter)
+	}
 	base := strings.Join(sections, "\n")
 	if m.contextModalOpen {
 		base = m.renderContextModal()
+	}
+	if m.keybindingsModalOpen {
+		base = m.renderKeybindingsModal()
 	}
 
 	v := tea.NewView(base)
@@ -1427,67 +1558,96 @@ func countLines(s string) int {
 	return strings.Count(s, "\n") + 1
 }
 
-func (m *CodeAgentModel) renderProminentTitle() string {
-	return lipgloss.NewStyle().
-		Width(m.width).
+func (m *CodeAgentModel) renderHeaderBar() string {
+	title := m.styles.TitleStyle.Render("SYNAPTA CODE")
+	titleW := lipgloss.Width(title)
+	if titleW >= m.width {
+		return lipgloss.NewStyle().Width(m.width).Align(lipgloss.Center).Render(truncateLine(title, m.width))
+	}
+
+	provider := m.providerDisplayLabel()
+	if m.providerBalance != "" && m.selectedProvider == "kilo" {
+		provider += " · " + m.providerBalance
+	}
+	cwd := "cwd: " + m.currentCwd
+
+	remaining := m.width - titleW
+	leftW := remaining / 2
+	rightW := remaining - leftW
+
+	left := lipgloss.NewStyle().
+		Width(leftW).
+		Align(lipgloss.Left).
+		Foreground(m.styles.MutedStyle.GetForeground()).
+		Render(truncateLine(provider, leftW))
+	center := lipgloss.NewStyle().
+		Width(titleW).
 		Align(lipgloss.Center).
-		Bold(true).
-		Foreground(m.styles.CommandHighlightStyle.GetForeground()).
-		Background(m.styles.CommandHighlightStyle.GetBackground()).
-		Render("█ SYNAPTA CODE █")
+		Render(title)
+	right := lipgloss.NewStyle().
+		Width(rightW).
+		Align(lipgloss.Right).
+		Foreground(m.styles.MutedStyle.GetForeground()).
+		Render(truncateLine(cwd, rightW))
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, center, right)
 }
 
 func (m *CodeAgentModel) renderInputBox() string {
 	taView := strings.TrimRight(m.ta.View(), "\n")
-	innerWidth := max(m.width-6, 20)
+	innerWidth := max(m.width-4, 20)
 	if m.picker.IsActive() {
 		taView = lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(taView)
 		pickerView := strings.TrimRight(m.picker.View(innerWidth), "\n")
 		if pickerView != "" {
-			divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(innerWidth-2, 1)))
+			divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(innerWidth, 1)))
 			taView += "\n" + divider + "\n" + pickerView
 		}
 	} else if m.skillPicker != nil && m.skillPicker.IsActive() {
 		taView = lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(taView)
 		pickerView := strings.TrimRight(m.skillPicker.View(innerWidth), "\n")
 		if pickerView != "" {
-			divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(innerWidth-2, 1)))
+			divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(innerWidth, 1)))
 			taView += "\n" + divider + "\n" + pickerView
 		}
 	}
 	borderStyle := lipgloss.NewStyle().
+		Width(m.width).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(m.borderColor)).
 		Padding(0, 1)
 	return borderStyle.Render(taView)
 }
 
-func (m *CodeAgentModel) renderInstructions() string {
-	enterAction := "Enter send"
-	if m.inputMode == inputModeBash {
-		enterAction = "Enter run bash"
+func (m *CodeAgentModel) renderModelFooter() string {
+	if m.selectedModelName == "" {
+		return ""
 	}
-	instructionsText := "PgUp/PgDn scroll  │  Ctrl+O toggle latest tool  │  Shift+Enter newline  │  " + enterAction + "  │  :=commands  │  @skills  │  Ctrl+K context  │  Ctrl+C quit"
-	if m.currentCwd != "" {
-		instructionsText += "  │  cwd: " + m.currentCwd
+	thinking := m.selectedThinkingLevel
+	if thinking == "" {
+		thinking = inferThinkingLevel(m.selectedModelID, m.selectedModelName)
 	}
-	if m.inputMode == inputModeChat && m.selectedModelName != "" {
-		instructionsText += "  │  " + m.selectedModelName
-	}
+	text := fmt.Sprintf("%s  •  thinking: %s", m.selectedModelName, thinking)
 	return lipgloss.NewStyle().
 		Foreground(m.styles.MutedStyle.GetForeground()).
 		Width(m.width).
-		Align(lipgloss.Center).
-		Render(instructionsText)
+		Align(lipgloss.Right).
+		Render(text)
 }
 
 func (m *CodeAgentModel) renderContextPane(height int) string {
 	width := max(m.contextPaneWidth, 20)
 	innerWidth := max(width-4, 10)
 	innerHeight := max(height-2, 8)
-	actionsH := max((innerHeight*30)/100, 3)
-	skillsH := max((innerHeight*20)/100, 3)
-	contextH := max(innerHeight-actionsH-skillsH-4, 3)
+	actionsRatio := 24
+	skillsRatio := 16
+	if m.isCompactDensity() {
+		actionsRatio = 20
+		skillsRatio = 12
+	}
+	actionsH := max((innerHeight*actionsRatio)/100, 3)
+	skillsH := max((innerHeight*skillsRatio)/100, 3)
+	contextH := max(innerHeight-actionsH-skillsH-6, 4)
 
 	actionLines := make([]string, 0, actionsH)
 	for i := len(m.contextActions) - 1; i >= 0 && len(actionLines) < actionsH; i-- {
@@ -1513,10 +1673,7 @@ func (m *CodeAgentModel) renderContextPane(height int) string {
 	entries := m.buildContextEntries()
 	contextLines := make([]string, 0, contextH)
 	for _, e := range entries {
-		badge := renderContextBadge(e.Category)
-		preview := strings.ReplaceAll(strings.TrimSpace(e.Content), "\n", " ")
-		line := fmt.Sprintf("%2d %s %s — %s", e.Order, badge, e.Label, preview)
-		contextLines = append(contextLines, truncateLine(line, innerWidth))
+		contextLines = append(contextLines, m.renderContextPreviewLine(e, innerWidth))
 		if len(contextLines) >= contextH {
 			break
 		}
@@ -1525,12 +1682,16 @@ func (m *CodeAgentModel) renderContextPane(height int) string {
 		contextLines = append(contextLines, "")
 	}
 
+	muted := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground())
+	sep := muted.Render(strings.Repeat("─", max(innerWidth, 1)))
 	lines := []string{lipgloss.NewStyle().Bold(true).Render("Context")}
-	lines = append(lines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Actions (30%)"))
+	lines = append(lines, muted.Render("Actions"))
 	lines = append(lines, actionLines...)
-	lines = append(lines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Known skills"))
+	lines = append(lines, sep)
+	lines = append(lines, muted.Render("Known skills"))
 	lines = append(lines, skillLines...)
-	lines = append(lines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Current context"))
+	lines = append(lines, sep)
+	lines = append(lines, muted.Render("Current context"))
 	lines = append(lines, contextLines...)
 
 	content := strings.Join(lines, "\n")
@@ -1540,6 +1701,21 @@ func (m *CodeAgentModel) renderContextPane(height int) string {
 		BorderForeground(lipgloss.Color(m.borderColor)).
 		Padding(0, 1).
 		Render(content)
+}
+
+func (m *CodeAgentModel) renderContextPreviewLine(e ContextEntry, width int) string {
+	badge := renderContextBadge(e.Category)
+	_, badgeLabel := contextBadgeLabel(e.Category)
+	prefix := fmt.Sprintf("%2d ", e.Order)
+	headPlain := fmt.Sprintf("%2d %s %s — ", e.Order, badgeLabel, e.Label)
+	remaining := width - lipgloss.Width(headPlain)
+	if remaining < 0 {
+		remaining = 0
+	}
+	preview := strings.ReplaceAll(strings.TrimSpace(e.Content), "\n", " ")
+	preview = truncateLine(preview, remaining)
+	line := prefix + badge + " " + e.Label + " — " + preview
+	return truncateLine(line, width)
 }
 
 func (m *CodeAgentModel) renderContextDiagnostics(width int, height int) []string {
@@ -1607,10 +1783,8 @@ func (m *CodeAgentModel) renderContextModal() string {
 			if i == m.contextModalSelection {
 				prefix = "▸ "
 			}
-			badge := renderContextBadge(e.Category)
-			preview := strings.ReplaceAll(strings.TrimSpace(e.Content), "\n", " ")
-			line := fmt.Sprintf("%s%2d %s %s — %s", prefix, e.Order, badge, e.Label, preview)
-			listLines = append(listLines, truncateLine(line, leftW-2))
+			line := m.renderContextPreviewLine(e, leftW-4)
+			listLines = append(listLines, truncateLine(prefix+line, leftW-2))
 		}
 		listContent := strings.Join(limitLines(listLines, innerH), "\n")
 		leftPane := lipgloss.NewStyle().
@@ -1663,30 +1837,155 @@ func (m *CodeAgentModel) renderContextModal() string {
 	return modal
 }
 
-func renderContextBadge(category string) string {
-	bg := lipgloss.Color("240")
+func contextBadgeLabel(category string) (string, string) {
+	bg := "240"
 	label := category
 	switch category {
 	case "system-prompt":
-		bg, label = lipgloss.Color("61"), "System"
+		bg, label = "61", "System"
 	case "skills":
-		bg, label = lipgloss.Color("99"), "Skill"
+		bg, label = "99", "Skill"
 	case "compacted-output":
-		bg, label = lipgloss.Color("172"), "Compacted"
+		bg, label = "172", "Compacted"
 	case "files-read":
-		bg, label = lipgloss.Color("31"), "Tool:Read"
+		bg, label = "31", "Tool:Read"
 	case "files-written":
-		bg, label = lipgloss.Color("29"), "Tool:Write"
+		bg, label = "29", "Tool:Write"
 	case "tool-bash":
-		bg, label = lipgloss.Color("130"), "Tool:Bash"
+		bg, label = "130", "Tool:Bash"
 	case "llm-output":
-		bg, label = lipgloss.Color("64"), "LLM"
+		bg, label = "64", "LLM"
 	case "user-input":
-		bg, label = lipgloss.Color("95"), "User"
+		bg, label = "95", "User"
 	case "tool-output":
-		bg, label = lipgloss.Color("67"), "Tool"
+		bg, label = "67", "Tool"
 	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(bg).Bold(true).Padding(0, 1).Render(label)
+	return bg, label
+}
+
+func (m *CodeAgentModel) providerDisplayLabel() string {
+	switch m.selectedProvider {
+	case "kilo":
+		return "Kilo Gateway"
+	case "github-copilot":
+		return "GitHub Copilot"
+	case "":
+		return "No provider"
+	default:
+		return m.selectedProvider
+	}
+}
+
+func inferThinkingLevel(modelID, modelName string) string {
+	id := strings.ToLower(modelID + " " + modelName)
+	if strings.Contains(id, "thinking") || strings.Contains(id, "reason") || strings.Contains(id, "r1") || strings.Contains(id, "o1") || strings.Contains(id, "o3") {
+		return "reasoning"
+	}
+	return "standard"
+}
+
+func (m *CodeAgentModel) densityMode() string {
+	if m.cfg != nil {
+		d := strings.ToLower(strings.TrimSpace(m.cfg.UI.Density))
+		if d == "compact" || d == "comfortable" {
+			return d
+		}
+	}
+	return "comfortable"
+}
+
+func (m *CodeAgentModel) isCompactDensity() bool {
+	return m.densityMode() == "compact"
+}
+
+func (m *CodeAgentModel) keybindingRows() []keybindingRow {
+	newline := "shift+enter"
+	if m.cfg != nil && m.cfg.Keybindings.Newline != "" {
+		newline = normalizeKeyName(m.cfg.Keybindings.Newline)
+	}
+	return []keybindingRow{
+		{Action: "Submit", Binding: m.getSubmitKey(), Description: "Send message / run bash"},
+		{Action: "Newline", Binding: newline, Description: "Insert newline in input"},
+		{Action: "Command palette", Binding: m.getCommandKey(), Description: "Open command picker"},
+		{Action: "Context manager", Binding: m.getContextKey(), Description: "Open context modal"},
+		{Action: "Keybindings help", Binding: m.getHelpKey(), Description: "Open keybindings modal"},
+		{Action: "Toggle tool expansion", Binding: "ctrl+o", Description: "Expand/collapse latest tool block"},
+		{Action: "Skill picker", Binding: "@", Description: "Open skills suggestions"},
+		{Action: "Quit", Binding: m.getQuitKey(), Description: "Exit Synapta Code"},
+	}
+}
+
+func (m *CodeAgentModel) filteredKeybindingRows() []keybindingRow {
+	rows := m.keybindingRows()
+	q := strings.ToLower(strings.TrimSpace(m.keybindingsSearch))
+	if q == "" {
+		return rows
+	}
+	filtered := make([]keybindingRow, 0, len(rows))
+	for _, r := range rows {
+		h := strings.ToLower(r.Action + " " + r.Binding + " " + r.Description)
+		if strings.Contains(h, q) {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
+}
+
+func (m *CodeAgentModel) renderKeybindingsModal() string {
+	rows := m.filteredKeybindingRows()
+	if m.keybindingsSelection >= len(rows) {
+		m.keybindingsSelection = max(len(rows)-1, 0)
+	}
+
+	width := max(m.width-8, 60)
+	height := max(m.height-6, 16)
+	listH := max(height-8, 8)
+
+	lines := []string{lipgloss.NewStyle().Bold(true).Render("Keybindings")}
+	search := m.keybindingsSearch
+	if search == "" {
+		search = "type to search..."
+	}
+	lines = append(lines, m.styles.MutedStyle.Render("Search: "+search), "")
+
+	start := 0
+	if m.keybindingsSelection >= listH {
+		start = m.keybindingsSelection - listH + 1
+	}
+	end := min(start+listH, len(rows))
+	if len(rows) == 0 {
+		lines = append(lines, m.styles.MutedStyle.Render("No keybindings match search."))
+	} else {
+		for i := start; i < end; i++ {
+			r := rows[i]
+			line := fmt.Sprintf("%-18s  %-10s  %s", r.Action, r.Binding, r.Description)
+			if i == m.keybindingsSelection {
+				lines = append(lines, m.styles.CommandHighlightStyle.Render(truncateLine("▸ "+line, width-6)))
+			} else {
+				lines = append(lines, truncateLine("  "+line, width-6))
+			}
+		}
+	}
+	lines = append(lines, "", m.styles.MutedStyle.Render("↑↓ navigate  •  PgUp/PgDn scroll  •  type to filter  •  Backspace delete  •  Esc close"))
+
+	body := strings.Join(lines, "\n")
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		AlignHorizontal(lipgloss.Center).
+		AlignVertical(lipgloss.Center).
+		Render(lipgloss.NewStyle().
+			Width(width).
+			Height(height).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(m.styles.CommandHighlightStyle.GetForeground()).
+			Padding(1, 2).
+			Render(body))
+}
+
+func renderContextBadge(category string) string {
+	bg, label := contextBadgeLabel(category)
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color(bg)).Bold(true).Padding(0, 1).Render(label)
 }
 
 func limitLines(lines []string, maxLines int) []string {
@@ -1705,13 +2004,13 @@ func limitLines(lines []string, maxLines int) []string {
 }
 
 func truncateLine(s string, maxLen int) string {
-	if maxLen <= 0 || len(s) <= maxLen {
+	if maxLen <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= maxLen {
 		return s
 	}
-	if maxLen <= 1 {
-		return "…"
-	}
-	return s[:maxLen-1] + "…"
+	return lipgloss.NewStyle().MaxWidth(maxLen).Render(s)
 }
 
 func (m *CodeAgentModel) recalculateLayout() {
@@ -1725,19 +2024,23 @@ func (m *CodeAgentModel) recalculateLayout() {
 	}
 	m.chatPaneWidth = max(m.width-m.contextPaneWidth, 20)
 
-	m.ta.SetWidth(max(m.width-6, 40))
+	m.ta.SetWidth(max(m.width-4, 20))
 
 	inputH := countLines(m.renderInputBox())
-	instructionsH := countLines(m.renderInstructions())
+	footerH := countLines(m.renderModelFooter())
 
-	reserved := 3 + inputH + instructionsH + 2 // 3 title rows + spacers around chat
+	spacers := 2
+	if m.isCompactDensity() {
+		spacers = 1
+	}
+	reserved := 2 + inputH + footerH + spacers // header + spacers
 
 	chatH := m.height - reserved
 	if chatH < 3 {
 		chatH = 3
 	}
 
-	m.chatViewport.SetWidth(max(m.chatPaneWidth-4, 20))
+	m.chatViewport.SetWidth(max(m.chatPaneWidth, 20))
 	m.chatViewport.SetHeight(chatH)
 }
 
@@ -1758,7 +2061,11 @@ func (m *CodeAgentModel) renderChatTranscript() string {
 			lines = append(lines, strings.TrimRight(m.renderSystemMessage(msg), "\n"))
 		}
 	}
-	return strings.Join(lines, "\n\n")
+	sep := "\n\n"
+	if m.isCompactDensity() {
+		sep = "\n"
+	}
+	return strings.Join(lines, sep)
 }
 
 func (m *CodeAgentModel) refreshChatViewport() {
@@ -1842,119 +2149,134 @@ func (m *CodeAgentModel) bashWorkingStatusText() string {
 
 // renderUserMessage renders a user message with interaction highlight.
 func (m *CodeAgentModel) renderUserMessage(content string) string {
-	// Calculate available width for the message
-	maxWidth := m.chatPaneWidth - 8
-	if maxWidth < 20 {
-		maxWidth = 20
-	}
-
-	// Word wrap the content
-	lines := wordWrap(content, maxWidth-4) // 4 for padding
-	if len(lines) == 0 {
-		lines = []string{""}
-	}
-
-	// Render each line with the interaction highlight style
-	var rendered []string
-	for _, line := range lines {
-		rendered = append(rendered, line)
-	}
-
-	// Join lines and apply style
-	joined := strings.Join(rendered, "\n")
-	return m.styles.InteractionHighlightStyle.
-		Width(maxWidth).
-		Padding(0, 1).
-		Render(joined)
-}
-
-func (m *CodeAgentModel) renderAssistantMessage(content string) string {
-	maxWidth := m.chatPaneWidth - 8
-	if maxWidth < 20 {
-		maxWidth = 20
-	}
-
+	maxWidth := max(m.chatViewport.Width(), 20)
+	label := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Bold(true).Render("You")
 	lines := wordWrap(content, maxWidth-2)
 	if len(lines) == 0 {
 		lines = []string{""}
 	}
+	padY := 0
+	if !m.isCompactDensity() {
+		padY = 1
+	}
+	return m.styles.InteractionHighlightStyle.
+		Width(maxWidth).
+		Padding(padY, 1).
+		Render(label + "\n" + strings.Join(lines, "\n"))
+}
 
-	joined := strings.Join(lines, "\n")
-	return lipgloss.NewStyle().
+func (m *CodeAgentModel) renderAssistantMessage(content string) string {
+	maxWidth := max(m.chatViewport.Width(), 20)
+	label := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Bold(true).Render("Assistant")
+	lines := wordWrap(content, maxWidth)
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	body := lipgloss.NewStyle().
 		Foreground(m.styles.CommandHighlightStyle.GetForeground()).
 		Width(maxWidth).
-		Render(joined)
+		Render(strings.Join(lines, "\n"))
+	return label + "\n" + body
 }
 
 func (m *CodeAgentModel) renderSystemMessage(msg ChatMessage) string {
-	maxWidth := m.chatPaneWidth - 8
-	if maxWidth < 20 {
-		maxWidth = 20
-	}
-
+	maxWidth := max(m.chatViewport.Width(), 20)
 	lines := wordWrap(strings.TrimSpace(msg.Content), maxWidth-4)
 	if len(lines) == 0 {
 		lines = []string{""}
 	}
 
-	rendered := strings.Join(lines, "\n")
-	style := m.styles.SystemMessageStyle.Width(maxWidth)
-
+	t := m.cfg.ActiveTheme()
+	fg := lipgloss.Color(t.Foreground)
+	bg := lipgloss.Color(t.SystemMessageColor)
+	prefix := "ℹ"
 	switch msg.SystemKind {
 	case "error":
-		style = style.BorderForeground(lipgloss.Color("9"))
+		prefix = "✗"
+		bg = lipgloss.Color(t.Error)
 	case "done":
-		style = style.BorderForeground(m.styles.SuccessStyle.GetForeground())
+		prefix = "✓"
+		bg = lipgloss.Color(t.Success)
 	case "working":
-		style = style.BorderForeground(m.styles.CommandHighlightStyle.GetForeground())
+		prefix = "…"
+		bg = lipgloss.Color(t.Primary)
 	}
 
-	return style.Render(rendered)
+	label := lipgloss.NewStyle().Bold(true).Foreground(fg).Render("System " + prefix)
+	content := label + "\n" + strings.Join(lines, "\n")
+	return lipgloss.NewStyle().
+		Width(maxWidth).
+		Foreground(fg).
+		Background(bg).
+		Padding(0, 1).
+		Render(content)
 }
 
 func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
-	maxWidth := m.chatPaneWidth - 8
-	if maxWidth < 20 {
-		maxWidth = 20
-	}
-
+	maxWidth := max(m.chatViewport.Width(), 20)
 	state := msg.ToolState
 	if state == "" {
 		state = "running"
 	}
 
-	header := fmt.Sprintf("[%s] %s", strings.ToUpper(state), msg.ToolName)
+	stateColor := m.styles.MutedStyle.GetForeground()
+	stateIcon := "●"
+	switch state {
+	case "error":
+		stateColor = lipgloss.Color("9")
+		stateIcon = "✗"
+	case "done":
+		stateColor = m.styles.SuccessStyle.GetForeground()
+		stateIcon = "✓"
+	case "running":
+		stateColor = m.styles.CommandHighlightStyle.GetForeground()
+		stateIcon = "…"
+	}
+	header := lipgloss.NewStyle().Foreground(stateColor).Bold(true).Render(fmt.Sprintf("%s %s", stateIcon, strings.ToUpper(state)))
+	meta := []string{m.styles.MutedStyle.Render("tool: " + msg.ToolName)}
+	if strings.TrimSpace(msg.ToolPath) != "" {
+		meta = append(meta, m.styles.MutedStyle.Render("path: "+msg.ToolPath))
+	}
+	if msg.ToolName == "bash" && strings.TrimSpace(msg.ToolCommand) != "" {
+		meta = append(meta, m.styles.MutedStyle.Render("command: "+msg.ToolCommand))
+	}
+
 	body := strings.TrimSpace(msg.Content)
 	if body == "" {
 		body = "(no output yet)"
 	}
-
 	body = m.styleToolBody(msg.ToolName, state, body)
-	wrapped := wordWrap(body, maxWidth-4)
+	wrapped := wordWrap(body, maxWidth-2)
 	if len(wrapped) == 0 {
 		wrapped = []string{""}
 	}
 
-	expanded := msg.ToolCallID != "" && m.toolExpanded[msg.ToolCallID]
-	if !expanded {
-		previewLines := m.toolPreviewLines()
-		if len(wrapped) > previewLines {
-			hidden := len(wrapped) - previewLines
-			if msg.ToolName == "write" || msg.ToolName == "read" {
-				wrapped = wrapped[:previewLines]
-				hint := m.styles.MutedStyle.Render(fmt.Sprintf("... (%d more lines, Ctrl+O to expand)", hidden))
-				wrapped = append(wrapped, hint)
-			} else {
-				wrapped = wrapped[len(wrapped)-previewLines:]
-				hint := m.styles.MutedStyle.Render(fmt.Sprintf("... (%d earlier lines, Ctrl+O to expand)", hidden))
-				wrapped = append([]string{hint}, wrapped...)
+	if msg.ToolName == "read" {
+		if len(wrapped) > 10 {
+			hidden := len(wrapped) - 10
+			wrapped = append(wrapped[:10], m.styles.MutedStyle.Render(fmt.Sprintf("... (%d more lines)", hidden)))
+		}
+	} else {
+		expanded := msg.ToolCallID != "" && m.toolExpanded[msg.ToolCallID]
+		if !expanded {
+			previewLines := m.toolPreviewLines()
+			if len(wrapped) > previewLines {
+				hidden := len(wrapped) - previewLines
+				if msg.ToolName == "write" {
+					wrapped = wrapped[:previewLines]
+					wrapped = append(wrapped, m.styles.MutedStyle.Render(fmt.Sprintf("... (%d more lines, Ctrl+O to expand)", hidden)))
+				} else {
+					wrapped = wrapped[len(wrapped)-previewLines:]
+					wrapped = append([]string{m.styles.MutedStyle.Render(fmt.Sprintf("... (%d earlier lines, Ctrl+O to expand)", hidden))}, wrapped...)
+				}
 			}
 		}
 	}
 
-	body = strings.Join(wrapped, "\n")
+	blockLines := []string{header}
+	blockLines = append(blockLines, meta...)
+	blockLines = append(blockLines, strings.Join(wrapped, "\n"))
 
-	var footer string
 	if !msg.ToolStartedAt.IsZero() {
 		end := msg.ToolEndedAt
 		label := "Took"
@@ -1962,25 +2284,18 @@ func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
 			end = time.Now()
 			label = "Elapsed"
 		}
-		footer = "\n" + m.styles.MutedStyle.Render(fmt.Sprintf("%s %s", label, end.Sub(msg.ToolStartedAt).Round(time.Second)))
+		blockLines = append(blockLines, m.styles.MutedStyle.Render(fmt.Sprintf("%s %s", label, end.Sub(msg.ToolStartedAt).Round(time.Second))))
 	}
 
-	color := m.styles.MutedStyle.GetForeground()
-	if state == "error" {
-		color = lipgloss.Color("9")
-	}
-	if state == "done" {
-		color = m.styles.CommandHighlightStyle.GetForeground()
-	}
+	color := stateColor
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(color).
-		Foreground(color).
 		Padding(0, 1).
 		Width(maxWidth)
 
-	return box.Render(header + "\n" + body + footer)
+	return box.Render(strings.Join(blockLines, "\n"))
 }
 
 func formatToolContextContent(e core.ToolEvent) string {
@@ -2188,6 +2503,24 @@ func parseModelSelectionKey(key string) (providerID string, modelID string, ok b
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+func (m *CodeAgentModel) fetchProviderBalanceCmd(providerID string) tea.Cmd {
+	return func() tea.Msg {
+		if providerID != "kilo" || m.authStorage == nil {
+			return providerBalanceMsg{ProviderID: providerID}
+		}
+		creds, err := m.authStorage.GetOAuthCredentials("kilo")
+		if err != nil || creds == nil || strings.TrimSpace(creds.Access) == "" {
+			return providerBalanceMsg{ProviderID: providerID}
+		}
+		gateway := llm.NewKiloGateway()
+		balance, err := gateway.FetchBalance(creds.Access)
+		if err != nil {
+			return providerBalanceMsg{ProviderID: providerID, Err: err}
+		}
+		return providerBalanceMsg{ProviderID: providerID, Balance: llm.FormatBalance(balance)}
+	}
 }
 
 func (m *CodeAgentModel) executeBashCommand(command string, startedAt time.Time) tea.Cmd {
