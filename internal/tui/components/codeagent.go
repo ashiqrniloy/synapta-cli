@@ -44,6 +44,14 @@ type ModelsLoadErrMsg struct {
 	Err error
 }
 
+type SessionsLoadedMsg struct {
+	Sessions []core.SessionInfo
+}
+
+type SessionsLoadErrMsg struct {
+	Err error
+}
+
 // ModelSelectedMsg is sent when a model is selected.
 type ModelSelectedMsg struct {
 	ModelID   string
@@ -78,6 +86,23 @@ type chatStreamDoneMsg struct{}
 
 type chatStreamErrMsg struct {
 	Err error
+}
+
+type compactDoneMsg struct {
+	Compacted bool
+	History   []llm.Message
+	Err       error
+}
+
+type newSessionDoneMsg struct {
+	Store     *core.SessionStore
+	SessionID string
+	Err       error
+}
+
+type resumeSessionDoneMsg struct {
+	Store *core.SessionStore
+	Err   error
 }
 
 type bashCommandDoneMsg struct {
@@ -123,6 +148,12 @@ type CodeAgentModel struct {
 	toolExpanded          map[string]bool
 	streamCh              <-chan tea.Msg
 	chatService           *core.ChatService
+	systemPromptStore     *core.SystemPromptStore
+	contextManager        *core.ContextManager
+	sessionStore          *core.SessionStore
+	agentDir              string
+	conversationHistory   []llm.Message
+	currentAssistantText  strings.Builder
 	chatViewport          viewport.Model
 	chatAutoScroll        bool
 	streamStartedAt       time.Time
@@ -141,10 +172,12 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	t := cfg.ActiveTheme()
 	styles := theme.NewStyles(t)
 
-	// Initialize auth storage
+	// Initialize auth and system prompt storage
 	homeDir, _ := os.UserHomeDir()
-	authDir := homeDir + "/.synapta"
-	authStorage, _ := llm.NewAuthStorage(authDir)
+	agentDir := homeDir + "/.synapta"
+	authStorage, _ := llm.NewAuthStorage(agentDir)
+	systemPromptStore := core.NewSystemPromptStore(agentDir)
+	_ = systemPromptStore.EnsureDefaultIfAgentDirMissing(core.AgentCode, core.DefaultCodeSystemPrompt)
 
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(10))
 	vp.SoftWrap = true
@@ -152,6 +185,12 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 
 	cwd, _ := os.Getwd()
 	toolset := core.NewToolSet(cwd)
+
+	sessionStore, _ := core.NewSessionStore(agentDir, core.AgentCode, cwd, core.DefaultCompactionSettings())
+	conversationHistory := make([]llm.Message, 0)
+	if sessionStore != nil {
+		conversationHistory = sessionStore.ContextMessages()
+	}
 
 	model := &CodeAgentModel{
 		styles:                styles,
@@ -161,6 +200,11 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		picker:                NewCommandPicker(styles),
 		authStorage:           authStorage,
 		chatService:           core.NewChatService(authStorage, toolset),
+		systemPromptStore:     systemPromptStore,
+		contextManager:        core.NewContextManager(core.AgentCode, agentDir, cwd, systemPromptStore),
+		sessionStore:          sessionStore,
+		agentDir:              agentDir,
+		conversationHistory:   conversationHistory,
 		activeAssistantIdx:    -1,
 		activeSystemStatusIdx: -1,
 		activeToolIndices:     map[string]int{},
@@ -176,6 +220,8 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		model.selectedModelID = cfg.Provider.Model
 		model.selectedModelName = cfg.Provider.Model
 	}
+
+	model.rebuildTranscriptFromHistory()
 
 	// Check if already authenticated and show model count
 	if authStorage != nil && authStorage.HasAuth("kilo") {
@@ -273,6 +319,14 @@ func (m *CodeAgentModel) getFilterText() string {
 func (m *CodeAgentModel) clearCommandMode() {
 	m.ta.SetValue("")
 	m.picker.Deactivate()
+	m.applyInputMode(m.inputMode)
+	m.recalculateLayout()
+}
+
+func (m *CodeAgentModel) enterCommandMode() {
+	m.picker.Activate()
+	m.ta.SetValue(":")
+	m.ta.Placeholder = "Command mode… type to filter"
 	m.recalculateLayout()
 }
 
@@ -289,11 +343,11 @@ func (m *CodeAgentModel) applyInputMode(mode string) {
 
 // ─── tea.Model ───────────────────────────────────────────────────────
 
-func (m CodeAgentModel) Init() tea.Cmd {
+func (m *CodeAgentModel) Init() tea.Cmd {
 	return textarea.Blink
 }
 
-func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -350,6 +404,21 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Need to load models first
 				return m, m.loadModels()
 			}
+		case "compact":
+			m.clearCommandMode()
+			m.appendSystemMessage("[Compact] Running manual compaction...", "working")
+			return m, m.manualCompactCmd()
+		case "new-session":
+			m.clearCommandMode()
+			m.appendSystemMessage("[Session] Starting new session...", "working")
+			return m, m.newSessionCmd()
+		case "resume-session":
+			if len(msg.Path) > 1 {
+				m.clearCommandMode()
+				m.appendSystemMessage("[Session] Resuming selected session...", "working")
+				return m, m.resumeSessionCmd(msg.Path[1].ID)
+			}
+			return m, m.loadSessions()
 		}
 		return m, nil
 
@@ -368,6 +437,35 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ModelsLoadErrMsg:
 		m.appendSystemMessage("[Model] ✗ "+msg.Err.Error(), "error")
+		m.clearCommandMode()
+		return m, nil
+
+	case SessionsLoadedMsg:
+		if len(msg.Sessions) == 0 {
+			m.appendSystemMessage("[Session] No previous sessions found", "info")
+			m.clearCommandMode()
+			return m, nil
+		}
+		items := make([]CommandItem, 0, len(msg.Sessions))
+		for _, s := range msg.Sessions {
+			preview := strings.ReplaceAll(strings.TrimSpace(s.FirstMessage), "\n", " ")
+			if len(preview) > 60 {
+				preview = preview[:60] + "..."
+			}
+			cwdLabel := s.CWD
+			if cwdLabel == "" {
+				cwdLabel = "(unknown cwd)"
+			}
+			name := fmt.Sprintf("%s  (%d msgs)  %s  [%s]", s.Modified.Format("2006-01-02 15:04"), s.MessageCount, preview, cwdLabel)
+			items = append(items, CommandItem{ID: s.Path, Name: name})
+		}
+		m.picker.LoadItems(items)
+		m.ta.SetValue(":")
+		m.recalculateLayout()
+		return m, nil
+
+	case SessionsLoadErrMsg:
+		m.appendSystemMessage("[Session] ✗ "+msg.Err.Error(), "error")
 		m.clearCommandMode()
 		return m, nil
 
@@ -395,6 +493,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.streamChunkCount++
 		m.streamCharCount += len(msg.Text)
+		m.currentAssistantText.WriteString(msg.Text)
 		if m.activeAssistantIdx < 0 || m.activeAssistantIdx >= len(m.chatMessages) {
 			m.activeAssistantIdx = m.appendChatMessage(ChatMessage{Role: "assistant", Content: ""})
 		}
@@ -459,6 +558,15 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.isWorking = false
 		m.workingFrame = 0
+		assistantText := strings.TrimSpace(m.currentAssistantText.String())
+		if assistantText != "" {
+			assistantMsg := llm.Message{Role: "assistant", Content: assistantText}
+			m.conversationHistory = append(m.conversationHistory, assistantMsg)
+			if m.sessionStore != nil {
+				_ = m.sessionStore.AppendMessage(assistantMsg)
+			}
+		}
+		m.currentAssistantText.Reset()
 		m.activeAssistantIdx = -1
 		m.streamCh = nil
 		m.streamStartedAt = time.Time{}
@@ -477,6 +585,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatStreamErrMsg:
 		m.isWorking = false
 		m.workingFrame = 0
+		m.currentAssistantText.Reset()
 		m.activeAssistantIdx = -1
 		m.streamCh = nil
 		m.streamStartedAt = time.Time{}
@@ -486,6 +595,54 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activeToolIndices = map[string]int{}
 		m.finalizeWorkingSystemMessage("[Chat] ✗ "+msg.Err.Error(), "error")
 		m.refreshChatViewport()
+		return m, nil
+
+	case compactDoneMsg:
+		if msg.Err != nil {
+			m.appendSystemMessage("[Compact] ✗ "+msg.Err.Error(), "error")
+			return m, nil
+		}
+		if msg.History != nil {
+			m.conversationHistory = append([]llm.Message(nil), msg.History...)
+		}
+		if msg.Compacted {
+			m.appendSystemMessage("[Compact] ✓ Session compacted", "done")
+		} else {
+			m.appendSystemMessage("[Compact] No compaction needed", "info")
+		}
+		m.refreshChatViewport()
+		return m, nil
+
+	case newSessionDoneMsg:
+		if msg.Err != nil {
+			m.appendSystemMessage("[Session] ✗ "+msg.Err.Error(), "error")
+			return m, nil
+		}
+		m.sessionStore = msg.Store
+		m.conversationHistory = m.sessionStore.ContextMessages()
+		m.currentAssistantText.Reset()
+		m.rebuildTranscriptFromHistory()
+		m.appendSystemMessage("[Session] ✓ New session started ("+msg.SessionID+")", "done")
+		return m, nil
+
+	case resumeSessionDoneMsg:
+		if msg.Err != nil {
+			m.appendSystemMessage("[Session] ✗ "+msg.Err.Error(), "error")
+			return m, nil
+		}
+		m.sessionStore = msg.Store
+		sessionCWD := m.sessionStore.CWD()
+		if strings.TrimSpace(sessionCWD) != "" {
+			m.currentCwd = sessionCWD
+			m.chatService = core.NewChatService(m.authStorage, core.NewToolSet(m.currentCwd))
+		}
+		if m.contextManager != nil {
+			m.contextManager.SetCWD(m.currentCwd)
+		}
+		m.conversationHistory = m.sessionStore.ContextMessages()
+		m.currentAssistantText.Reset()
+		m.rebuildTranscriptFromHistory()
+		m.appendSystemMessage("[Session] ✓ Session resumed ("+m.sessionStore.SessionID()+")", "done")
 		return m, nil
 
 	case bashCommandDoneMsg:
@@ -498,6 +655,9 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.currentCwd = msg.NewCwd
 				m.chatService = core.NewChatService(m.authStorage, core.NewToolSet(m.currentCwd))
+				if m.contextManager != nil {
+					m.contextManager.SetCWD(m.currentCwd)
+				}
 			}
 		}
 
@@ -518,6 +678,14 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ToolStartedAt: msg.StartedAt,
 			ToolEndedAt:   msg.EndedAt,
 		})
+		bashMsg := llm.Message{
+			Role:    "user",
+			Content: core.BashExecutionToText(msg.Command, msg.Output, msg.Err != nil),
+		}
+		m.conversationHistory = append(m.conversationHistory, bashMsg)
+		if m.sessionStore != nil {
+			_ = m.sessionStore.AppendMessage(bashMsg)
+		}
 		if msg.IsCD && msg.Err == nil {
 			m.appendSystemMessage("[Bash] cwd: "+m.currentCwd, "info")
 		}
@@ -592,9 +760,12 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				// Navigated deeper
-				// Check if we need to load models for "set-model"
+				// Check if we need to load dynamic items.
 				if selected != nil && selected.ID == "set-model" {
 					return m, m.loadModels()
+				}
+				if selected != nil && selected.ID == "resume-session" {
+					return m, m.loadSessions()
 				}
 				// Clear filter for new level
 				m.ta.SetValue(":")
@@ -663,10 +834,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if keyStr == ":" {
 			value := m.ta.Value()
 			if value == "" {
-				// Enter command mode
-				m.picker.Activate()
-				m.ta.SetValue(":")
-				m.recalculateLayout()
+				m.enterCommandMode()
 				return m, nil
 			}
 		}
@@ -700,7 +868,15 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			m.appendChatMessage(ChatMessage{Role: "user", Content: text})
-			history := m.chatHistoryAsLLM()
+			m.conversationHistory = append(m.conversationHistory, llm.Message{Role: "user", Content: text})
+			if m.sessionStore != nil {
+				_ = m.sessionStore.AppendMessage(llm.Message{Role: "user", Content: text})
+			}
+			history, err := m.chatHistoryAsLLM()
+			if err != nil {
+				m.appendSystemMessage("[Chat] ✗ Failed to build context: "+err.Error(), "error")
+				return m, nil
+			}
 
 			m.activeAssistantIdx = -1
 			m.isWorking = true
@@ -711,6 +887,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamChunkCount = 0
 			m.streamCharCount = 0
 			m.ta.SetValue("")
+			m.currentAssistantText.Reset()
 			m.workingFrame = 0
 			m.setWorkingSystemMessage(m.chatWorkingStatusText())
 			m.recalculateLayout()
@@ -741,7 +918,7 @@ func (m CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m CodeAgentModel) View() tea.View {
+func (m *CodeAgentModel) View() tea.View {
 	if m.quit {
 		return tea.NewView("")
 	}
@@ -755,19 +932,11 @@ func (m CodeAgentModel) View() tea.View {
 	}
 
 	title := strings.TrimRight(m.renderProminentTitle(), "\n")
-	pickerView := ""
-	if m.picker.IsActive() {
-		pickerView = strings.TrimRight(m.picker.View(max(m.width-6, 20)), "\n")
-	}
 	inputBox := strings.TrimRight(m.renderInputBox(), "\n")
 	instructions := strings.TrimRight(m.renderInstructions(), "\n")
 
 	var sections []string
-	sections = append(sections, "", title, "", m.chatViewport.View(), "")
-	if pickerView != "" {
-		sections = append(sections, pickerView)
-	}
-	sections = append(sections, inputBox, instructions)
+	sections = append(sections, "", title, "", m.chatViewport.View(), "", inputBox, instructions)
 
 	v := tea.NewView(strings.Join(sections, "\n"))
 	v.AltScreen = true
@@ -795,7 +964,16 @@ func (m *CodeAgentModel) renderProminentTitle() string {
 }
 
 func (m *CodeAgentModel) renderInputBox() string {
-	taView := m.ta.View()
+	taView := strings.TrimRight(m.ta.View(), "\n")
+	innerWidth := max(m.width-6, 20)
+	if m.picker.IsActive() {
+		taView = lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(taView)
+		pickerView := strings.TrimRight(m.picker.View(innerWidth), "\n")
+		if pickerView != "" {
+			divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(innerWidth-2, 1)))
+			taView += "\n" + divider + "\n" + pickerView
+		}
+	}
 	borderStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(m.borderColor)).
@@ -829,17 +1007,10 @@ func (m *CodeAgentModel) recalculateLayout() {
 
 	m.ta.SetWidth(max(m.width-6, 40))
 
-	pickerH := 0
-	if m.picker.IsActive() {
-		pickerH = countLines(m.picker.View(max(m.width-6, 20)))
-	}
 	inputH := countLines(m.renderInputBox())
 	instructionsH := countLines(m.renderInstructions())
 
 	reserved := 3 + inputH + instructionsH + 2 // 3 title rows + spacers around chat
-	if pickerH > 0 {
-		reserved += pickerH
-	}
 
 	chatH := m.height - reserved
 	if chatH < 3 {
@@ -1092,18 +1263,31 @@ func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
 	return box.Render(header + "\n" + body + footer)
 }
 
-func (m *CodeAgentModel) chatHistoryAsLLM() []llm.Message {
-	messages := make([]llm.Message, 0, len(m.chatMessages))
-	for _, msg := range m.chatMessages {
-		if msg.Role != "user" && msg.Role != "assistant" {
-			continue
+func (m *CodeAgentModel) chatHistoryAsLLM() ([]llm.Message, error) {
+	baseHistory := m.conversationHistory
+	if m.sessionStore != nil {
+		contextWindow := 128000
+		if m.chatService != nil && m.selectedProvider != "" && m.selectedModelID != "" {
+			if cw, err := m.chatService.ModelContextWindow(context.Background(), m.selectedProvider, m.selectedModelID); err == nil && cw > 0 {
+				contextWindow = cw
+			}
 		}
-		if strings.TrimSpace(msg.Content) == "" {
-			continue
+		summarizer := func(ctx context.Context, toSummarize []llm.Message, previousSummary string) (string, error) {
+			if m.chatService == nil || m.selectedProvider == "" || m.selectedModelID == "" {
+				return "", nil
+			}
+			return m.chatService.SummarizeCompaction(ctx, m.selectedProvider, m.selectedModelID, toSummarize, previousSummary)
 		}
-		messages = append(messages, llm.Message{Role: msg.Role, Content: msg.Content})
+		if _, err := m.sessionStore.CompactIfNeeded(context.Background(), contextWindow, summarizer); err != nil {
+			return nil, err
+		}
+		baseHistory = m.sessionStore.ContextMessages()
+		m.conversationHistory = append([]llm.Message(nil), baseHistory...)
 	}
-	return messages
+	if m.contextManager == nil {
+		return append([]llm.Message(nil), baseHistory...), nil
+	}
+	return m.contextManager.Build(baseHistory)
 }
 
 func (m *CodeAgentModel) startChatStream(history []llm.Message) tea.Cmd {
@@ -1384,7 +1568,91 @@ func max(a, b int) int {
 	return b
 }
 
-// ─── Model Loading ──────────────────────────────────────────────────
+// ─── Model Loading / Session Commands ───────────────────────────────
+
+func (m *CodeAgentModel) rebuildTranscriptFromHistory() {
+	messages := make([]ChatMessage, 0, len(m.conversationHistory))
+	for _, msg := range m.conversationHistory {
+		if msg.Role != "user" && msg.Role != "assistant" {
+			continue
+		}
+		content := strings.TrimSpace(msg.Content)
+		if content == "" {
+			continue
+		}
+		messages = append(messages, ChatMessage{Role: msg.Role, Content: content})
+	}
+	m.chatMessages = messages
+	m.activeAssistantIdx = -1
+	m.activeToolIndices = map[string]int{}
+	m.refreshChatViewport()
+}
+
+func (m *CodeAgentModel) loadSessions() tea.Cmd {
+	return func() tea.Msg {
+		sessions, err := core.ListAllSessions(m.agentDir, core.AgentCode)
+		if err != nil {
+			return SessionsLoadErrMsg{Err: err}
+		}
+		return SessionsLoadedMsg{Sessions: sessions}
+	}
+}
+
+func (m *CodeAgentModel) newSessionCmd() tea.Cmd {
+	return func() tea.Msg {
+		store := m.sessionStore
+		if store == nil {
+			var err error
+			store, err = core.NewSessionStore(m.agentDir, core.AgentCode, m.currentCwd, core.DefaultCompactionSettings())
+			if err != nil {
+				return newSessionDoneMsg{Err: err}
+			}
+		}
+		if err := store.StartNewSession(); err != nil {
+			return newSessionDoneMsg{Err: err}
+		}
+		return newSessionDoneMsg{Store: store, SessionID: store.SessionID()}
+	}
+}
+
+func (m *CodeAgentModel) resumeSessionCmd(sessionPath string) tea.Cmd {
+	return func() tea.Msg {
+		store, err := core.OpenSessionStore(m.agentDir, core.AgentCode, m.currentCwd, sessionPath, core.DefaultCompactionSettings())
+		if err != nil {
+			return resumeSessionDoneMsg{Err: err}
+		}
+		return resumeSessionDoneMsg{Store: store}
+	}
+}
+
+func (m *CodeAgentModel) manualCompactCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.sessionStore == nil {
+			return compactDoneMsg{Err: fmt.Errorf("session store not available")}
+		}
+
+		contextWindow := 128000
+		if m.chatService != nil && m.selectedProvider != "" && m.selectedModelID != "" {
+			if cw, err := m.chatService.ModelContextWindow(context.Background(), m.selectedProvider, m.selectedModelID); err == nil && cw > 0 {
+				contextWindow = cw
+			}
+		}
+
+		summarizer := func(ctx context.Context, toSummarize []llm.Message, previousSummary string) (string, error) {
+			if m.chatService == nil || m.selectedProvider == "" || m.selectedModelID == "" {
+				return "", nil
+			}
+			return m.chatService.SummarizeCompaction(ctx, m.selectedProvider, m.selectedModelID, toSummarize, previousSummary)
+		}
+
+		compacted, err := m.sessionStore.ManualCompact(context.Background(), contextWindow, summarizer)
+		if err != nil {
+			return compactDoneMsg{Err: err}
+		}
+		history := m.sessionStore.ContextMessages()
+		return compactDoneMsg{Compacted: compacted, History: history}
+	}
+}
 
 // loadModels loads available models from all connected providers.
 func (m *CodeAgentModel) loadModels() tea.Cmd {

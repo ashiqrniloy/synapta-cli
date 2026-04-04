@@ -1,0 +1,656 @@
+package core
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/synapta/synapta-cli/internal/llm"
+)
+
+const (
+	currentSessionVersion = 1
+
+	compactionSummaryPrefix = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n"
+	compactionSummarySuffix = "\n</summary>"
+)
+
+type CompactionSettings struct {
+	Enabled          bool
+	ReserveTokens    int
+	KeepRecentTokens int
+}
+
+func DefaultCompactionSettings() CompactionSettings {
+	return CompactionSettings{
+		Enabled:          true,
+		ReserveTokens:    16384,
+		KeepRecentTokens: 20000,
+	}
+}
+
+type CompactionSummarizer func(ctx context.Context, toSummarize []llm.Message, previousSummary string) (string, error)
+
+type SessionInfo struct {
+	Path         string
+	ID           string
+	CWD          string
+	Created      time.Time
+	Modified     time.Time
+	MessageCount int
+	FirstMessage string
+}
+
+type sessionEntry struct {
+	Type                  string       `json:"type"`
+	Version               int          `json:"version,omitempty"`
+	ID                    string       `json:"id,omitempty"`
+	Timestamp             string       `json:"timestamp,omitempty"`
+	CWD                   string       `json:"cwd,omitempty"`
+	Message               *llm.Message `json:"message,omitempty"`
+	Summary               string       `json:"summary,omitempty"`
+	FirstKeptMessageIndex int          `json:"firstKeptMessageIndex,omitempty"`
+	TokensBefore          int          `json:"tokensBefore,omitempty"`
+}
+
+// SessionStore persists and compacts conversation history in a pi-style append-only JSONL file.
+//
+// Sessions are grouped by agent and CWD and stored as separate JSONL files:
+//
+//	~/.synapta/sessions/<agent>/<encoded-cwd>/<timestamp>_<session-id>.jsonl
+//
+// The active session can be switched to support "new session" and "resume session" flows.
+type SessionStore struct {
+	mu         sync.Mutex
+	baseDir    string
+	agentID    string
+	cwd        string
+	sessionDir string
+	filePath   string
+	sessionID  string
+	entries    []sessionEntry
+	settings   CompactionSettings
+}
+
+func NewSessionStore(baseDir, agentID, cwd string, settings CompactionSettings) (*SessionStore, error) {
+	s := &SessionStore{
+		baseDir:    baseDir,
+		agentID:    agentID,
+		cwd:        cwd,
+		sessionDir: sessionDirFor(baseDir, agentID, cwd),
+		settings:   settings,
+	}
+	if err := os.MkdirAll(s.sessionDir, 0755); err != nil {
+		return nil, fmt.Errorf("creating sessions dir: %w", err)
+	}
+
+	recent, err := findMostRecentSessionFile(s.sessionDir)
+	if err != nil {
+		return nil, err
+	}
+	if recent == "" {
+		if err := s.startNewLocked(); err != nil {
+			return nil, err
+		}
+		return s, nil
+	}
+
+	s.filePath = recent
+	if err := s.loadFromFileLocked(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func OpenSessionStore(baseDir, agentID, cwd, sessionPath string, settings CompactionSettings) (*SessionStore, error) {
+	if strings.TrimSpace(sessionPath) == "" {
+		return nil, fmt.Errorf("session path is required")
+	}
+	absPath, err := filepath.Abs(sessionPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve session path: %w", err)
+	}
+	s := &SessionStore{
+		baseDir:    baseDir,
+		agentID:    agentID,
+		cwd:        cwd,
+		sessionDir: sessionDirFor(baseDir, agentID, cwd),
+		filePath:   absPath,
+		settings:   settings,
+	}
+	if err := s.loadFromFileLocked(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func ListSessions(baseDir, agentID, cwd string) ([]SessionInfo, error) {
+	dir := sessionDirFor(baseDir, agentID, cwd)
+	return listSessionsFromDir(dir)
+}
+
+func ListAllSessions(baseDir, agentID string) ([]SessionInfo, error) {
+	agentSessionsDir := filepath.Join(baseDir, "sessions", agentID)
+	if _, err := os.Stat(agentSessionsDir); err != nil {
+		if os.IsNotExist(err) {
+			return []SessionInfo{}, nil
+		}
+		return nil, fmt.Errorf("stat sessions dir: %w", err)
+	}
+
+	dirs, err := os.ReadDir(agentSessionsDir)
+	if err != nil {
+		return nil, fmt.Errorf("read sessions dir: %w", err)
+	}
+
+	all := make([]SessionInfo, 0)
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		infos, err := listSessionsFromDir(filepath.Join(agentSessionsDir, d.Name()))
+		if err != nil {
+			continue
+		}
+		all = append(all, infos...)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Modified.After(all[j].Modified)
+	})
+	return all, nil
+}
+
+func listSessionsFromDir(dir string) ([]SessionInfo, error) {
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return []SessionInfo{}, nil
+		}
+		return nil, fmt.Errorf("stat sessions dir: %w", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read sessions dir: %w", err)
+	}
+
+	infos := make([]SessionInfo, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		info, err := buildSessionInfo(path)
+		if err != nil {
+			continue
+		}
+		infos = append(infos, info)
+	}
+
+	sort.Slice(infos, func(i, j int) bool {
+		return infos[i].Modified.After(infos[j].Modified)
+	})
+	return infos, nil
+}
+
+func sessionDirFor(baseDir, agentID, cwd string) string {
+	return filepath.Join(baseDir, "sessions", agentID, encodeCWD(cwd))
+}
+
+func encodeCWD(cwd string) string {
+	repl := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "_")
+	encoded := repl.Replace(strings.TrimSpace(cwd))
+	if encoded == "" {
+		return "default"
+	}
+	return strings.Trim(encoded, "-")
+}
+
+func findMostRecentSessionFile(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("read sessions dir: %w", err)
+	}
+
+	type candidate struct {
+		path    string
+		modTime time.Time
+	}
+	candidates := make([]candidate, 0, len(entries))
+
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		if !isValidSessionFile(path) {
+			continue
+		}
+		st, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, candidate{path: path, modTime: st.ModTime()})
+	}
+	if len(candidates) == 0 {
+		return "", nil
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].modTime.After(candidates[j].modTime)
+	})
+	return candidates[0].path, nil
+}
+
+func isValidSessionFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	if !scanner.Scan() {
+		return false
+	}
+	line := strings.TrimSpace(scanner.Text())
+	if line == "" {
+		return false
+	}
+	var e sessionEntry
+	if err := json.Unmarshal([]byte(line), &e); err != nil {
+		return false
+	}
+	return e.Type == "session" && strings.TrimSpace(e.ID) != ""
+}
+
+func buildSessionInfo(path string) (SessionInfo, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return SessionInfo{}, err
+	}
+	defer f.Close()
+
+	entries := make([]sessionEntry, 0, 64)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var e sessionEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			continue
+		}
+		entries = append(entries, e)
+	}
+	if err := scanner.Err(); err != nil {
+		return SessionInfo{}, err
+	}
+	if len(entries) == 0 || entries[0].Type != "session" {
+		return SessionInfo{}, fmt.Errorf("invalid session file")
+	}
+
+	header := entries[0]
+	created, _ := time.Parse(time.RFC3339, header.Timestamp)
+	if created.IsZero() {
+		created = time.Now()
+	}
+
+	messageCount := 0
+	firstMessage := ""
+	for _, e := range entries {
+		if e.Type != "message" || e.Message == nil {
+			continue
+		}
+		if e.Message.Role != "user" && e.Message.Role != "assistant" {
+			continue
+		}
+		messageCount++
+		if firstMessage == "" && e.Message.Role == "user" {
+			firstMessage = strings.TrimSpace(e.Message.Content)
+		}
+	}
+	if firstMessage == "" {
+		firstMessage = "(no messages)"
+	}
+
+	st, err := os.Stat(path)
+	if err != nil {
+		return SessionInfo{}, err
+	}
+	modified := st.ModTime()
+
+	return SessionInfo{
+		Path:         path,
+		ID:           header.ID,
+		CWD:          header.CWD,
+		Created:      created,
+		Modified:     modified,
+		MessageCount: messageCount,
+		FirstMessage: firstMessage,
+	}, nil
+}
+
+func (s *SessionStore) StartNewSession() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.startNewLocked()
+}
+
+func (s *SessionStore) startNewLocked() error {
+	timestamp := time.Now().UTC()
+	s.sessionID = fmt.Sprintf("%d", timestamp.UnixNano())
+	fileTime := strings.NewReplacer(":", "-", ".", "-").Replace(timestamp.Format(time.RFC3339Nano))
+	s.filePath = filepath.Join(s.sessionDir, fileTime+"_"+s.sessionID+".jsonl")
+
+	header := sessionEntry{
+		Type:      "session",
+		Version:   currentSessionVersion,
+		ID:        s.sessionID,
+		Timestamp: timestamp.Format(time.RFC3339),
+		CWD:       s.cwd,
+	}
+	s.entries = []sessionEntry{header}
+	return s.rewriteAllLocked()
+}
+
+func (s *SessionStore) OpenSession(sessionPath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	absPath, err := filepath.Abs(sessionPath)
+	if err != nil {
+		return fmt.Errorf("resolve session path: %w", err)
+	}
+	s.filePath = absPath
+	return s.loadFromFileLocked()
+}
+
+func (s *SessionStore) loadFromFileLocked() error {
+	f, err := os.Open(s.filePath)
+	if err != nil {
+		return fmt.Errorf("open session file: %w", err)
+	}
+	defer f.Close()
+
+	s.entries = make([]sessionEntry, 0)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var e sessionEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			continue
+		}
+		s.entries = append(s.entries, e)
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scan session file: %w", err)
+	}
+	if len(s.entries) == 0 || s.entries[0].Type != "session" {
+		return fmt.Errorf("invalid session file: missing session header")
+	}
+	header := s.entries[0]
+	s.sessionID = header.ID
+	if strings.TrimSpace(header.CWD) != "" {
+		s.cwd = header.CWD
+	}
+	return nil
+}
+
+func (s *SessionStore) SessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionID
+}
+
+func (s *SessionStore) SessionFile() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.filePath
+}
+
+func (s *SessionStore) CWD() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cwd
+}
+
+func (s *SessionStore) AppendMessage(msg llm.Message) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry := sessionEntry{
+		Type:      "message",
+		Timestamp: time.Now().Format(time.RFC3339),
+		Message:   &msg,
+	}
+	s.entries = append(s.entries, entry)
+	return s.appendEntryLocked(entry)
+}
+
+func (s *SessionStore) ContextMessages() []llm.Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.contextMessagesLocked()
+}
+
+func (s *SessionStore) contextMessagesLocked() []llm.Message {
+	messages := s.messageEntriesLocked()
+	lastCompaction := s.latestCompactionLocked()
+	if lastCompaction == nil {
+		out := make([]llm.Message, len(messages))
+		copy(out, messages)
+		return out
+	}
+
+	result := make([]llm.Message, 0, len(messages)+1)
+	result = append(result, llm.Message{Role: "user", Content: compactionSummaryPrefix + strings.TrimSpace(lastCompaction.Summary) + compactionSummarySuffix})
+
+	start := lastCompaction.FirstKeptMessageIndex
+	if start < 0 {
+		start = 0
+	}
+	if start > len(messages) {
+		start = len(messages)
+	}
+	result = append(result, messages[start:]...)
+	return result
+}
+
+func (s *SessionStore) CompactIfNeeded(ctx context.Context, contextWindow int, summarizer CompactionSummarizer) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.compactLocked(ctx, false, contextWindow, summarizer)
+}
+
+func (s *SessionStore) ManualCompact(ctx context.Context, contextWindow int, summarizer CompactionSummarizer) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.compactLocked(ctx, true, contextWindow, summarizer)
+}
+
+func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWindow int, summarizer CompactionSummarizer) (bool, error) {
+	if !s.settings.Enabled && !force {
+		return false, nil
+	}
+
+	messages := s.messageEntriesLocked()
+	latest := s.latestCompactionLocked()
+	start := 0
+	previousSummary := ""
+	if latest != nil {
+		start = latest.FirstKeptMessageIndex
+		if start < 0 {
+			start = 0
+		}
+		if start > len(messages) {
+			start = len(messages)
+		}
+		previousSummary = strings.TrimSpace(latest.Summary)
+	}
+
+	currentSlice := messages[start:]
+	if len(currentSlice) < 2 {
+		return false, nil
+	}
+
+	tokensBefore := estimateContextTokens(currentSlice)
+	if previousSummary != "" {
+		tokensBefore += estimateTextTokens(compactionSummaryPrefix + previousSummary + compactionSummarySuffix)
+	}
+
+	if !force {
+		if tokensBefore <= contextWindow-s.settings.ReserveTokens {
+			return false, nil
+		}
+	}
+
+	keepRel := findKeepStartIndex(currentSlice, s.settings.KeepRecentTokens)
+	if keepRel <= 0 || keepRel >= len(currentSlice) {
+		keepRel = len(currentSlice) / 2
+	}
+	if keepRel <= 0 || keepRel >= len(currentSlice) {
+		return false, nil
+	}
+
+	toSummarize := currentSlice[:keepRel]
+	var summary string
+	var err error
+	if summarizer != nil {
+		summary, err = summarizer(ctx, toSummarize, previousSummary)
+		if err != nil {
+			return false, err
+		}
+	}
+	if strings.TrimSpace(summary) == "" {
+		summary = summarizeMessagesDeterministic(toSummarize, previousSummary)
+	}
+
+	compaction := sessionEntry{
+		Type:                  "compaction",
+		Timestamp:             time.Now().Format(time.RFC3339),
+		Summary:               summary,
+		FirstKeptMessageIndex: start + keepRel,
+		TokensBefore:          tokensBefore,
+	}
+	s.entries = append(s.entries, compaction)
+	if err := s.appendEntryLocked(compaction); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *SessionStore) messageEntriesLocked() []llm.Message {
+	out := make([]llm.Message, 0)
+	for _, e := range s.entries {
+		if e.Type == "message" && e.Message != nil {
+			out = append(out, *e.Message)
+		}
+	}
+	return out
+}
+
+func (s *SessionStore) latestCompactionLocked() *sessionEntry {
+	for i := len(s.entries) - 1; i >= 0; i-- {
+		if s.entries[i].Type == "compaction" {
+			copyEntry := s.entries[i]
+			return &copyEntry
+		}
+	}
+	return nil
+}
+
+func (s *SessionStore) appendEntryLocked(e sessionEntry) error {
+	f, err := os.OpenFile(s.filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("open session file append: %w", err)
+	}
+	defer f.Close()
+	data, err := json.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("marshal session entry: %w", err)
+	}
+	if _, err := f.WriteString(string(data) + "\n"); err != nil {
+		return fmt.Errorf("append session entry: %w", err)
+	}
+	return nil
+}
+
+func (s *SessionStore) rewriteAllLocked() error {
+	f, err := os.Create(s.filePath)
+	if err != nil {
+		return fmt.Errorf("create session file: %w", err)
+	}
+	defer f.Close()
+	for _, e := range s.entries {
+		data, err := json.Marshal(e)
+		if err != nil {
+			return fmt.Errorf("marshal session entry: %w", err)
+		}
+		if _, err := f.WriteString(string(data) + "\n"); err != nil {
+			return fmt.Errorf("write session entry: %w", err)
+		}
+	}
+	return nil
+}
+
+func findKeepStartIndex(messages []llm.Message, keepTokens int) int {
+	if keepTokens <= 0 {
+		return len(messages)
+	}
+	acc := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		acc += estimateMessageTokens(messages[i])
+		if acc >= keepTokens {
+			return i
+		}
+	}
+	return 0
+}
+
+func estimateContextTokens(messages []llm.Message) int {
+	t := 0
+	for _, m := range messages {
+		t += estimateMessageTokens(m)
+	}
+	return t
+}
+
+func estimateMessageTokens(msg llm.Message) int {
+	return estimateTextTokens(msg.Content)
+}
+
+func estimateTextTokens(text string) int {
+	if strings.TrimSpace(text) == "" {
+		return 0
+	}
+	return (len(text) + 3) / 4
+}
+
+func summarizeMessagesDeterministic(messages []llm.Message, previousSummary string) string {
+	base := "## Goal\nContinue the session with preserved context.\n\n## Progress\n"
+	base += fmt.Sprintf("Messages summarized: %d\n", len(messages))
+	if previousSummary != "" {
+		base += "\n## Previous Summary\n" + previousSummary + "\n"
+	}
+	base += "\n## Key Context\n"
+	for i, m := range messages {
+		if i >= 10 {
+			break
+		}
+		content := strings.ReplaceAll(strings.TrimSpace(m.Content), "\n", " ")
+		if len(content) > 200 {
+			content = content[:200] + "..."
+		}
+		base += fmt.Sprintf("- [%s] %s\n", strings.ToUpper(m.Role), content)
+	}
+	return strings.TrimSpace(base)
+}

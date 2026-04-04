@@ -67,6 +67,50 @@ func (s *ChatService) AvailableModels(ctx context.Context) ([]*llm.Model, error)
 	return models, nil
 }
 
+func (s *ChatService) ModelContextWindow(ctx context.Context, providerID, modelID string) (int, error) {
+	models, err := s.AvailableModels(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, m := range models {
+		if m.Provider == providerID && m.ID == modelID {
+			if m.ContextWindow > 0 {
+				return m.ContextWindow, nil
+			}
+			return 128000, nil
+		}
+	}
+	return 0, fmt.Errorf("model not found: %s/%s", providerID, modelID)
+}
+
+func (s *ChatService) SummarizeCompaction(ctx context.Context, providerID, modelID string, messages []llm.Message, previousSummary string) (string, error) {
+	provider, err := s.providerFor(providerID)
+	if err != nil {
+		return "", err
+	}
+
+	prompt := BuildCompactionSummarizationInput(messages, previousSummary)
+	resp, err := provider.Chat(ctx, llm.ChatRequest{
+		Model: modelID,
+		Messages: []llm.Message{
+			{Role: "system", Content: CompactionSummarizationSystemPrompt},
+			{Role: "user", Content: prompt},
+		},
+		Stream: false,
+	})
+	if err != nil {
+		return "", err
+	}
+	if resp == nil || len(resp.Choices) == 0 {
+		return "", fmt.Errorf("empty summarization response")
+	}
+	summary := strings.TrimSpace(resp.Choices[0].Message.Content)
+	if summary == "" {
+		return "", fmt.Errorf("empty compaction summary")
+	}
+	return summary, nil
+}
+
 // Stream runs a tool-capable assistant loop (pi-style):
 // assistant response -> execute requested tools -> continue until final assistant text.
 func (s *ChatService) Stream(

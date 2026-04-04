@@ -1,6 +1,7 @@
 package components
 
 import (
+	"fmt"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -29,6 +30,9 @@ func DefaultCommands() []CommandItem {
 	return []CommandItem{
 		{ID: "add-provider", Name: "Add Provider"},
 		{ID: "bash", Name: "Bash"},
+		{ID: "compact", Name: "Compact"},
+		{ID: "new-session", Name: "New Session"},
+		{ID: "resume-session", Name: "Resume Session"},
 		{ID: "set-model", Name: "Set Model"},
 	}
 }
@@ -182,8 +186,8 @@ func (cp *CommandPicker) HandleSelect() (completed bool) {
 			cp.cursor = 0
 			return false
 		}
-		if selected.ID == "set-model" {
-			// Return false - caller will load models via LoadModels()
+		if selected.ID == "set-model" || selected.ID == "resume-session" {
+			// Return false - caller will load dynamic items via LoadItems()
 			return false
 		}
 		// Other commands are complete
@@ -196,12 +200,16 @@ func (cp *CommandPicker) HandleSelect() (completed bool) {
 	}
 }
 
-// LoadModels loads models into the picker for selection.
-func (cp *CommandPicker) LoadModels(models []ModelInfo) {
-	items := ModelsFromSlice(models)
+// LoadItems loads items into the picker for selection.
+func (cp *CommandPicker) LoadItems(items []CommandItem) {
 	cp.items = items
 	cp.filtered = items
 	cp.cursor = 0
+}
+
+// LoadModels loads models into the picker for selection.
+func (cp *CommandPicker) LoadModels(models []ModelInfo) {
+	cp.LoadItems(ModelsFromSlice(models))
 }
 
 // HandleBack goes back one level in the command path.
@@ -234,13 +242,25 @@ func (cp *CommandPicker) Path() []CommandStep {
 	return cp.path
 }
 
-// VisibleItems returns the items to display (up to maxVisible).
-func (cp *CommandPicker) VisibleItems() []CommandItem {
+// VisibleWindow returns the currently visible items and their start index.
+func (cp *CommandPicker) VisibleWindow() ([]CommandItem, int) {
 	if len(cp.filtered) == 0 {
-		return nil
+		return nil, 0
 	}
-	end := min(len(cp.filtered), cp.maxVisible)
-	return cp.filtered[:end]
+	if cp.maxVisible <= 0 || len(cp.filtered) <= cp.maxVisible {
+		return cp.filtered, 0
+	}
+
+	start := cp.cursor - cp.maxVisible/2
+	if start < 0 {
+		start = 0
+	}
+	maxStart := len(cp.filtered) - cp.maxVisible
+	if start > maxStart {
+		start = maxStart
+	}
+	end := start + cp.maxVisible
+	return cp.filtered[start:end], start
 }
 
 // Cursor returns the current cursor index.
@@ -268,24 +288,29 @@ func (cp *CommandPicker) View(width int) string {
 
 	var lines []string
 
-	// Breadcrumb (if we've made selections)
+	// Header + breadcrumb
+	header := "Commands"
 	if len(cp.path) > 0 {
-		breadcrumb := "Commands"
+		parts := make([]string, 0, len(cp.path)+1)
+		parts = append(parts, "Commands")
 		for _, step := range cp.path {
-			breadcrumb += " / " + step.Name
+			parts = append(parts, step.Name)
 		}
-		breadcrumbStyle := lipgloss.NewStyle().
-			Foreground(mutedFg).
-			Width(width)
-		lines = append(lines, breadcrumbStyle.Render(breadcrumb))
+		header = strings.Join(parts, "  ›  ")
 	}
+	headerStyle := lipgloss.NewStyle().
+		Foreground(mutedFg).
+		Bold(true).
+		Width(width)
+	lines = append(lines, headerStyle.Render(header))
 
 	// Items
-	visible := cp.VisibleItems()
+	visible, start := cp.VisibleWindow()
 	for i, item := range visible {
 		var line string
+		absoluteIdx := start + i
 
-		if i == cp.cursor {
+		if absoluteIdx == cp.cursor {
 			// Highlighted item
 			nameStyle := lipgloss.NewStyle().
 				Foreground(fgColor).
@@ -310,6 +335,12 @@ func (cp *CommandPicker) View(width int) string {
 
 		lines = append(lines, line)
 	}
+
+	meta := fmt.Sprintf("↑↓ navigate  •  Enter select  •  Esc back")
+	if len(cp.filtered) > cp.maxVisible {
+		meta = fmt.Sprintf("%s  •  %d-%d of %d", meta, start+1, start+len(visible), len(cp.filtered))
+	}
+	lines = append(lines, lipgloss.NewStyle().Foreground(mutedFg).Render(meta))
 
 	return strings.Join(lines, "\n")
 }
