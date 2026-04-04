@@ -524,9 +524,13 @@ func (s *SessionStore) contextMessageRefsLocked() []contextMessageRef {
 func (s *SessionStore) messageEntryIndicesLocked() []int {
 	indices := make([]int, 0)
 	for i, e := range s.entries {
-		if e.Type == "message" && e.Message != nil {
-			indices = append(indices, i)
+		if e.Type != "message" || e.Message == nil {
+			continue
 		}
+		if !isDynamicContextMessage(*e.Message) {
+			continue
+		}
+		indices = append(indices, i)
 	}
 	return indices
 }
@@ -691,11 +695,27 @@ func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWin
 func (s *SessionStore) messageEntriesLocked() []llm.Message {
 	out := make([]llm.Message, 0)
 	for _, e := range s.entries {
-		if e.Type == "message" && e.Message != nil {
-			out = append(out, *e.Message)
+		if e.Type != "message" || e.Message == nil {
+			continue
 		}
+		if !isDynamicContextMessage(*e.Message) {
+			continue
+		}
+		out = append(out, *e.Message)
 	}
 	return out
+}
+
+func isDynamicContextMessage(msg llm.Message) bool {
+	if strings.TrimSpace(msg.Content) == "" {
+		return false
+	}
+	switch msg.Role {
+	case "user", "assistant", "tool":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *SessionStore) latestCompactionLocked() *sessionEntry {
