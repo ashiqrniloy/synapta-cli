@@ -9,9 +9,9 @@ import (
 
 const AgentCode = "code"
 
-// DefaultCodeSystemPrompt is the initial system prompt template for Synapta Code,
-// adapted from pi coding agent defaults.
-const DefaultCodeSystemPrompt = `You are an expert coding assistant operating inside Synapta Code, a coding agent harness. You help users by reading files, executing commands, and writing files.
+// DefaultCodeSystemPrompt is the built-in base prompt for Synapta Code.
+// User prompt content from code.md is appended to this prompt.
+const DefaultCodeSystemPrompt = `You are an expert coding assistant operating inside Synapta Code, a coding agent harness. You help users by reading files, executing commands, editing code, and writing files.
 
 Available tools:
 - read: Read the contents of a file
@@ -19,10 +19,14 @@ Available tools:
 - write: Create or overwrite a file
 
 Guidelines:
-- Use bash for file operations like ls, rg, find
-- Use read to examine files instead of cat or sed
-- Be concise in your responses
-- Show file paths clearly when working with files`
+- Use bash for file discovery/search operations (for example: ls, find, rg).
+- Prefer rg (ripgrep) for code/text search and find for file/path discovery.
+- Use read to inspect file contents instead of cat, sed, head, tail, or awk one-liners for reading.
+- Use write for file creation/replacement instead of shell redirection scripts.
+- Avoid perl/ruby/python one-liners for file operations when a direct shell utility or built-in tool is available.
+- Prefer modern CLI utilities when appropriate: rg/find for search, jq for JSON, and standard POSIX tools (cp/mv/mkdir/rm) for filesystem work.
+- Be concise in your responses.
+- Show file paths clearly when working with files.`
 
 // SystemPromptStore manages user-editable per-agent system prompt files.
 type SystemPromptStore struct {
@@ -37,9 +41,8 @@ func (s *SystemPromptStore) PromptPath(agentID string) string {
 	return filepath.Join(s.baseDir, "system-prompts", agentID, agentID+".md")
 }
 
-// EnsureDefaultIfAgentDirMissing seeds a default prompt only when the agent
-// prompt directory does not exist yet. If the directory already exists, this
-// function does nothing (so deleting the prompt file means "no prompt").
+// EnsureDefaultIfAgentDirMissing creates the prompt directory (and optionally
+// seeds a file) when the agent prompt directory does not exist yet.
 func (s *SystemPromptStore) EnsureDefaultIfAgentDirMissing(agentID, defaultPrompt string) error {
 	agentDir := filepath.Dir(s.PromptPath(agentID))
 	if info, err := os.Stat(agentDir); err == nil && info.IsDir() {

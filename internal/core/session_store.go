@@ -728,18 +728,12 @@ func (s *SessionStore) messageEntriesLocked() []llm.Message {
 
 func isDynamicContextMessage(msg llm.Message) bool {
 	hasContent := strings.TrimSpace(msg.Content) != ""
-	hasToolCalls := len(msg.ToolCalls) > 0
-	hasToolRef := strings.TrimSpace(msg.ToolCallID) != ""
 
 	switch msg.Role {
 	case "user":
 		return hasContent
 	case "assistant":
-		// Keep assistant turns that only contain tool calls (content can be empty).
-		return hasContent || hasToolCalls
-	case "tool":
-		// Keep tool results even if content is blank, as call linkage is still important.
-		return hasContent || hasToolRef
+		return hasContent
 	default:
 		return false
 	}

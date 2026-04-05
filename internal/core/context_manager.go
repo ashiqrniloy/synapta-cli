@@ -30,9 +30,10 @@ type ContextManager struct {
 
 	skillCache *SkillCatalogCache
 
-	stablePrefixFragment fragmentCache
-	projectFragment      fragmentCache
-	skillsFragment       fragmentCache
+	stablePrefixFragment       fragmentCache
+	projectFragment            fragmentCache
+	skillsFragment             fragmentCache
+	sessionPromptOverrideValue string
 
 	stablePrefixDirty bool
 	projectDirty      bool
@@ -106,6 +107,21 @@ func (m *ContextManager) InvalidateSkills() {
 	}
 }
 
+func (m *ContextManager) SetSessionSystemPromptOverride(prompt string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	trimmed := strings.TrimSpace(prompt)
+	if m.sessionPromptOverrideValue == trimmed {
+		return
+	}
+	m.sessionPromptOverrideValue = trimmed
+	m.stablePrefixDirty = true
+}
+
+func (m *ContextManager) ClearSessionSystemPromptOverride() {
+	m.SetSessionSystemPromptOverride("")
+}
+
 func (m *ContextManager) LastPromptFingerprint() PromptFingerprint {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -133,29 +149,10 @@ func (m *ContextManager) Build(history []llm.Message) ([]llm.Message, error) {
 			continue
 		}
 		hasContent := strings.TrimSpace(msg.Content) != ""
-		hasToolCalls := len(msg.ToolCalls) > 0
-		hasToolRef := strings.TrimSpace(msg.ToolCallID) != ""
-
-		switch msg.Role {
-		case "assistant":
-			if !hasContent && !hasToolCalls {
-				continue
-			}
-		case "tool":
-			if !hasContent && !hasToolRef {
-				continue
-			}
-		default:
-			if !hasContent {
-				continue
-			}
+		if !hasContent {
+			continue
 		}
-
-		out := llm.Message{Role: msg.Role, Content: msg.Content, Name: msg.Name, ToolCallID: msg.ToolCallID}
-		if len(msg.ToolCalls) > 0 {
-			out.ToolCalls = append([]llm.ToolCall(nil), msg.ToolCalls...)
-		}
-		messages = append(messages, out)
+		messages = append(messages, llm.Message{Role: msg.Role, Content: msg.Content})
 	}
 
 	m.mu.Lock()
@@ -173,7 +170,7 @@ func (m *ContextManager) Build(history []llm.Message) ([]llm.Message, error) {
 
 func isContextRole(role string) bool {
 	switch role {
-	case "user", "assistant", "tool":
+	case "user", "assistant":
 		return true
 	default:
 		return false
@@ -187,17 +184,31 @@ func (m *ContextManager) buildStablePrefix() (string, error) {
 	agentID := m.agentID
 	store := m.systemPromptStore
 	skillCache := m.skillCache
+	override := strings.TrimSpace(m.sessionPromptOverrideValue)
 	m.mu.Unlock()
 
-	if store == nil {
-		return "", nil
+	if override != "" {
+		return override, nil
 	}
 
-	basePrompt, err := store.Load(agentID)
-	if err != nil {
-		return "", err
+	basePrompt := strings.TrimSpace(DefaultCodeSystemPrompt)
+	if store != nil {
+		userAppend, err := store.Load(agentID)
+		if err != nil {
+			return "", err
+		}
+		userAppend = strings.TrimSpace(userAppend)
+		// Backward compatibility: older versions seeded code.md with the full default prompt.
+		defaultPrompt := strings.TrimSpace(DefaultCodeSystemPrompt)
+		if userAppend == defaultPrompt {
+			userAppend = ""
+		} else if strings.HasPrefix(userAppend, defaultPrompt) {
+			userAppend = strings.TrimSpace(strings.TrimPrefix(userAppend, defaultPrompt))
+		}
+		if userAppend != "" {
+			basePrompt = strings.TrimSpace(basePrompt + "\n\n" + userAppend)
+		}
 	}
-	basePrompt = strings.TrimSpace(basePrompt)
 	if basePrompt == "" {
 		return "", nil
 	}
