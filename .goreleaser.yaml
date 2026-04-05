@@ -16,9 +16,9 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X github.com/synapta/synapta-cli/internal/version.Version={{ .Version }}
-      - -X github.com/synapta/synapta-cli/internal/version.Commit={{ .Commit }}
-      - -X github.com/synapta/synapta-cli/internal/version.Date={{ .Date }}
+      - -X github.com/ashiqrniloy/synapta-cli/internal/version.Version={{ .Version }}
+      - -X github.com/ashiqrniloy/synapta-cli/internal/version.Commit={{ .Commit }}
+      - -X github.com/ashiqrniloy/synapta-cli/internal/version.Date={{ .Date }}
 
 archives:
   - format: tar.gz
@@ -36,17 +36,3 @@ changelog:
   sort: asc
   use: git
 
-brews:
-  - name: synapta
-    repository:
-      owner: synapta
-      name: homebrew-tap
-      branch: main
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    homepage: https://github.com/synapta/synapta-cli
-    description: Synapta — Agentic AI Development Framework CLI
-    license: MIT
-    install: |
-      bin.install "synapta"
-    test: |
-      system "#{bin}/synapta", "version"

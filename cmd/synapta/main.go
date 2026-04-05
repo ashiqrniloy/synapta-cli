@@ -7,10 +7,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/synapta/synapta-cli/internal/config"
-	"github.com/synapta/synapta-cli/internal/tui/components"
-	"github.com/synapta/synapta-cli/internal/update"
-	"github.com/synapta/synapta-cli/internal/version"
+	"github.com/ashiqrniloy/synapta-cli/internal/config"
+	"github.com/ashiqrniloy/synapta-cli/internal/tui/components"
+	"github.com/ashiqrniloy/synapta-cli/internal/update"
+	"github.com/ashiqrniloy/synapta-cli/internal/version"
 )
 
 func main() {

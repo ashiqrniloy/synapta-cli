@@ -1,4 +1,4 @@
-module github.com/synapta/synapta-cli
+module github.com/ashiqrniloy/synapta-cli
 
 go 1.26
 

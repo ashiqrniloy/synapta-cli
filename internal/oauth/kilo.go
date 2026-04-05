@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/synapta/synapta-cli/internal/llm"
+	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
 
 // Kilo Gateway OAuth provider implementation.

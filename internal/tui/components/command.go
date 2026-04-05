@@ -6,7 +6,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/synapta/synapta-cli/internal/tui/theme"
+	"github.com/ashiqrniloy/synapta-cli/internal/tui/theme"
 )
 
 // ─── Types ──────────────────────────────────────────────────────────

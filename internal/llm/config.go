@@ -15,13 +15,13 @@ func GetAgentDir() string {
 	if envDir := os.Getenv("SYNAPTA_DIR"); envDir != "" {
 		return envDir
 	}
-	
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		// Fallback to current directory
 		return "." + AppName
 	}
-	
+
 	return filepath.Join(home, "."+AppName)
 }
 

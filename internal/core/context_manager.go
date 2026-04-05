@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/synapta/synapta-cli/internal/llm"
+	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
 
 // ContextManager builds the full message context sent to the LLM.

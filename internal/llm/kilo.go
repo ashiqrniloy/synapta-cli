@@ -27,9 +27,9 @@ const (
 
 // DeviceAuthResponse is returned when initiating device auth.
 type DeviceAuthResponse struct {
-	Code           string `json:"code"`
+	Code            string `json:"code"`
 	VerificationURL string `json:"verificationUrl"`
-	ExpiresIn      int    `json:"expiresIn"`
+	ExpiresIn       int    `json:"expiresIn"`
 }
 
 // DeviceAuthPollResponse is the poll response for device auth.
@@ -41,13 +41,13 @@ type DeviceAuthPollResponse struct {
 
 // OpenRouterModel represents a model from the OpenRouter-compatible API.
 type OpenRouterModel struct {
-	ID                string   `json:"id"`
-	Name              string   `json:"name"`
-	ContextLength     int      `json:"context_length"`
-	MaxCompletionTokens *int   `json:"max_completion_tokens,omitempty"`
-	Pricing           *Pricing `json:"pricing,omitempty"`
-	Architecture      *Arch    `json:"architecture,omitempty"`
-	TopProvider       *struct {
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	ContextLength       int      `json:"context_length"`
+	MaxCompletionTokens *int     `json:"max_completion_tokens,omitempty"`
+	Pricing             *Pricing `json:"pricing,omitempty"`
+	Architecture        *Arch    `json:"architecture,omitempty"`
+	TopProvider         *struct {
 		MaxCompletionTokens *int `json:"max_completion_tokens,omitempty"`
 	} `json:"top_provider,omitempty"`
 	SupportedParams []string `json:"supported_parameters,omitempty"`
@@ -55,8 +55,8 @@ type OpenRouterModel struct {
 
 // Pricing represents model costs.
 type Pricing struct {
-	Prompt         string `json:"prompt,omitempty"`
-	Completion     string `json:"completion,omitempty"`
+	Prompt          string `json:"prompt,omitempty"`
+	Completion      string `json:"completion,omitempty"`
 	InputCacheWrite string `json:"input_cache_write,omitempty"`
 	InputCacheRead  string `json:"input_cache_read,omitempty"`
 }

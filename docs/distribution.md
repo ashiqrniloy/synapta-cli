@@ -12,7 +12,6 @@ This project is now set up to ship a **single compiled binary** and publish a re
     - `darwin/arm64`
   - Creates `tar.gz` archives + checksums
   - Injects build metadata (`version`, `commit`, `date`)
-  - Generates Homebrew formula (tap-based)
 
 - `.github/workflows/release.yml`
   - Triggers on every push to `main`
@@ -24,7 +23,7 @@ This project is now set up to ship a **single compiled binary** and publish a re
 - `scripts/install.sh`
   - One-line install script for Linux/macOS users:
     ```bash
-    curl -fsSL https://raw.githubusercontent.com/synapta/synapta-cli/main/scripts/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/ashiqrniloy/synapta-cli/main/scripts/install.sh | sh
     ```
   - Downloads correct binary for user OS/arch and installs it to:
     - `/usr/local/bin` (if writable), otherwise
@@ -43,25 +42,7 @@ This project is now set up to ship a **single compiled binary** and publish a re
 
 ## One-time setup you must do (GitHub side)
 
-### 1) Create a Homebrew tap repository
-
-Create this repository in GitHub:
-
-- `synapta/homebrew-tap` (or your preferred org/user)
-
-Then keep it empty (GoReleaser will commit formula files there).
-
-> If you use a different tap repo, update `.goreleaser.yaml` under `brews.repository`.
-
-### 2) Add GitHub Actions secret for Homebrew tap writes
-
-In `synapta-cli` repo settings → **Secrets and variables** → **Actions**, add:
-
-- `HOMEBREW_TAP_GITHUB_TOKEN`
-
-Use a PAT (classic or fine-grained) that can push to your tap repo (`contents: write`).
-
-### 3) Ensure workflow permission allows write
+### Ensure workflow permission allows write
 
 In repo settings → Actions → General:
 
@@ -74,24 +55,10 @@ In repo settings → Actions → General:
 ## A) Install via script (Linux/macOS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/synapta/synapta-cli/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ashiqrniloy/synapta-cli/main/scripts/install.sh | sh
 ```
 
 Update is the same command.
-
-## B) Install via Homebrew
-
-```bash
-brew tap synapta/tap https://github.com/synapta/homebrew-tap
-brew install synapta
-```
-
-Update:
-
-```bash
-brew update
-brew upgrade synapta
-```
 
 ## Versioning flow (you control versions)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-REPO="${REPO:-synapta/synapta-cli}"
+REPO="${REPO:-ashiqrniloy/synapta-cli}"
 BINARY="synapta"
 
 log() {

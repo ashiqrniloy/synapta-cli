@@ -3,7 +3,7 @@ package core
 import (
 	"strings"
 
-	"github.com/synapta/synapta-cli/internal/llm"
+	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
 
 const CompactionSummarizationSystemPrompt = "You are a precise technical summarizer. Produce structured, concise summaries that preserve critical implementation details, exact file paths, function names, and errors."

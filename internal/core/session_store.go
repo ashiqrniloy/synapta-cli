@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/synapta/synapta-cli/internal/llm"
+	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
 
 const (

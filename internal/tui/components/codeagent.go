@@ -18,12 +18,12 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 
-	"github.com/synapta/synapta-cli/internal/config"
-	"github.com/synapta/synapta-cli/internal/core"
-	"github.com/synapta/synapta-cli/internal/core/tools"
-	"github.com/synapta/synapta-cli/internal/llm"
-	"github.com/synapta/synapta-cli/internal/oauth"
-	"github.com/synapta/synapta-cli/internal/tui/theme"
+	"github.com/ashiqrniloy/synapta-cli/internal/config"
+	"github.com/ashiqrniloy/synapta-cli/internal/core"
+	"github.com/ashiqrniloy/synapta-cli/internal/core/tools"
+	"github.com/ashiqrniloy/synapta-cli/internal/llm"
+	"github.com/ashiqrniloy/synapta-cli/internal/oauth"
+	"github.com/ashiqrniloy/synapta-cli/internal/tui/theme"
 )
 
 // ─── Kilo Auth Messages ─────────────────────────────────────────────

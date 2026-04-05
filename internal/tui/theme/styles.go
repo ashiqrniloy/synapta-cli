@@ -5,7 +5,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/synapta/synapta-cli/internal/config"
+	"github.com/ashiqrniloy/synapta-cli/internal/config"
 )
 
 // Styles holds all lipgloss styles derived from the active theme.

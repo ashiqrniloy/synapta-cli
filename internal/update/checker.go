@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	repoOwner      = "synapta"
+	repoOwner      = "ashiqrniloy"
 	repoName       = "synapta-cli"
 	checkTimeout   = 1500 * time.Millisecond
 	cacheTTL       = 6 * time.Hour
