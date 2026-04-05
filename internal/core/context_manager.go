@@ -132,10 +132,30 @@ func (m *ContextManager) Build(history []llm.Message) ([]llm.Message, error) {
 		if !isContextRole(msg.Role) {
 			continue
 		}
-		if strings.TrimSpace(msg.Content) == "" {
-			continue
+		hasContent := strings.TrimSpace(msg.Content) != ""
+		hasToolCalls := len(msg.ToolCalls) > 0
+		hasToolRef := strings.TrimSpace(msg.ToolCallID) != ""
+
+		switch msg.Role {
+		case "assistant":
+			if !hasContent && !hasToolCalls {
+				continue
+			}
+		case "tool":
+			if !hasContent && !hasToolRef {
+				continue
+			}
+		default:
+			if !hasContent {
+				continue
+			}
 		}
-		messages = append(messages, llm.Message{Role: msg.Role, Content: msg.Content, Name: msg.Name, ToolCallID: msg.ToolCallID})
+
+		out := llm.Message{Role: msg.Role, Content: msg.Content, Name: msg.Name, ToolCallID: msg.ToolCallID}
+		if len(msg.ToolCalls) > 0 {
+			out.ToolCalls = append([]llm.ToolCall(nil), msg.ToolCalls...)
+		}
+		messages = append(messages, out)
 	}
 
 	m.mu.Lock()

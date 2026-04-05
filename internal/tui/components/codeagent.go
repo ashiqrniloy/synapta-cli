@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/atotto/clipboard"
 	"charm.land/lipgloss/v2"
 
 	"charm.land/bubbles/v2/textarea"
@@ -119,6 +120,10 @@ type toolEventMsg struct {
 	Event core.ToolEvent
 }
 
+type assistantToolCallsMsg struct {
+	ToolCalls []llm.ToolCall
+}
+
 type toolTickMsg struct{}
 type workingTickMsg struct{}
 
@@ -170,6 +175,9 @@ type keybindingRow struct {
 const (
 	inputModeChat = "chat"
 	inputModeBash = "bash"
+
+	layoutModeSplit   = "split"
+	layoutModeStacked = "stacked"
 )
 
 // CodeAgentModel is the main TUI model for the Synapta Code agent.
@@ -225,8 +233,11 @@ type CodeAgentModel struct {
 	currentCwd       string
 	isExecutingBash  bool
 	workingFrame     int
-	chatPaneWidth    int
-	contextPaneWidth int
+	chatPaneWidth      int
+	contextPaneWidth   int
+	contextPaneHeight  int
+	layoutMode         string
+	mouseCaptureEnabled bool
 
 	contextActions            []ContextAction
 	contextModalOpen          bool
@@ -297,6 +308,8 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		chatAutoScroll:        true,
 		inputMode:             inputModeChat,
 		currentCwd:            cwd,
+		layoutMode:           layoutModeStacked,
+		mouseCaptureEnabled:  true,
 	}
 
 	if cfg.Provider.Default != "" && cfg.Provider.Model != "" {
@@ -329,7 +342,7 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 
 func buildTextarea(t config.Theme, cfg *config.AppConfig) textarea.Model {
 	ta := textarea.New()
-	ta.Placeholder = "Type your message... (Enter=send, Shift+Enter=newline)"
+	ta.Placeholder = "Type your message... (Enter=send, Shift+Enter/Ctrl+N=newline)"
 	ta.ShowLineNumbers = false
 
 	// Enable dynamic height - textarea will grow/shrink based on content
@@ -422,6 +435,16 @@ func (m *CodeAgentModel) getHelpKey() string {
 	return "ctrl+j"
 }
 
+func (m *CodeAgentModel) shouldInsertNewline(msg tea.KeyPressMsg, keyStr string) bool {
+	if keyStr == "ctrl+n" || (msg.Code == 'n' && msg.Mod.Contains(tea.ModCtrl)) {
+		return true
+	}
+	if msg.Code == tea.KeyEnter && msg.Mod.Contains(tea.ModShift) {
+		return true
+	}
+	return false
+}
+
 // getFilterText returns the text used for filtering (after the ':' prefix).
 func (m *CodeAgentModel) getFilterText() string {
 	value := m.ta.Value()
@@ -462,7 +485,7 @@ func (m *CodeAgentModel) applyInputMode(mode string) {
 		m.ta.Placeholder = "bash> Enter command (Enter=run, Esc=exit bash mode)"
 	default:
 		m.inputMode = inputModeChat
-		m.ta.Placeholder = "Type your message... (Enter=send, Shift+Enter=newline)"
+		m.ta.Placeholder = "Type your message... (Enter=send, Shift+Enter/Ctrl+N=newline)"
 	}
 }
 
@@ -572,10 +595,14 @@ func (m *CodeAgentModel) buildContextEntries() []ContextEntry {
 	}
 	entries := make([]ContextEntry, 0, len(msgs))
 	hPos := 0
+	order := 0
 	for i, msg := range msgs {
 		category := categorizeContextMessage(msg)
+		if strings.TrimSpace(msg.Content) == "" && msg.Role != "system" {
+			continue
+		}
 		entry := ContextEntry{
-			Order:           i + 1,
+			Order:           order + 1,
 			ContextIndex:    i,
 			Role:            msg.Role,
 			Content:         strings.TrimSpace(msg.Content),
@@ -596,6 +623,7 @@ func (m *CodeAgentModel) buildContextEntries() []ContextEntry {
 			entry.Removable = false
 		}
 		entries = append(entries, entry)
+		order++
 	}
 	return entries
 }
@@ -606,6 +634,9 @@ func categorizeContextMessage(msg llm.Message) string {
 		return "system-prompt"
 	}
 	if strings.HasPrefix(content, "The conversation history before this point was compacted") {
+		return "compacted-output"
+	}
+	if strings.HasPrefix(content, "<summary>") || strings.HasPrefix(content, "## Goal") {
 		return "compacted-output"
 	}
 	if strings.Contains(content, "<skill name=") {
@@ -951,6 +982,16 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshChatViewport()
 		return m, waitForStreamMsg(m.streamCh)
 
+	case assistantToolCallsMsg:
+		if len(msg.ToolCalls) > 0 {
+			assistantMsg := llm.Message{Role: "assistant", ToolCalls: append([]llm.ToolCall(nil), msg.ToolCalls...)}
+			m.conversationHistory = append(m.conversationHistory, assistantMsg)
+			if m.sessionStore != nil {
+				_ = m.sessionStore.AppendMessage(assistantMsg)
+			}
+		}
+		return m, waitForStreamMsg(m.streamCh)
+
 	case toolEventMsg:
 		e := msg.Event
 		switch e.Type {
@@ -1070,6 +1111,10 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Compacted {
 			m.appendSystemMessage("[Compact] ✓ Session compacted", "done")
+			m.contextActions = nil
+			m.contextModalEntries = nil
+			m.lastPromptFingerprint = core.PromptFingerprint{}
+			m.lastPromptHash = ""
 			m.recordContextAction("Compaction applied")
 		} else {
 			m.appendSystemMessage("[Compact] No compaction needed", "info")
@@ -1181,6 +1226,16 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		quitKey := m.getQuitKey()
 		contextKey := m.getContextKey()
 		helpKey := m.getHelpKey()
+
+		if m.shouldInsertNewline(msg, keyStr) {
+			if m.inputMode == inputModeChat || m.inputMode == inputModeBash {
+				if !m.picker.IsActive() && (m.skillPicker == nil || !m.skillPicker.IsActive()) {
+					m.ta.InsertRune('\n')
+					m.recalculateLayout()
+					return m, nil
+				}
+			}
+		}
 
 		if m.keybindingsModalOpen {
 			if keyStr == "esc" || keyStr == helpKey {
@@ -1323,6 +1378,12 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		if keyStr == "ctrl+l" {
+			m.toggleLayoutMode()
+			m.refreshChatViewport()
+			return m, nil
+		}
+
 		// ─── Command Mode Active ────────────────────────────────
 		if m.picker.IsActive() {
 			// Ctrl+Q exits command mode
@@ -1438,9 +1499,29 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
+		if keyStr == "ctrl+g" {
+			m.mouseCaptureEnabled = !m.mouseCaptureEnabled
+			if m.mouseCaptureEnabled {
+				m.appendSystemMessage("[Mouse] Scroll mode enabled (mouse wheel active; use Shift+drag for terminal selection)", "info")
+			} else {
+				m.appendSystemMessage("[Mouse] Selection mode enabled (mouse capture off; drag to select text)", "info")
+			}
+			return m, nil
+		}
+
 		if keyStr == "esc" && m.inputMode == inputModeBash && strings.TrimSpace(m.ta.Value()) == "" {
 			m.applyInputMode(inputModeChat)
 			m.appendSystemMessage("[Bash] Mode disabled", "info")
+			return m, nil
+		}
+
+		// Copy latest message/tool output to system clipboard
+		if keyStr == "ctrl+shift+c" || keyStr == "ctrl+y" {
+			if err := m.copyLatestMessageToClipboard(); err != nil {
+				m.appendSystemMessage("[Clipboard] ✗ "+err.Error(), "error")
+			} else {
+				m.appendSystemMessage("[Clipboard] ✓ Copied latest transcript block", "done")
+			}
 			return m, nil
 		}
 
@@ -1607,7 +1688,11 @@ func (m *CodeAgentModel) View() tea.View {
 	if m.height < 1 || m.width < 1 {
 		v := tea.NewView("")
 		v.AltScreen = true
-		v.MouseMode = tea.MouseModeCellMotion
+		if m.mouseCaptureEnabled {
+			v.MouseMode = tea.MouseModeCellMotion
+		} else {
+			v.MouseMode = tea.MouseModeNone
+		}
 		v.KeyboardEnhancements.ReportEventTypes = true
 		return v
 	}
@@ -1621,13 +1706,21 @@ func (m *CodeAgentModel) View() tea.View {
 		Height(m.chatViewport.Height()).
 		AlignVertical(lipgloss.Top).
 		Render(m.chatViewport.View())
-	contextView := m.renderContextPane(m.chatViewport.Height())
-	middle := lipgloss.JoinHorizontal(lipgloss.Top, chatView, " ", contextView)
+
+	var middle string
+	if m.isStackedLayout() {
+		contextView := m.renderContextPane(m.contextPaneHeight)
+		paneDivider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(m.width, 1)))
+		middle = strings.Join([]string{contextView, paneDivider, chatView}, "\n")
+	} else {
+		contextView := m.renderContextPane(m.chatViewport.Height())
+		middle = lipgloss.JoinHorizontal(lipgloss.Top, chatView, " ", contextView)
+	}
 
 	divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(m.width, 1)))
 	var sections []string
 	sections = append(sections, header, divider, middle)
-	if !m.isCompactDensity() {
+	if !m.isStackedLayout() && !m.isCompactDensity() {
 		sections = append(sections, "")
 	}
 	sections = append(sections, inputBox)
@@ -1644,7 +1737,11 @@ func (m *CodeAgentModel) View() tea.View {
 
 	v := tea.NewView(base)
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeNone
+	if m.mouseCaptureEnabled {
+		v.MouseMode = tea.MouseModeCellMotion
+	} else {
+		v.MouseMode = tea.MouseModeNone
+	}
 	v.KeyboardEnhancements.ReportEventTypes = true
 	return v
 }
@@ -1742,6 +1839,102 @@ func (m *CodeAgentModel) renderContextPane(height int) string {
 	width := max(m.contextPaneWidth, 20)
 	innerWidth := max(width-4, 10)
 	innerHeight := max(height-2, 8)
+
+	muted := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground())
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(m.styles.CommandHighlightStyle.GetForeground()).
+		Width(innerWidth).
+		Align(lipgloss.Center).
+		Render("CONTEXT")
+
+	if m.isStackedLayout() {
+		entries := m.buildContextEntries()
+
+		actionItems := make([]string, 0, len(m.contextActions))
+		for i := len(m.contextActions) - 1; i >= 0; i-- {
+			a := m.contextActions[i]
+			actionItems = append(actionItems, truncateLine(a.Message, 30))
+		}
+
+		skillItems := make([]string, 0, len(m.availableSkills))
+		for _, s := range m.availableSkills {
+			skillItems = append(skillItems, truncateLine("@"+s.Name, 30))
+		}
+
+		contextItems := make([]string, 0, len(entries))
+		usedTokens := estimateMessagesTokens(m.conversationHistory)
+		maxTokens := m.selectedContextWindow
+		if maxTokens <= 0 {
+			maxTokens = resolveModelContextWindow(m.selectedProvider, m.selectedModelID)
+		}
+		usage := fmt.Sprintf("Used ~%s", formatTokenCount(usedTokens))
+		if maxTokens > 0 {
+			pct := int((float64(usedTokens) / float64(maxTokens)) * 100)
+			if pct < 0 {
+				pct = 0
+			}
+			usage = fmt.Sprintf("Used ~%s / %s (%d%%)", formatTokenCount(usedTokens), formatTokenCount(maxTokens), pct)
+		}
+		for _, e := range entries {
+			label := strings.TrimSpace(e.Label)
+			if label == "" {
+				label = e.Role
+			}
+			contextItems = append(contextItems, truncateLine(label, 30))
+		}
+
+		colW := max((innerWidth-2)/3, 30)
+		rows := max(innerHeight-4, 5)
+		maxRows := max(max(len(actionItems), len(skillItems)), len(contextItems))
+		if maxRows > 0 && maxRows < rows {
+			rows = maxRows
+		}
+		if rows < 5 {
+			rows = 5
+		}
+
+		pad := func(items []string) []string {
+			out := make([]string, rows)
+			for i := 0; i < rows; i++ {
+				if i < len(items) {
+					out[i] = truncateLine(items[i], colW)
+				}
+			}
+			return out
+		}
+
+		left := pad(actionItems)
+		mid := pad(skillItems)
+		right := pad(contextItems)
+
+		lines := []string{title, ""}
+		currentContextHeader := truncateLine("CURRENT CONTEXT ("+usage+")", colW)
+		headers := lipgloss.JoinHorizontal(lipgloss.Top,
+			lipgloss.NewStyle().Width(colW).Align(lipgloss.Left).Render(muted.Render("ACTIONS")), " ",
+			lipgloss.NewStyle().Width(colW).Align(lipgloss.Left).Render(muted.Render("KNOWN SKILLS")), " ",
+			lipgloss.NewStyle().Width(colW).Align(lipgloss.Left).Render(muted.Render(currentContextHeader)),
+		)
+		lines = append(lines, headers)
+		for i := 0; i < rows; i++ {
+			line := lipgloss.JoinHorizontal(lipgloss.Top,
+				lipgloss.NewStyle().Width(colW).Render(left[i]), " ",
+				lipgloss.NewStyle().Width(colW).Render(mid[i]), " ",
+				lipgloss.NewStyle().Width(colW).Render(right[i]),
+			)
+			lines = append(lines, line)
+		}
+
+		content := strings.Join(limitLines(lines, innerHeight), "\n")
+		return lipgloss.NewStyle().
+			Width(width).
+			Height(max(height-2, 1)).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(m.borderColor)).
+			Padding(0, 1).
+			Render(content)
+	}
+
 	actionsRatio := 24
 	skillsRatio := 16
 	if m.isCompactDensity() {
@@ -1764,7 +1957,7 @@ func (m *CodeAgentModel) renderContextPane(height int) string {
 
 	skillLines := make([]string, 0, skillsH)
 	for _, s := range m.availableSkills {
-		skillLines = append(skillLines, truncateLine("@"+s.Name+" — "+s.Description, innerWidth))
+		skillLines = append(skillLines, truncateLine("@"+s.Name, innerWidth))
 		if len(skillLines) >= skillsH {
 			break
 		}
@@ -1785,16 +1978,15 @@ func (m *CodeAgentModel) renderContextPane(height int) string {
 		contextLines = append(contextLines, "")
 	}
 
-	muted := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground())
 	sep := muted.Render(strings.Repeat("─", max(innerWidth, 1)))
-	lines := []string{lipgloss.NewStyle().Bold(true).Render("Context")}
-	lines = append(lines, muted.Render("Actions"))
+	lines := []string{title, ""}
+	lines = append(lines, muted.Render("ACTIONS"))
 	lines = append(lines, actionLines...)
 	lines = append(lines, sep)
-	lines = append(lines, muted.Render("Known skills"))
+	lines = append(lines, muted.Render("KNOWN SKILLS"))
 	lines = append(lines, skillLines...)
 	lines = append(lines, sep)
-	lines = append(lines, muted.Render("Current context"))
+	lines = append(lines, muted.Render("CURRENT CONTEXT"))
 	usedTokens := estimateMessagesTokens(m.conversationHistory)
 	maxTokens := m.selectedContextWindow
 	if maxTokens <= 0 {
@@ -1814,6 +2006,7 @@ func (m *CodeAgentModel) renderContextPane(height int) string {
 	content := strings.Join(lines, "\n")
 	return lipgloss.NewStyle().
 		Width(width).
+		Height(max(height-2, 1)).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(m.borderColor)).
 		Padding(0, 1).
@@ -2150,6 +2343,20 @@ func (m *CodeAgentModel) isCompactDensity() bool {
 	return m.densityMode() == "compact"
 }
 
+func (m *CodeAgentModel) isStackedLayout() bool {
+	return strings.TrimSpace(m.layoutMode) == layoutModeStacked
+}
+
+func (m *CodeAgentModel) toggleLayoutMode() {
+	if m.isStackedLayout() {
+		m.layoutMode = layoutModeSplit
+		m.recordContextAction("Layout switched to split panes")
+		return
+	}
+	m.layoutMode = layoutModeStacked
+	m.recordContextAction("Layout switched to stacked panes")
+}
+
 func (m *CodeAgentModel) keybindingRows() []keybindingRow {
 	newline := "shift+enter"
 	if m.cfg != nil && m.cfg.Keybindings.Newline != "" {
@@ -2160,8 +2367,11 @@ func (m *CodeAgentModel) keybindingRows() []keybindingRow {
 		{Action: "Newline", Binding: newline, Description: "Insert newline in input"},
 		{Action: "Command palette", Binding: m.getCommandKey(), Description: "Open command picker"},
 		{Action: "Context manager", Binding: m.getContextKey(), Description: "Open context modal"},
+		{Action: "Toggle layout", Binding: "ctrl+l", Description: "Switch split/stacked panes for easier text selection"},
+		{Action: "Mouse mode", Binding: "ctrl+g", Description: "Toggle scroll capture vs free mouse text selection"},
 		{Action: "Keybindings help", Binding: m.getHelpKey(), Description: "Open keybindings modal"},
 		{Action: "Toggle tool expansion", Binding: "ctrl+o", Description: "Expand/collapse latest tool block"},
+		{Action: "Copy latest block", Binding: "ctrl+shift+c / ctrl+y", Description: "Copy latest message/tool output to clipboard"},
 		{Action: "Thinking level", Binding: "ctrl+t", Description: "Cycle thinking level for selected model"},
 		{Action: "Skill picker", Binding: "@", Description: "Open skills suggestions"},
 		{Action: "Quit", Binding: m.getQuitKey(), Description: "Exit Synapta Code"},
@@ -2271,12 +2481,6 @@ func (m *CodeAgentModel) recalculateLayout() {
 		return
 	}
 
-	m.contextPaneWidth = max((m.width*40)/100, 32)
-	if m.contextPaneWidth > m.width-30 {
-		m.contextPaneWidth = max(m.width-30, 20)
-	}
-	m.chatPaneWidth = max(m.width-m.contextPaneWidth, 20)
-
 	m.ta.SetWidth(max(m.width-4, 20))
 
 	inputH := countLines(m.renderInputBox())
@@ -2286,12 +2490,41 @@ func (m *CodeAgentModel) recalculateLayout() {
 	if m.isCompactDensity() {
 		spacers = 1
 	}
-	reserved := 2 + inputH + footerH + spacers // header + spacers
+	reserved := 2 + inputH + footerH + (spacers-1) // header + spacers
+	availableMiddle := m.height - reserved
 
-	chatH := m.height - reserved
+	if m.isStackedLayout() {
+		m.chatPaneWidth = m.width
+		m.contextPaneWidth = m.width
+
+		if availableMiddle < 8 {
+			availableMiddle = 8
+		}
+
+		contextH := max((availableMiddle*25)/100, 3)
+		chatH := availableMiddle - contextH - 1 // divider between chat + context
+		if chatH < 4 {
+			chatH = 4
+			contextH = max(availableMiddle-chatH-1, 3)
+		}
+
+		m.contextPaneHeight = contextH
+		m.chatViewport.SetWidth(max(m.chatPaneWidth, 20))
+		m.chatViewport.SetHeight(chatH)
+		return
+	}
+
+	m.contextPaneWidth = max((m.width*25)/100, 24)
+	if m.contextPaneWidth > m.width-20 {
+		m.contextPaneWidth = max(m.width-20, 20)
+	}
+	m.chatPaneWidth = max(m.width-m.contextPaneWidth-1, 20)
+
+	chatH := availableMiddle
 	if chatH < 3 {
 		chatH = 3
 	}
+	m.contextPaneHeight = chatH
 
 	m.chatViewport.SetWidth(max(m.chatPaneWidth, 20))
 	m.chatViewport.SetHeight(chatH)
@@ -2403,7 +2636,6 @@ func (m *CodeAgentModel) bashWorkingStatusText() string {
 // renderUserMessage renders a user message with interaction highlight.
 func (m *CodeAgentModel) renderUserMessage(content string) string {
 	maxWidth := max(m.chatViewport.Width(), 20)
-	label := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Bold(true).Render("You")
 	lines := wordWrap(content, maxWidth-2)
 	if len(lines) == 0 {
 		lines = []string{""}
@@ -2415,54 +2647,55 @@ func (m *CodeAgentModel) renderUserMessage(content string) string {
 	return m.styles.InteractionHighlightStyle.
 		Width(maxWidth).
 		Padding(padY, 1).
-		Render(label + "\n" + strings.Join(lines, "\n"))
+		Render(strings.Join(lines, "\n"))
 }
 
 func (m *CodeAgentModel) renderAssistantMessage(content string) string {
 	maxWidth := max(m.chatViewport.Width(), 20)
-	label := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Bold(true).Render("Assistant")
 
-	if rendered, ok := renderMarkdownPreview(strings.TrimSpace(content), maxWidth); ok {
-		body := lipgloss.NewStyle().Width(maxWidth).Render(strings.TrimSpace(rendered))
-		return label + "\n" + body
+	mdInput := strings.TrimSpace(content)
+	if strings.Contains(mdInput, "\\n") {
+		mdInput = strings.ReplaceAll(mdInput, "\\n", "\n")
 	}
 
-	lines := wordWrap(content, maxWidth)
+	if rendered, ok := renderMarkdownPreview(mdInput, maxWidth); ok {
+		return lipgloss.NewStyle().
+			Foreground(m.styles.CommandHighlightStyle.GetForeground()).
+			Width(maxWidth).
+			Render(strings.TrimSpace(rendered))
+	}
+
+	lines := wordWrap(mdInput, maxWidth)
 	if len(lines) == 0 {
 		lines = []string{""}
 	}
-	body := lipgloss.NewStyle().
+	return lipgloss.NewStyle().
 		Foreground(m.styles.CommandHighlightStyle.GetForeground()).
 		Width(maxWidth).
 		Render(strings.Join(lines, "\n"))
-	return label + "\n" + body
 }
 
 func (m *CodeAgentModel) renderSystemMessage(msg ChatMessage) string {
 	maxWidth := max(m.chatViewport.Width(), 20)
-	lines := wordWrap(strings.TrimSpace(msg.Content), maxWidth-4)
+	lines := wordWrap(strings.TrimSpace(msg.Content), maxWidth-2)
 	if len(lines) == 0 {
 		lines = []string{""}
 	}
 
-	t := m.cfg.ActiveTheme()
-	fg := lipgloss.Color(t.Foreground)
-	bg := lipgloss.Color(t.SystemMessageColor)
-	prefix := "ℹ"
+	fg := lipgloss.Color("255")
+	bg := lipgloss.Color("238")
 	switch msg.SystemKind {
 	case "error":
-		prefix = "✗"
-		bg = lipgloss.Color(t.Error)
+		bg = lipgloss.Color("160")
 	case "done":
-		prefix = "✓"
-		bg = lipgloss.Color(t.Success)
+		bg = lipgloss.Color("28")
 	case "working":
-		prefix = "…"
-		bg = lipgloss.Color(t.Primary)
+		bg = lipgloss.Color("25")
+	default:
+		bg = lipgloss.Color("60")
 	}
 
-	label := lipgloss.NewStyle().Bold(true).Foreground(fg).Render("System " + prefix)
-	content := label + "\n" + strings.Join(lines, "\n")
+	content := strings.Join(lines, "\n")
 	return lipgloss.NewStyle().
 		Width(maxWidth).
 		Foreground(fg).
@@ -2478,21 +2711,23 @@ func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
 		state = "running"
 	}
 
-	stateColor := m.styles.MutedStyle.GetForeground()
-	stateIcon := "●"
+	stateColor := m.styles.CommandHighlightStyle.GetForeground()
 	switch state {
 	case "error":
 		stateColor = lipgloss.Color("9")
-		stateIcon = "✗"
 	case "done":
 		stateColor = m.styles.SuccessStyle.GetForeground()
-		stateIcon = "✓"
 	case "running":
 		stateColor = m.styles.CommandHighlightStyle.GetForeground()
-		stateIcon = "…"
 	}
-	header := lipgloss.NewStyle().Foreground(stateColor).Bold(true).Render(fmt.Sprintf("%s %s", stateIcon, strings.ToUpper(state)))
-	meta := []string{m.styles.MutedStyle.Render("tool: " + msg.ToolName)}
+
+	toolName := strings.ToUpper(strings.TrimSpace(msg.ToolName))
+	if toolName == "" {
+		toolName = "TOOL"
+	}
+	header := lipgloss.NewStyle().Foreground(stateColor).Bold(true).Render(toolName)
+
+	meta := []string{}
 	if strings.TrimSpace(msg.ToolPath) != "" {
 		meta = append(meta, m.styles.MutedStyle.Render("path: "+msg.ToolPath))
 	}
@@ -2546,11 +2781,9 @@ func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
 		blockLines = append(blockLines, m.styles.MutedStyle.Render(fmt.Sprintf("%s %s", label, end.Sub(msg.ToolStartedAt).Round(time.Second))))
 	}
 
-	color := stateColor
-
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(color).
+		BorderForeground(stateColor).
 		Padding(0, 1).
 		Width(maxWidth)
 
@@ -2567,7 +2800,7 @@ func looksLikeMarkdown(s string) bool {
 	}
 	markers := []string{"# ", "## ", "### ", "- ", "* ", "1. ", "> ", "|", "**", "__", "`"}
 	for _, marker := range markers {
-		if strings.Contains(s, "\n"+marker) || strings.HasPrefix(s, marker) {
+		if strings.Contains(s, "\n"+marker) || strings.HasPrefix(s, marker) || strings.Contains(s, marker) {
 			return true
 		}
 	}
@@ -2645,7 +2878,7 @@ func renderMarkdownPreview(content string, width int) (string, bool) {
 
 		wrapped := wordWrap(line, max(width, 20))
 		for _, w := range wrapped {
-			out = append(out, renderInlineCode(w, inlineCodeStyle))
+			out = append(out, lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(renderInlineCode(w, inlineCodeStyle)))
 		}
 	}
 
@@ -2784,6 +3017,10 @@ func (m *CodeAgentModel) startChatStream(history []llm.Message) tea.Cmd {
 				streamCh <- chatStreamChunkMsg{Text: text}
 				return nil
 			},
+			func(toolCalls []llm.ToolCall) error {
+				streamCh <- assistantToolCallsMsg{ToolCalls: append([]llm.ToolCall(nil), toolCalls...)}
+				return nil
+			},
 			func(event core.ToolEvent) error {
 				streamCh <- toolEventMsg{Event: event}
 				return nil
@@ -2841,6 +3078,66 @@ func (m *CodeAgentModel) lastToolCallID() (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func (m *CodeAgentModel) copyLatestMessageToClipboard() error {
+	text := strings.TrimSpace(m.latestTranscriptBlockForCopy())
+	if text == "" {
+		return fmt.Errorf("nothing to copy")
+	}
+	if err := clipboard.WriteAll(text); err != nil {
+		return fmt.Errorf("clipboard unavailable: %w", err)
+	}
+	return nil
+}
+
+func (m *CodeAgentModel) latestTranscriptBlockForCopy() string {
+	for i := len(m.chatMessages) - 1; i >= 0; i-- {
+		msg := m.chatMessages[i]
+		switch msg.Role {
+		case "tool":
+			var b strings.Builder
+			b.WriteString("Tool: ")
+			b.WriteString(strings.TrimSpace(msg.ToolName))
+			b.WriteString("\n")
+			if p := strings.TrimSpace(msg.ToolPath); p != "" {
+				b.WriteString("Path: ")
+				b.WriteString(p)
+				b.WriteString("\n")
+			}
+			if c := strings.TrimSpace(msg.ToolCommand); c != "" {
+				b.WriteString("Command: ")
+				b.WriteString(c)
+				b.WriteString("\n")
+			}
+			state := strings.TrimSpace(msg.ToolState)
+			if state == "" {
+				state = "running"
+			}
+			b.WriteString("State: ")
+			b.WriteString(state)
+			b.WriteString("\n\n")
+			if out := strings.TrimSpace(msg.Content); out != "" {
+				b.WriteString(out)
+			} else {
+				b.WriteString("(no output)")
+			}
+			return b.String()
+		case "assistant":
+			if t := strings.TrimSpace(msg.Content); t != "" {
+				return t
+			}
+		case "user":
+			if t := strings.TrimSpace(msg.Content); t != "" {
+				return t
+			}
+		case "system":
+			if t := strings.TrimSpace(msg.Content); t != "" {
+				return t
+			}
+		}
+	}
+	return ""
 }
 
 func (m *CodeAgentModel) toolPreviewLines() int {

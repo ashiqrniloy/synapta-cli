@@ -122,6 +122,7 @@ func (s *ChatService) Stream(
 	modelID string,
 	messages []llm.Message,
 	onDelta func(text string) error,
+	onAssistantToolCalls func(toolCalls []llm.ToolCall) error,
 	onToolEvent func(event ToolEvent) error,
 ) error {
 	provider, err := s.providerFor(providerID)
@@ -143,6 +144,13 @@ func (s *ChatService) Stream(
 				return fmt.Errorf("provider %q model %q returned empty content", providerID, modelID)
 			}
 			return nil
+		}
+
+		if onAssistantToolCalls != nil {
+			copied := append([]llm.ToolCall(nil), toolCalls...)
+			if err := onAssistantToolCalls(copied); err != nil {
+				return err
+			}
 		}
 
 		messages = append(messages, llm.Message{Role: "assistant", Content: assistantText, ToolCalls: toolCalls})
