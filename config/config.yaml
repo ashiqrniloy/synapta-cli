@@ -1,0 +1,80 @@
+# Synapta Configuration Reference
+# Copy this to ~/.synapta/config.yaml or edit in place
+
+# Keybindings section
+# Naming convention: lowercase snake_case, verb or action oriented
+# Use standard key names separated by + (e.g., shift+enter, ctrl+c, alt+q)
+#
+# Bubbletea v2 supports keyboard enhancements (Kitty protocol) on
+# compatible terminals, enabling proper modifier detection:
+# - Shift+Enter is now properly detected for newlines
+# - Ctrl+Enter works for submit on supported terminals
+# - Enter is used for submit by default
+#
+# For terminals without Kitty protocol support:
+# - Use Ctrl+J or Escape as fallback submit keys
+keybindings:
+  newline: "shift+enter"  # Shift+Enter inserts newline
+  submit: "enter"         # Enter submits
+  quit: "ctrl+c"          # Ctrl+C quits
+  command: "ctrl+p"       # Ctrl+P opens command palette
+  context: "ctrl+k"       # Ctrl+K opens context manager modal
+  help: "ctrl+j"          # Ctrl+J opens keybindings modal
+  # Alternative submit options (uncomment if needed):
+  # submit: "ctrl+enter"  # Ctrl+Enter submits
+  # submit: "ctrl+j"      # Ctrl+J submits (fallback for terminals without Kitty)
+  # submit: "escape"      # Escape key submits
+
+# UI density controls overall information spacing.
+# - comfortable: more whitespace (default)
+# - compact: tighter layout
+ui:
+  density: "comfortable"
+
+# Themes section
+# Each theme defines a complete color palette.
+# Nord Aurora Dark is the default; Gruvbox Material Dark is preserved.
+themes:
+  default: "nord-aurora-dark" # active theme key
+  nord-aurora-dark:
+    name: "Nord Aurora Dark"
+    background: "#1f2430"
+    foreground: "#d8dee9"
+    primary: "#88c0d0"
+    secondary: "#a3be8c"
+    accent: "#b48ead"
+    muted: "#6b7488"
+    border: "#3b4252"
+    selection: "#2b303b"
+    error: "#bf616a"
+    success: "#a3be8c"
+    cursor_fg: "#1f2430"
+    cursor_bg: "#88c0d0"
+    highlight_color: "#88c0d0"   # Base color for command palette highlight
+    highlight_opacity: 0.24        # Opacity of highlight background (0.0-1.0)
+    interaction_highlight_color: "#b48ead"   # Base color for user messages
+    interaction_highlight_opacity: 0.14      # Opacity of message background (0.0-1.0)
+    system_message_color: "#81a1c1"          # Base color for contextual system messages
+    system_message_opacity: 0.14             # Opacity of system message background (0.0-1.0)
+
+  # Preserved theme palette
+  gruvbox-material-dark:
+    name: "Gruvbox Material Dark"
+    background: "#282828"
+    foreground: "#d4be98"
+    primary: "#a9b665"
+    secondary: "#89b482"
+    accent: "#d8a657"
+    muted: "#7c6f64"
+    border: "#504945"
+    selection: "#3c3836"
+    error: "#ea6962"
+    success: "#a9b665"
+    cursor_fg: "#282828"
+    cursor_bg: "#a9b665"
+    highlight_color: "#a9b665"
+    highlight_opacity: 0.2
+    interaction_highlight_color: "#d8a657"
+    interaction_highlight_opacity: 0.15
+    system_message_color: "#89b482"
+    system_message_opacity: 0.22

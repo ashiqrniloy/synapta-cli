@@ -1,0 +1,28 @@
+# ── Authentication & User Credentials ──────────────────────────────
+.synapta/auth.json
+.synapta/config.yaml
+.synapta/
+
+# ── Environment & Secret Files ─────────────────────────────────────
+.env
+.env.*
+*.key
+*.pem
+*.crt
+
+# ── Go Build Artifacts ─────────────────────────────────────────────
+synapta
+synapta-*
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# ── Editor / OS ────────────────────────────────────────────────────
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
