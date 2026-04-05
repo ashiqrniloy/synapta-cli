@@ -471,6 +471,26 @@ func (s *SessionStore) ContextMessages() []llm.Message {
 	return s.contextMessagesLocked()
 }
 
+func (s *SessionStore) ContextMessageTimestamps() []time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	refs := s.contextMessageRefsLocked()
+	out := make([]time.Time, 0, len(refs))
+	for _, ref := range refs {
+		ts := time.Time{}
+		if ref.EntryIndex >= 0 && ref.EntryIndex < len(s.entries) {
+			raw := strings.TrimSpace(s.entries[ref.EntryIndex].Timestamp)
+			if raw != "" {
+				if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+					ts = parsed
+				}
+			}
+		}
+		out = append(out, ts)
+	}
+	return out
+}
+
 func (s *SessionStore) contextMessagesLocked() []llm.Message {
 	refs := s.contextMessageRefsLocked()
 	out := make([]llm.Message, 0, len(refs))

@@ -371,12 +371,12 @@ func splitToolCallID(id string) (callID, itemID string) {
 }
 
 func normalizeResponsesItemID(id string) string {
-	id = strings.TrimSpace(id)
+	id = strings.TrimSpace(strings.ToLower(id))
 	if id == "" {
 		return ""
 	}
 	id = strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
 			return r
 		}
 		return '_'
@@ -387,7 +387,7 @@ func normalizeResponsesItemID(id string) string {
 	if len(id) > 64 {
 		id = id[:64]
 	}
-	id = strings.TrimRight(id, "_")
+	id = strings.TrimRight(id, "_-")
 	if id == "" || id == "fc" || id == "fc_" {
 		return "fc_tool_call"
 	}
