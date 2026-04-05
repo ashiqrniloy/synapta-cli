@@ -13,6 +13,7 @@
 # ── Go Build Artifacts ─────────────────────────────────────────────
 synapta
 synapta-*
+dist/
 *.exe
 *.exe~
 *.dll

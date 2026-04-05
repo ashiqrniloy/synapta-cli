@@ -1,0 +1,52 @@
+version: 2
+
+project_name: synapta
+
+builds:
+  - id: synapta
+    main: ./cmd/synapta
+    binary: synapta
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/synapta/synapta-cli/internal/version.Version={{ .Version }}
+      - -X github.com/synapta/synapta-cli/internal/version.Commit={{ .Commit }}
+      - -X github.com/synapta/synapta-cli/internal/version.Date={{ .Date }}
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  prerelease: auto
+
+changelog:
+  sort: asc
+  use: git
+
+brews:
+  - name: synapta
+    repository:
+      owner: synapta
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/synapta/synapta-cli
+    description: Synapta — Agentic AI Development Framework CLI
+    license: MIT
+    install: |
+      bin.install "synapta"
+    test: |
+      system "#{bin}/synapta", "version"

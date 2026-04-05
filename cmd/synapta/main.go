@@ -9,6 +9,8 @@ import (
 
 	"github.com/synapta/synapta-cli/internal/config"
 	"github.com/synapta/synapta-cli/internal/tui/components"
+	"github.com/synapta/synapta-cli/internal/update"
+	"github.com/synapta/synapta-cli/internal/version"
 )
 
 func main() {
@@ -28,8 +30,16 @@ func rootCmd() *cobra.Command {
 Run without arguments to enter the interactive launcher, or use a
 subcommand such as "synapta code" to launch the coding agent directly.`,
 		RunE: runLauncher,
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			if cmd.Name() == "version" {
+				return
+			}
+			update.NotifyIfAvailable(version.Version, os.Stderr)
+		},
 	}
-	cmd.AddCommand(codeCmd())
+	cmd.Version = version.Version
+	cmd.SetVersionTemplate("{{printf \"synapta %s\\n\" .Version}}")
+	cmd.AddCommand(codeCmd(), versionCmd())
 	return cmd
 }
 
@@ -80,6 +90,18 @@ func runCodeAgent() error {
 		return fmt.Errorf("code agent error: %w", err)
 	}
 	return nil
+}
+
+func versionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print Synapta version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Fprintf(cmd.OutOrStdout(), "synapta %s\n", version.Version)
+			fmt.Fprintf(cmd.OutOrStdout(), "commit: %s\n", version.Commit)
+			fmt.Fprintf(cmd.OutOrStdout(), "built:  %s\n", version.Date)
+		},
+	}
 }
 
 // ─── Launcher model ───────────────────────────────────────────────────
