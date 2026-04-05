@@ -264,7 +264,7 @@ func (s *AuthStorage) HasAuth(provider string) bool {
 
 	switch entry.Type {
 	case "oauth":
-		return entry.OAuth != nil && entry.OAuth.Access != ""
+		return entry.OAuth != nil && (entry.OAuth.Access != "" || entry.OAuth.Refresh != "")
 	case "api":
 		return entry.API != nil && entry.API.APIKey != ""
 	}

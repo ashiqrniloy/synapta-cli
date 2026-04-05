@@ -2,11 +2,13 @@ package components
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/synapta/synapta-cli/internal/core"
 	"github.com/synapta/synapta-cli/internal/core/tools"
 	"github.com/synapta/synapta-cli/internal/llm"
+	"github.com/synapta/synapta-cli/internal/oauth"
 	"github.com/synapta/synapta-cli/internal/tui/theme"
 )
 
@@ -28,10 +31,27 @@ import (
 // KiloAuthProgressMsg reports progress during Kilo authentication.
 type KiloAuthProgressMsg string
 
+// CopilotAuthProgressMsg reports progress during GitHub Copilot authentication.
+type CopilotAuthProgressMsg string
+
+// CopilotAuthPromptMsg carries the device auth URL and code.
+type CopilotAuthPromptMsg struct {
+	VerificationURL string
+	UserCode        string
+}
+
+type authFlowDoneMsg struct{}
+
 // KiloAuthCompleteMsg is sent when Kilo authentication completes.
 type KiloAuthCompleteMsg struct {
 	Err        error
 	Email      string
+	ModelCount int
+}
+
+// CopilotAuthCompleteMsg is sent when GitHub Copilot authentication completes.
+type CopilotAuthCompleteMsg struct {
+	Err        error
 	ModelCount int
 }
 
@@ -175,6 +195,7 @@ type CodeAgentModel struct {
 	selectedModelID       string
 	selectedProvider      string
 	selectedThinkingLevel string
+	selectedContextWindow int
 	providerBalance       string
 
 	// Chat messages
@@ -185,6 +206,7 @@ type CodeAgentModel struct {
 	activeToolIndices     map[string]int
 	toolExpanded          map[string]bool
 	streamCh              <-chan tea.Msg
+	authCh                <-chan tea.Msg
 	chatService           *core.ChatService
 	systemPromptStore     *core.SystemPromptStore
 	contextManager        *core.ContextManager
@@ -206,22 +228,23 @@ type CodeAgentModel struct {
 	chatPaneWidth    int
 	contextPaneWidth int
 
-	contextActions          []ContextAction
-	contextModalOpen        bool
-	contextModalEditMode    bool
-	contextModalSelection   int
-	contextModalEntries     []ContextEntry
-	contextModalEditor      textarea.Model
-	contextModalEditorHint  string
-	contextOverrideActive   bool
-	keybindingsModalOpen    bool
-	keybindingsSearch       string
-	keybindingsSelection    int
-	lastPromptHash          string
-	lastPromptFingerprint   core.PromptFingerprint
-	likelyPromptCacheHit    bool
-	promptBuildCount        int
-	stablePrefixChangeCount int
+	contextActions            []ContextAction
+	contextModalOpen          bool
+	contextModalEditMode      bool
+	contextModalSelection     int
+	contextModalEntries       []ContextEntry
+	contextModalEditor        textarea.Model
+	contextModalEditorHint    string
+	contextModalPreviewOffset int
+	contextOverrideActive     bool
+	keybindingsModalOpen      bool
+	keybindingsSearch         string
+	keybindingsSelection      int
+	lastPromptHash            string
+	lastPromptFingerprint     core.PromptFingerprint
+	likelyPromptCacheHit      bool
+	promptBuildCount          int
+	stablePrefixChangeCount   int
 }
 
 // NewCodeAgentModel creates the model using the loaded AppConfig.
@@ -281,15 +304,21 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		model.selectedModelID = cfg.Provider.Model
 		model.selectedModelName = cfg.Provider.Model
 		model.selectedThinkingLevel = inferThinkingLevel(cfg.Provider.Model, cfg.Provider.Model)
+		model.selectedContextWindow = resolveModelContextWindow(cfg.Provider.Default, cfg.Provider.Model)
 	}
 
 	model.rebuildTranscriptFromHistory()
 	model.reloadAvailableSkills()
 	model.recordContextAction("System prompt loaded")
 
-	// Check if already authenticated and show model count
-	if authStorage != nil && authStorage.HasAuth("kilo") {
-		model.appendSystemMessage("[Kilo] ✓ Authenticated", "done")
+	// Check if already authenticated and show status on startup.
+	if authStorage != nil {
+		if authStorage.HasAuth("kilo") {
+			model.appendSystemMessage("[Kilo] ✓ Authenticated", "done")
+		}
+		if authStorage.HasAuth("github-copilot") {
+			model.appendSystemMessage("[GitHub Copilot] ✓ Authenticated", "done")
+		}
 	}
 	model.contextModalEditor = buildTextarea(t, cfg)
 	model.contextModalEditor.Placeholder = "Edit selected context (Ctrl+S to save, Esc to cancel)"
@@ -515,6 +544,7 @@ func (m *CodeAgentModel) openContextModal() {
 	m.contextModalOpen = true
 	m.contextModalEditMode = false
 	m.contextModalSelection = 0
+	m.contextModalPreviewOffset = 0
 	m.contextModalEntries = m.buildContextEntries()
 }
 
@@ -523,6 +553,7 @@ func (m *CodeAgentModel) closeContextModal() {
 	m.contextModalEditMode = false
 	m.contextModalEntries = nil
 	m.contextModalEditorHint = ""
+	m.contextModalPreviewOffset = 0
 }
 
 func (m *CodeAgentModel) buildContextEntries() []ContextEntry {
@@ -707,10 +738,12 @@ func (m *CodeAgentModel) removeContextEntry(entry ContextEntry) {
 // ─── tea.Model ───────────────────────────────────────────────────────
 
 func (m *CodeAgentModel) Init() tea.Cmd {
-	if m.selectedProvider == "kilo" {
-		return tea.Batch(textarea.Blink, m.fetchProviderBalanceCmd("kilo"))
+	switch m.selectedProvider {
+	case "kilo", "github-copilot":
+		return tea.Batch(textarea.Blink, m.fetchProviderBalanceCmd(m.selectedProvider))
+	default:
+		return textarea.Blink
 	}
-	return textarea.Blink
 }
 
 func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -740,12 +773,16 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clearCommandMode()
 			if len(msg.Path) > 1 {
 				providerID := msg.Path[1].ID
-				if providerID == "kilo" {
-					// Start Kilo Gateway OAuth flow
+				switch providerID {
+				case "kilo":
 					m.appendSystemMessage("[Kilo] Starting authentication...", "working")
 					return m, m.startKiloAuth()
+				case "github-copilot":
+					m.appendSystemMessage("[GitHub Copilot] Starting device authentication...", "working")
+					return m, m.startCopilotAuth()
+				default:
+					m.appendSystemMessage("[Add Provider] Selected: "+msg.Path[1].Name, "info")
 				}
-				m.appendSystemMessage("[Add Provider] Selected: "+msg.Path[1].Name, "info")
 			}
 		case "set-model":
 			if len(msg.Path) > 1 {
@@ -760,6 +797,7 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedModelID = modelID
 				m.selectedModelName = msg.Path[1].Name
 				m.selectedThinkingLevel = inferThinkingLevel(modelID, msg.Path[1].Name)
+				m.selectedContextWindow = resolveModelContextWindow(providerID, modelID)
 				if m.cfg != nil {
 					if err := m.cfg.SetProvider(providerID, modelID); err != nil {
 						m.appendSystemMessage("[Model] Warning: failed to save config: "+err.Error(), "error")
@@ -768,8 +806,8 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.clearCommandMode()
 				m.appendSystemMessage("[Model] Selected: "+msg.Path[1].Name, "done")
 				m.providerBalance = ""
-				if providerID == "kilo" {
-					return m, m.fetchProviderBalanceCmd("kilo")
+				if providerID == "kilo" || providerID == "github-copilot" {
+					return m, m.fetchProviderBalanceCmd(providerID)
 				}
 			} else {
 				// Need to load models first
@@ -854,9 +892,22 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case CopilotAuthProgressMsg:
+		m.appendSystemMessage("[GitHub Copilot] "+string(msg), "info")
+		return m, waitForAuthMsg(m.authCh)
+
+	case CopilotAuthPromptMsg:
+		if strings.TrimSpace(msg.VerificationURL) != "" {
+			m.appendSystemMessage("[GitHub Copilot] Open: "+msg.VerificationURL, "info")
+		}
+		if strings.TrimSpace(msg.UserCode) != "" {
+			m.appendSystemMessage("[GitHub Copilot] Device code: "+msg.UserCode, "done")
+		}
+		m.appendSystemMessage("[GitHub Copilot] Authorize this device in your browser, then return here.", "info")
+		return m, waitForAuthMsg(m.authCh)
+
 	case KiloAuthCompleteMsg:
 		if msg.Err != nil {
-			// Split error message into multiple lines for readability
 			errLines := strings.Split(msg.Err.Error(), "\n")
 			m.appendSystemMessage("[Kilo] ✗ Authentication failed:", "error")
 			for _, line := range errLines {
@@ -867,6 +918,24 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendSystemMessage("[Kilo] ✓ Authentication successful! "+msg.Email, "done")
 		m.appendSystemMessage("[Kilo] ✓ "+fmt.Sprintf("%d models available", msg.ModelCount), "done")
 		return m, m.fetchProviderBalanceCmd("kilo")
+
+	case CopilotAuthCompleteMsg:
+		m.authCh = nil
+		if msg.Err != nil {
+			errLines := strings.Split(msg.Err.Error(), "\n")
+			m.appendSystemMessage("[GitHub Copilot] ✗ Authentication failed:", "error")
+			for _, line := range errLines {
+				m.appendSystemMessage("[GitHub Copilot]   "+line, "error")
+			}
+			return m, nil
+		}
+		m.appendSystemMessage("[GitHub Copilot] ✓ Authentication successful!", "done")
+		m.appendSystemMessage("[GitHub Copilot] ✓ "+fmt.Sprintf("%d models available", msg.ModelCount), "done")
+		return m, m.fetchProviderBalanceCmd("github-copilot")
+
+	case authFlowDoneMsg:
+		m.authCh = nil
+		return m, nil
 
 	case chatStreamChunkMsg:
 		if m.firstChunkAt.IsZero() {
@@ -1186,12 +1255,26 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 
-			if keyStr == "up" && m.contextModalSelection > 0 {
-				m.contextModalSelection--
+			if keyStr == "up" {
+				if m.contextModalPreviewOffset > 0 {
+					m.contextModalPreviewOffset--
+				}
 				return m, nil
 			}
-			if keyStr == "down" && m.contextModalSelection < len(m.contextModalEntries)-1 {
+			if keyStr == "down" {
+				if m.contextModalPreviewOffset < m.contextModalMaxPreviewOffset() {
+					m.contextModalPreviewOffset++
+				}
+				return m, nil
+			}
+			if (keyStr == "left" || keyStr == "k") && m.contextModalSelection > 0 {
+				m.contextModalSelection--
+				m.contextModalPreviewOffset = 0
+				return m, nil
+			}
+			if (keyStr == "right" || keyStr == "j") && m.contextModalSelection < len(m.contextModalEntries)-1 {
 				m.contextModalSelection++
+				m.contextModalPreviewOffset = 0
 				return m, nil
 			}
 			if keyStr == "d" || keyStr == "backspace" {
@@ -1370,6 +1453,18 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Cycle thinking level for the selected model.
+		if keyStr == "ctrl+t" {
+			next, ok := nextThinkingLevel(m.selectedThinkingLevel, thinkingLevelsForModel(m.selectedProvider, m.selectedModelID, m.selectedModelName))
+			if !ok {
+				m.appendSystemMessage("[Model] Thinking level control not available for this model", "info")
+				return m, nil
+			}
+			m.selectedThinkingLevel = next
+			m.appendSystemMessage("[Model] Thinking level: "+next, "done")
+			return m, nil
+		}
+
 		// Chat scrolling
 		if keyStr == "pgup" || keyStr == "pageup" || keyStr == "ctrl+up" {
 			var cmd tea.Cmd
@@ -1521,7 +1616,11 @@ func (m *CodeAgentModel) View() tea.View {
 	inputBox := strings.TrimRight(m.renderInputBox(), "\n")
 	modelFooter := strings.TrimRight(m.renderModelFooter(), "\n")
 
-	chatView := lipgloss.NewStyle().Width(m.chatPaneWidth).Render(m.chatViewport.View())
+	chatView := lipgloss.NewStyle().
+		Width(m.chatPaneWidth).
+		Height(m.chatViewport.Height()).
+		AlignVertical(lipgloss.Top).
+		Render(m.chatViewport.View())
 	contextView := m.renderContextPane(m.chatViewport.Height())
 	middle := lipgloss.JoinHorizontal(lipgloss.Top, chatView, " ", contextView)
 
@@ -1545,7 +1644,7 @@ func (m *CodeAgentModel) View() tea.View {
 
 	v := tea.NewView(base)
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
+	v.MouseMode = tea.MouseModeNone
 	v.KeyboardEnhancements.ReportEventTypes = true
 	return v
 }
@@ -1566,7 +1665,7 @@ func (m *CodeAgentModel) renderHeaderBar() string {
 	}
 
 	provider := m.providerDisplayLabel()
-	if m.providerBalance != "" && m.selectedProvider == "kilo" {
+	if m.providerBalance != "" && (m.selectedProvider == "kilo" || m.selectedProvider == "github-copilot") {
 		provider += " · " + m.providerBalance
 	}
 	cwd := "cwd: " + m.currentCwd
@@ -1627,7 +1726,11 @@ func (m *CodeAgentModel) renderModelFooter() string {
 	if thinking == "" {
 		thinking = inferThinkingLevel(m.selectedModelID, m.selectedModelName)
 	}
-	text := fmt.Sprintf("%s  •  thinking: %s", m.selectedModelName, thinking)
+	window := m.selectedContextWindow
+	if window <= 0 {
+		window = resolveModelContextWindow(m.selectedProvider, m.selectedModelID)
+	}
+	text := fmt.Sprintf("%s  •  thinking: %s (Ctrl+T)  •  context: %s", m.selectedModelName, thinking, formatTokenCount(window))
 	return lipgloss.NewStyle().
 		Foreground(m.styles.MutedStyle.GetForeground()).
 		Width(m.width).
@@ -1692,6 +1795,20 @@ func (m *CodeAgentModel) renderContextPane(height int) string {
 	lines = append(lines, skillLines...)
 	lines = append(lines, sep)
 	lines = append(lines, muted.Render("Current context"))
+	usedTokens := estimateMessagesTokens(m.conversationHistory)
+	maxTokens := m.selectedContextWindow
+	if maxTokens <= 0 {
+		maxTokens = resolveModelContextWindow(m.selectedProvider, m.selectedModelID)
+	}
+	if maxTokens > 0 {
+		pct := int((float64(usedTokens) / float64(maxTokens)) * 100)
+		if pct < 0 {
+			pct = 0
+		}
+		lines = append(lines, muted.Render(truncateLine(fmt.Sprintf("Used ~%s / %s (%d%%)", formatTokenCount(usedTokens), formatTokenCount(maxTokens), pct), innerWidth)))
+	} else {
+		lines = append(lines, muted.Render(truncateLine(fmt.Sprintf("Used ~%s", formatTokenCount(usedTokens)), innerWidth)))
+	}
 	lines = append(lines, contextLines...)
 
 	content := strings.Join(lines, "\n")
@@ -1799,19 +1916,37 @@ func (m *CodeAgentModel) renderContextModal() string {
 		previewLines := []string{lipgloss.NewStyle().Bold(true).Render("Diagnostics")}
 		previewLines = append(previewLines, diag...)
 		previewLines = append(previewLines, "", lipgloss.NewStyle().Bold(true).Render("Selected Entry"))
-		if len(m.contextModalEntries) > 0 && m.contextModalSelection >= 0 && m.contextModalSelection < len(m.contextModalEntries) {
-			e := m.contextModalEntries[m.contextModalSelection]
+		selected := m.contextModalSelectedEntry()
+		if selected != nil {
 			previewLines = append(previewLines,
-				fmt.Sprintf("#%d  %s", e.Order, renderContextBadge(e.Category)),
-				lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Role: "+e.Role),
-				"",
+				fmt.Sprintf("#%d  %s", selected.Order, renderContextBadge(selected.Category)),
+				lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Role: "+selected.Role),
 			)
-			wrapped := wordWrap(strings.TrimSpace(e.Content), max(rightW-4, 20))
-			previewLines = append(previewLines, wrapped...)
+
+			contentLines := wordWrap(strings.TrimSpace(selected.Content), max(rightW-4, 20))
+			if len(contentLines) == 0 {
+				contentLines = []string{""}
+			}
+			contentViewportH := max(innerH-len(previewLines)-1, 1)
+			maxOffset := max(len(contentLines)-contentViewportH, 0)
+			if m.contextModalPreviewOffset > maxOffset {
+				m.contextModalPreviewOffset = maxOffset
+			}
+			start := m.contextModalPreviewOffset
+			end := min(start+contentViewportH, len(contentLines))
+			previewLines = append(previewLines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(fmt.Sprintf("Scroll: ↑/↓  (%d/%d)", start+1, maxOffset+1)))
+			previewLines = append(previewLines, contentLines[start:end]...)
 		} else {
+			m.contextModalPreviewOffset = 0
 			previewLines = append(previewLines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("No context entries"))
 		}
-		previewContent := strings.Join(limitLines(previewLines, innerH), "\n")
+		for len(previewLines) < innerH {
+			previewLines = append(previewLines, "")
+		}
+		if len(previewLines) > innerH {
+			previewLines = previewLines[:innerH]
+		}
+		previewContent := strings.Join(previewLines, "\n")
 		rightPane := lipgloss.NewStyle().
 			Width(rightW).
 			Height(innerH).
@@ -1820,8 +1955,13 @@ func (m *CodeAgentModel) renderContextModal() string {
 			Padding(0, 1).
 			Render(previewContent)
 
-		head := "Context Manager"
-		foot := "↑↓ select  Enter/E edit  D remove  C compact  Esc close"
+		head := lipgloss.NewStyle().
+			Width(max(width-6, 20)).
+			Align(lipgloss.Center).
+			Bold(true).
+			Foreground(m.styles.CommandHighlightStyle.GetForeground()).
+			Render("Context Manager")
+		foot := "↑↓ scroll preview  •  ←/→ or k/j select entry  •  Enter/E edit  •  D remove  •  C compact  •  Esc close"
 		body = head + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, leftPane, " ", rightPane) + "\n\n" + foot
 	}
 	if m.contextModalEditorHint != "" {
@@ -1835,6 +1975,38 @@ func (m *CodeAgentModel) renderContextModal() string {
 		Padding(1, 2).
 		Render(body)
 	return modal
+}
+
+func (m *CodeAgentModel) contextModalSelectedEntry() *ContextEntry {
+	if len(m.contextModalEntries) == 0 {
+		return nil
+	}
+	if m.contextModalSelection < 0 {
+		m.contextModalSelection = 0
+	}
+	if m.contextModalSelection >= len(m.contextModalEntries) {
+		m.contextModalSelection = len(m.contextModalEntries) - 1
+	}
+	return &m.contextModalEntries[m.contextModalSelection]
+}
+
+func (m *CodeAgentModel) contextModalMaxPreviewOffset() int {
+	selected := m.contextModalSelectedEntry()
+	if selected == nil {
+		return 0
+	}
+	width := m.width
+	height := m.height
+	leftW := max((width-10)*45/100, 30)
+	rightW := max((width-10)-leftW, 30)
+	innerH := max(height-8, 8)
+	fixedLines := 11
+	contentViewportH := max(innerH-fixedLines, 1)
+	contentLines := wordWrap(strings.TrimSpace(selected.Content), max(rightW-4, 20))
+	if len(contentLines) <= contentViewportH {
+		return 0
+	}
+	return len(contentLines) - contentViewportH
 }
 
 func contextBadgeLabel(category string) (string, string) {
@@ -1878,10 +2050,90 @@ func (m *CodeAgentModel) providerDisplayLabel() string {
 
 func inferThinkingLevel(modelID, modelName string) string {
 	id := strings.ToLower(modelID + " " + modelName)
-	if strings.Contains(id, "thinking") || strings.Contains(id, "reason") || strings.Contains(id, "r1") || strings.Contains(id, "o1") || strings.Contains(id, "o3") {
-		return "reasoning"
+	if strings.Contains(id, "thinking") || strings.Contains(id, "reason") || strings.Contains(id, "r1") || strings.Contains(id, "o1") || strings.Contains(id, "o3") || strings.Contains(id, "gpt-5") || strings.Contains(id, "codex") {
+		return "medium"
 	}
 	return "standard"
+}
+
+func thinkingLevelsForModel(providerID, modelID, modelName string) []string {
+	level := inferThinkingLevel(modelID, modelName)
+	if level == "standard" {
+		return []string{"standard"}
+	}
+	if modelID == "" {
+		return []string{"standard"}
+	}
+	if providerID == "" {
+		return []string{"standard"}
+	}
+	return []string{"minimal", "low", "medium", "high"}
+}
+
+func nextThinkingLevel(current string, levels []string) (string, bool) {
+	if len(levels) <= 1 {
+		return "", false
+	}
+	idx := 0
+	for i, l := range levels {
+		if l == current {
+			idx = i
+			break
+		}
+	}
+	return levels[(idx+1)%len(levels)], true
+}
+
+func resolveModelContextWindow(providerID, modelID string) int {
+	if providerID == "" || modelID == "" {
+		return 128000
+	}
+	for _, model := range llm.DefaultModels() {
+		if model.Provider == providerID && model.ID == modelID {
+			if model.ContextWindow > 0 {
+				return model.ContextWindow
+			}
+			break
+		}
+	}
+	return 128000
+}
+
+func estimateMessagesTokens(messages []llm.Message) int {
+	total := 0
+	for _, msg := range messages {
+		total += estimateTextTokens(msg.Content)
+	}
+	return total
+}
+
+func estimateTextTokens(text string) int {
+	if strings.TrimSpace(text) == "" {
+		return 0
+	}
+	return (len(text) + 3) / 4
+}
+
+func formatTokenCount(v int) string {
+	if v >= 1_000_000 {
+		return fmt.Sprintf("%.1fM", float64(v)/1_000_000)
+	}
+	if v >= 1_000 {
+		return fmt.Sprintf("%.1fk", float64(v)/1_000)
+	}
+	return fmt.Sprintf("%d", v)
+}
+
+func thinkingInstruction(level string) string {
+	lv := strings.TrimSpace(strings.ToLower(level))
+	switch lv {
+	case "", "standard":
+		return ""
+	case "minimal", "low", "medium", "high":
+		return fmt.Sprintf("Reasoning effort preference: %s. Use this as guidance for depth of internal reasoning and response detail.", lv)
+	default:
+		return ""
+	}
 }
 
 func (m *CodeAgentModel) densityMode() string {
@@ -1910,6 +2162,7 @@ func (m *CodeAgentModel) keybindingRows() []keybindingRow {
 		{Action: "Context manager", Binding: m.getContextKey(), Description: "Open context modal"},
 		{Action: "Keybindings help", Binding: m.getHelpKey(), Description: "Open keybindings modal"},
 		{Action: "Toggle tool expansion", Binding: "ctrl+o", Description: "Expand/collapse latest tool block"},
+		{Action: "Thinking level", Binding: "ctrl+t", Description: "Cycle thinking level for selected model"},
 		{Action: "Skill picker", Binding: "@", Description: "Open skills suggestions"},
 		{Action: "Quit", Binding: m.getQuitKey(), Description: "Exit Synapta Code"},
 	}
@@ -2168,6 +2421,12 @@ func (m *CodeAgentModel) renderUserMessage(content string) string {
 func (m *CodeAgentModel) renderAssistantMessage(content string) string {
 	maxWidth := max(m.chatViewport.Width(), 20)
 	label := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Bold(true).Render("Assistant")
+
+	if rendered, ok := renderMarkdownPreview(strings.TrimSpace(content), maxWidth); ok {
+		body := lipgloss.NewStyle().Width(maxWidth).Render(strings.TrimSpace(rendered))
+		return label + "\n" + body
+	}
+
 	lines := wordWrap(content, maxWidth)
 	if len(lines) == 0 {
 		lines = []string{""}
@@ -2246,7 +2505,7 @@ func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
 		body = "(no output yet)"
 	}
 	body = m.styleToolBody(msg.ToolName, state, body)
-	wrapped := wordWrap(body, maxWidth-2)
+	wrapped := wrapMultiline(body, maxWidth-2)
 	if len(wrapped) == 0 {
 		wrapped = []string{""}
 	}
@@ -2296,6 +2555,120 @@ func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
 		Width(maxWidth)
 
 	return box.Render(strings.Join(blockLines, "\n"))
+}
+
+func looksLikeMarkdown(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	if strings.Contains(s, "```") {
+		return true
+	}
+	markers := []string{"# ", "## ", "### ", "- ", "* ", "1. ", "> ", "|", "**", "__", "`"}
+	for _, marker := range markers {
+		if strings.Contains(s, "\n"+marker) || strings.HasPrefix(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func renderMarkdownPreview(content string, width int) (string, bool) {
+	if !looksLikeMarkdown(content) {
+		return "", false
+	}
+	if width <= 0 {
+		width = 20
+	}
+
+	headStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	bulletStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	quoteStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Italic(true)
+	codeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	inlineCodeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Background(lipgloss.Color("236"))
+
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines))
+	inCode := false
+
+	for _, raw := range lines {
+		line := strings.TrimRight(raw, "\r")
+		trim := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trim, "```") {
+			inCode = !inCode
+			if inCode {
+				lang := strings.TrimSpace(strings.TrimPrefix(trim, "```"))
+				if lang != "" {
+					out = append(out, codeStyle.Bold(true).Render("Code ("+lang+")"))
+				} else {
+					out = append(out, codeStyle.Bold(true).Render("Code"))
+				}
+			}
+			continue
+		}
+		if inCode {
+			wrapped := wordWrap(line, max(width-2, 20))
+			for _, w := range wrapped {
+				out = append(out, codeStyle.Render("  "+w))
+			}
+			continue
+		}
+
+		switch {
+		case strings.HasPrefix(trim, "### "):
+			out = append(out, headStyle.Render(strings.TrimSpace(strings.TrimPrefix(trim, "### "))))
+			continue
+		case strings.HasPrefix(trim, "## "):
+			out = append(out, headStyle.Render(strings.TrimSpace(strings.TrimPrefix(trim, "## "))))
+			continue
+		case strings.HasPrefix(trim, "# "):
+			out = append(out, headStyle.Render(strings.TrimSpace(strings.TrimPrefix(trim, "# "))))
+			continue
+		case strings.HasPrefix(trim, "- ") || strings.HasPrefix(trim, "* "):
+			item := strings.TrimSpace(trim[2:])
+			out = append(out, bulletStyle.Render("• ")+renderInlineCode(item, inlineCodeStyle))
+			continue
+		case strings.HasPrefix(trim, "> "):
+			out = append(out, quoteStyle.Render(strings.TrimSpace(strings.TrimPrefix(trim, "> "))))
+			continue
+		}
+
+		if len(trim) > 3 && trim[1] == '.' && trim[0] >= '0' && trim[0] <= '9' {
+			parts := strings.SplitN(trim, ".", 2)
+			if len(parts) == 2 {
+				out = append(out, bulletStyle.Render(parts[0]+".")+" "+renderInlineCode(strings.TrimSpace(parts[1]), inlineCodeStyle))
+				continue
+			}
+		}
+
+		wrapped := wordWrap(line, max(width, 20))
+		for _, w := range wrapped {
+			out = append(out, renderInlineCode(w, inlineCodeStyle))
+		}
+	}
+
+	return strings.Join(out, "\n"), true
+}
+
+func renderInlineCode(line string, style lipgloss.Style) string {
+	if !strings.Contains(line, "`") {
+		return line
+	}
+	parts := strings.Split(line, "`")
+	if len(parts) < 3 {
+		return line
+	}
+	var b strings.Builder
+	for i, part := range parts {
+		if i%2 == 1 {
+			b.WriteString(style.Render(part))
+		} else {
+			b.WriteString(part)
+		}
+	}
+	return b.String()
 }
 
 func formatToolContextContent(e core.ToolEvent) string {
@@ -2373,6 +2746,20 @@ func (m *CodeAgentModel) chatHistoryAsLLM() ([]llm.Message, error) {
 		}
 		m.lastPromptFingerprint = fp
 	}
+
+	if instruction := thinkingInstruction(m.selectedThinkingLevel); instruction != "" {
+		sys := llm.Message{Role: "system", Content: instruction}
+		insertAt := 0
+		for insertAt < len(msgs) && msgs[insertAt].Role == "system" {
+			insertAt++
+		}
+		withThinking := make([]llm.Message, 0, len(msgs)+1)
+		withThinking = append(withThinking, msgs[:insertAt]...)
+		withThinking = append(withThinking, sys)
+		withThinking = append(withThinking, msgs[insertAt:]...)
+		msgs = withThinking
+	}
+
 	return msgs, nil
 }
 
@@ -2477,9 +2864,21 @@ func (m *CodeAgentModel) styleToolBody(toolName, state, body string) string {
 	}
 	switch toolName {
 	case "write":
-		if strings.Contains(strings.ToLower(body), "successfully wrote") {
-			return lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render(body)
+		lines := strings.Split(body, "\n")
+		for i, line := range lines {
+			trim := strings.TrimSpace(line)
+			switch {
+			case strings.HasPrefix(line, "+ "):
+				lines[i] = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render(line)
+			case strings.HasPrefix(line, "- "):
+				lines[i] = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(line)
+			case strings.HasPrefix(trim, "File:") || strings.HasPrefix(trim, "Changed ranges") || strings.HasPrefix(trim, "--- line diff ---"):
+				lines[i] = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true).Render(line)
+			case strings.Contains(strings.ToLower(trim), "successfully wrote"):
+				lines[i] = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true).Render(line)
+			}
 		}
+		return strings.Join(lines, "\n")
 	case "read":
 		lines := strings.Split(body, "\n")
 		for i, line := range lines {
@@ -2507,19 +2906,42 @@ func parseModelSelectionKey(key string) (providerID string, modelID string, ok b
 
 func (m *CodeAgentModel) fetchProviderBalanceCmd(providerID string) tea.Cmd {
 	return func() tea.Msg {
-		if providerID != "kilo" || m.authStorage == nil {
+		if m.authStorage == nil {
 			return providerBalanceMsg{ProviderID: providerID}
 		}
-		creds, err := m.authStorage.GetOAuthCredentials("kilo")
-		if err != nil || creds == nil || strings.TrimSpace(creds.Access) == "" {
+
+		switch providerID {
+		case "kilo":
+			creds, err := m.authStorage.GetOAuthCredentials("kilo")
+			if err != nil || creds == nil || strings.TrimSpace(creds.Access) == "" {
+				return providerBalanceMsg{ProviderID: providerID}
+			}
+			gateway := llm.NewKiloGateway()
+			balance, err := gateway.FetchBalance(creds.Access)
+			if err != nil {
+				return providerBalanceMsg{ProviderID: providerID, Err: err}
+			}
+			return providerBalanceMsg{ProviderID: providerID, Balance: llm.FormatBalance(balance)}
+		case "github-copilot":
+			creds, err := m.authStorage.GetOAuthCredentials("github-copilot")
+			if err != nil || creds == nil || strings.TrimSpace(creds.Refresh) == "" {
+				return providerBalanceMsg{ProviderID: providerID}
+			}
+			domain := "github.com"
+			if len(creds.ExtraData) > 0 {
+				var extra oauth.CopilotExtraData
+				if err := json.Unmarshal(creds.ExtraData, &extra); err == nil && strings.TrimSpace(extra.EnterpriseDomain) != "" {
+					domain = strings.TrimSpace(extra.EnterpriseDomain)
+				}
+			}
+			usage, err := oauth.FetchCopilotPremiumUsage(creds.Refresh, domain)
+			if err != nil || usage == nil || usage.Total <= 0 {
+				return providerBalanceMsg{ProviderID: providerID}
+			}
+			return providerBalanceMsg{ProviderID: providerID, Balance: fmt.Sprintf("Premium %d/%d", usage.Used, usage.Total)}
+		default:
 			return providerBalanceMsg{ProviderID: providerID}
 		}
-		gateway := llm.NewKiloGateway()
-		balance, err := gateway.FetchBalance(creds.Access)
-		if err != nil {
-			return providerBalanceMsg{ProviderID: providerID, Err: err}
-		}
-		return providerBalanceMsg{ProviderID: providerID, Balance: llm.FormatBalance(balance)}
 	}
 }
 
@@ -2631,6 +3053,23 @@ func toolResultPlainText(result tools.Result) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func wrapMultiline(text string, width int) []string {
+	if text == "" {
+		return []string{""}
+	}
+	rows := strings.Split(text, "\n")
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		wrapped := wordWrap(row, width)
+		if len(wrapped) == 0 {
+			out = append(out, "")
+			continue
+		}
+		out = append(out, wrapped...)
+	}
+	return out
 }
 
 // wordWrap wraps text to fit within the given width.
@@ -2772,15 +3211,55 @@ func (m *CodeAgentModel) loadModels() tea.Cmd {
 
 		models := make([]ModelInfo, 0, len(available))
 		for _, model := range available {
+			name := model.Name
+			if tier := copilotModelTier(model.Provider, model.ID); tier != "" {
+				name = fmt.Sprintf("%s [%s]", name, strings.ToUpper(tier))
+			}
 			models = append(models, ModelInfo{
 				Provider: model.Provider,
 				ID:       model.ID,
-				Name:     model.Name,
+				Name:     name,
 			})
 		}
 
+		sort.SliceStable(models, func(i, j int) bool {
+			ri, rj := modelProviderRank(models[i].Provider), modelProviderRank(models[j].Provider)
+			if ri != rj {
+				return ri < rj
+			}
+			if models[i].Provider != models[j].Provider {
+				return models[i].Provider < models[j].Provider
+			}
+			return strings.ToLower(models[i].Name) < strings.ToLower(models[j].Name)
+		})
+
 		return ModelsLoadedMsg{Models: models}
 	}
+}
+
+func modelProviderRank(provider string) int {
+	switch provider {
+	case "github-copilot":
+		return 0
+	case "kilo":
+		return 1
+	default:
+		return 2
+	}
+}
+
+func copilotModelTier(providerID, modelID string) string {
+	if providerID != "github-copilot" {
+		return ""
+	}
+	id := strings.ToLower(strings.TrimSpace(modelID))
+	if id == "gpt-4o" {
+		return "free"
+	}
+	if strings.Contains(id, "codex") || strings.Contains(id, "gpt-5") || strings.Contains(id, "claude-") || strings.Contains(id, "gemini-") || strings.Contains(id, "grok") {
+		return "premium"
+	}
+	return "premium"
 }
 
 // ─── Kilo Gateway Authentication ────────────────────────────────────
@@ -2841,6 +3320,71 @@ func (m *CodeAgentModel) startKiloAuth() tea.Cmd {
 			Email:      "Authenticated",
 			ModelCount: len(models),
 		}
+	}
+}
+
+// startCopilotAuth initiates the GitHub Copilot OAuth device flow.
+func (m *CodeAgentModel) startCopilotAuth() tea.Cmd {
+	authCh := make(chan tea.Msg, 32)
+	m.authCh = authCh
+
+	go func() {
+		defer close(authCh)
+
+		provider := oauth.NewGitHubCopilotOAuth("")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		authCh <- CopilotAuthProgressMsg("Initiating device authorization...")
+
+		creds, err := provider.Login(llm.OAuthLoginCallbacks{
+			OnAuth: func(url string, instructions string) {
+				code := strings.TrimSpace(strings.TrimPrefix(instructions, "Enter code:"))
+				authCh <- CopilotAuthPromptMsg{VerificationURL: url, UserCode: code}
+				if err := openBrowser(url); err != nil {
+					authCh <- CopilotAuthProgressMsg("Could not open browser automatically. Open the URL manually.")
+				}
+			},
+			OnProgress: func(message string) {
+				authCh <- CopilotAuthProgressMsg(message)
+			},
+			OnPrompt: func(message string, placeholder string, allowEmpty bool) (string, error) {
+				// For now we default to github.com in TUI flow.
+				return "", nil
+			},
+			Signal: ctx,
+		})
+		if err != nil {
+			authCh <- CopilotAuthCompleteMsg{Err: err}
+			authCh <- authFlowDoneMsg{}
+			return
+		}
+
+		if m.authStorage != nil {
+			if err := m.authStorage.SetOAuthCredentials("github-copilot", creds); err != nil {
+				authCh <- CopilotAuthCompleteMsg{Err: fmt.Errorf("authenticated but failed to store credentials: %w", err)}
+				authCh <- authFlowDoneMsg{}
+				return
+			}
+		}
+
+		authCh <- CopilotAuthCompleteMsg{ModelCount: len(llm.GitHubCopilotDefaultModels())}
+		authCh <- authFlowDoneMsg{}
+	}()
+
+	return waitForAuthMsg(authCh)
+}
+
+func waitForAuthMsg(ch <-chan tea.Msg) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return authFlowDoneMsg{}
+		}
+		return msg
 	}
 }
 

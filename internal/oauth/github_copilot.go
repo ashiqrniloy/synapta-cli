@@ -1,10 +1,12 @@
 package oauth
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -70,6 +72,7 @@ type tokenResponse struct {
 	Scope       string `json:"scope"`
 	Error       string `json:"error,omitempty"`
 	ErrorDesc   string `json:"error_description,omitempty"`
+	Interval    int    `json:"interval,omitempty"`
 }
 
 type copilotTokenResponse struct {
@@ -94,6 +97,24 @@ func (g *GitHubCopilotOAuth) getURLs(domain string) (deviceCode, accessToken, co
 		fmt.Sprintf("https://api.%s/copilot_internal/v2/token", domain)
 }
 
+func normalizeDomain(input string) (string, bool) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return "", true
+	}
+	if strings.Contains(trimmed, "://") {
+		u, err := url.Parse(trimmed)
+		if err != nil || strings.TrimSpace(u.Hostname()) == "" {
+			return "", false
+		}
+		return strings.TrimSpace(u.Hostname()), true
+	}
+	if strings.Contains(trimmed, "/") || strings.HasPrefix(trimmed, ".") || strings.HasSuffix(trimmed, ".") || !strings.Contains(trimmed, ".") {
+		return "", false
+	}
+	return trimmed, true
+}
+
 func (g *GitHubCopilotOAuth) Login(callbacks llm.OAuthLoginCallbacks) (*llm.OAuthCredentials, error) {
 	domain := g.getDomain()
 	if g.EnterpriseDomain == "" {
@@ -110,13 +131,12 @@ func (g *GitHubCopilotOAuth) Login(callbacks llm.OAuthLoginCallbacks) (*llm.OAut
 			}
 		}
 
-		trimmed := strings.TrimSpace(input)
-		if trimmed != "" {
-			if !strings.Contains(trimmed, ".") {
-				return nil, fmt.Errorf("invalid GitHub Enterprise domain: %s", trimmed)
-			}
-			domain = strings.TrimPrefix(trimmed, "https://")
-			domain = strings.TrimPrefix(domain, "http://")
+		normalized, ok := normalizeDomain(input)
+		if !ok {
+			return nil, fmt.Errorf("invalid GitHub Enterprise domain: %s", strings.TrimSpace(input))
+		}
+		if normalized != "" {
+			domain = normalized
 		}
 	}
 
@@ -142,6 +162,9 @@ func (g *GitHubCopilotOAuth) Login(callbacks llm.OAuthLoginCallbacks) (*llm.OAut
 		return nil, fmt.Errorf("exchanging for Copilot token: %w", err)
 	}
 
+	callbacks.OnProgress("Enabling models...")
+	g.enableAllModels(creds.Access, domain)
+
 	extraData, _ := json.Marshal(&CopilotExtraData{EnterpriseDomain: domain})
 	creds.ExtraData = extraData
 
@@ -150,12 +173,18 @@ func (g *GitHubCopilotOAuth) Login(callbacks llm.OAuthLoginCallbacks) (*llm.OAut
 }
 
 func (g *GitHubCopilotOAuth) startDeviceFlow(deviceURL string) (*deviceCodeResponse, error) {
-	resp, err := http.Post(deviceURL, "application/x-www-form-urlencoded", strings.NewReader(
-		url.Values{
-			"client_id": {clientID},
-			"scope":     {"read:user"},
-		}.Encode(),
-	))
+	req, err := http.NewRequest("POST", deviceURL, strings.NewReader(url.Values{
+		"client_id": {clientID},
+		"scope":     {"read:user"},
+	}.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("creating device flow request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", CopilotHeaders["User-Agent"])
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("device flow request failed: %w", err)
 	}
@@ -170,21 +199,78 @@ func (g *GitHubCopilotOAuth) startDeviceFlow(deviceURL string) (*deviceCodeRespo
 		return nil, fmt.Errorf("device flow failed (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
-	var result deviceCodeResponse
-	if err := json.Unmarshal(body, &result); err != nil {
+	result, err := parseDeviceCodeResponse(body)
+	if err != nil {
 		return nil, fmt.Errorf("parsing device code response: %w", err)
 	}
-
-	if result.DeviceCode == "" || result.UserCode == "" {
+	if result.DeviceCode == "" || result.UserCode == "" || result.VerificationURI == "" || result.Interval <= 0 || result.ExpiresIn <= 0 {
 		return nil, fmt.Errorf("invalid device code response")
 	}
 
 	return &result, nil
 }
 
+func parseDeviceCodeResponse(body []byte) (deviceCodeResponse, error) {
+	var result deviceCodeResponse
+	if err := json.Unmarshal(body, &result); err == nil {
+		return result, nil
+	}
+	values, err := url.ParseQuery(string(body))
+	if err != nil {
+		return deviceCodeResponse{}, err
+	}
+	result.DeviceCode = strings.TrimSpace(values.Get("device_code"))
+	result.UserCode = strings.TrimSpace(values.Get("user_code"))
+	result.VerificationURI = strings.TrimSpace(values.Get("verification_uri"))
+	if result.VerificationURI == "" {
+		result.VerificationURI = strings.TrimSpace(values.Get("verification_url"))
+	}
+	fmt.Sscanf(strings.TrimSpace(values.Get("interval")), "%d", &result.Interval)
+	fmt.Sscanf(strings.TrimSpace(values.Get("expires_in")), "%d", &result.ExpiresIn)
+	return result, nil
+}
+
+func parseTokenResponse(body []byte) (tokenResponse, error) {
+	var result tokenResponse
+	if err := json.Unmarshal(body, &result); err == nil {
+		return result, nil
+	}
+	values, err := url.ParseQuery(string(body))
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	result.AccessToken = strings.TrimSpace(values.Get("access_token"))
+	result.TokenType = strings.TrimSpace(values.Get("token_type"))
+	result.Scope = strings.TrimSpace(values.Get("scope"))
+	result.Error = strings.TrimSpace(values.Get("error"))
+	result.ErrorDesc = strings.TrimSpace(values.Get("error_description"))
+	fmt.Sscanf(strings.TrimSpace(values.Get("interval")), "%d", &result.Interval)
+	return result, nil
+}
+
+func sleepWithCancellation(d time.Duration, signal context.Context) error {
+	if d <= 0 {
+		return nil
+	}
+	if signal == nil {
+		time.Sleep(d)
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-signal.Done():
+		return fmt.Errorf("login cancelled")
+	}
+}
+
 func (g *GitHubCopilotOAuth) pollForAccessToken(tokenURL, deviceCode string, interval, expiresIn int, callbacks llm.OAuthLoginCallbacks) (string, error) {
 	deadline := time.Now().Add(time.Duration(expiresIn) * time.Second)
-	pollInterval := time.Duration(interval) * time.Second
+	pollInterval := time.Duration(maxInt(interval, 1)) * time.Second
+	intervalMultiplier := 1.2
+	slowDownResponses := 0
 
 	for time.Now().Before(deadline) {
 		if callbacks.Signal != nil {
@@ -195,15 +281,28 @@ func (g *GitHubCopilotOAuth) pollForAccessToken(tokenURL, deviceCode string, int
 			}
 		}
 
-		time.Sleep(pollInterval)
+		remaining := time.Until(deadline)
+		wait := time.Duration(math.Ceil(float64(pollInterval) * intervalMultiplier))
+		if wait > remaining {
+			wait = remaining
+		}
+		if err := sleepWithCancellation(wait, callbacks.Signal); err != nil {
+			return "", err
+		}
 
-		resp, err := http.Post(tokenURL, "application/x-www-form-urlencoded", strings.NewReader(
-			url.Values{
-				"client_id":  {clientID},
-				"device_code": {deviceCode},
-				"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"},
-			}.Encode(),
-		))
+		req, err := http.NewRequest("POST", tokenURL, strings.NewReader(url.Values{
+			"client_id":   {clientID},
+			"device_code": {deviceCode},
+			"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
+		}.Encode()))
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", CopilotHeaders["User-Agent"])
+
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			continue
 		}
@@ -213,34 +312,45 @@ func (g *GitHubCopilotOAuth) pollForAccessToken(tokenURL, deviceCode string, int
 		if err != nil {
 			continue
 		}
-
-		var result tokenResponse
-		if err := json.Unmarshal(body, &result); err != nil {
+		if resp.StatusCode != http.StatusOK {
 			continue
 		}
 
-		if result.Error == "authorization_pending" {
-			remaining := time.Until(deadline).Seconds()
-			callbacks.OnProgress(fmt.Sprintf("Waiting for browser authorization... (%.0fs remaining)", remaining))
+		result, err := parseTokenResponse(body)
+		if err != nil {
 			continue
 		}
 
-		if result.Error == "slow_down" {
-			pollInterval += 5 * time.Second
+		if result.AccessToken != "" {
+			return result.AccessToken, nil
+		}
+
+		switch result.Error {
+		case "authorization_pending":
+			callbacks.OnProgress(fmt.Sprintf("Waiting for browser authorization... (%.0fs remaining)", time.Until(deadline).Seconds()))
 			continue
-		}
-
-		if result.Error != "" {
-			return "", fmt.Errorf("authorization failed: %s - %s", result.Error, result.ErrorDesc)
-		}
-
-		if result.AccessToken == "" {
+		case "slow_down":
+			slowDownResponses++
+			if result.Interval > 0 {
+				pollInterval = time.Duration(result.Interval) * time.Second
+			} else {
+				pollInterval += 5 * time.Second
+			}
+			intervalMultiplier = 1.4
+			continue
+		case "":
 			return "", fmt.Errorf("no access token in response")
+		default:
+			if result.ErrorDesc != "" {
+				return "", fmt.Errorf("authorization failed: %s - %s", result.Error, result.ErrorDesc)
+			}
+			return "", fmt.Errorf("authorization failed: %s", result.Error)
 		}
-
-		return result.AccessToken, nil
 	}
 
+	if slowDownResponses > 0 {
+		return "", fmt.Errorf("device flow timed out after slow_down responses (check system clock and retry)")
+	}
 	return "", fmt.Errorf("device flow timed out")
 }
 
@@ -253,6 +363,7 @@ func (g *GitHubCopilotOAuth) refreshCopilotToken(githubToken, domain string) (*l
 	}
 
 	req.Header.Set("Authorization", "Bearer "+githubToken)
+	req.Header.Set("Accept", "application/json")
 	for k, v := range CopilotHeaders {
 		req.Header.Set(k, v)
 	}
@@ -281,13 +392,67 @@ func (g *GitHubCopilotOAuth) refreshCopilotToken(githubToken, domain string) (*l
 		return nil, fmt.Errorf("no token in copilot response")
 	}
 
-	expiresAt := time.Now().Add(time.Duration(result.ExpiresAt)*time.Second - 5*time.Minute).UnixMilli()
+	now := time.Now().Unix()
+	expiresMs := result.ExpiresAt * 1000
+	if result.ExpiresAt <= 0 {
+		expiresMs = time.Now().Add(55 * time.Minute).UnixMilli()
+	} else if result.ExpiresAt < now-60 {
+		expiresMs = time.Now().Add(time.Duration(result.ExpiresAt) * time.Second).UnixMilli()
+	}
+	expiresMs -= int64((5 * time.Minute).Milliseconds())
 
 	return &llm.OAuthCredentials{
 		Refresh: githubToken,
 		Access:  result.Token,
-		Expires: expiresAt,
+		Expires: expiresMs,
 	}, nil
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func (g *GitHubCopilotOAuth) enableModel(copilotToken, modelID, domain string) bool {
+	if strings.TrimSpace(copilotToken) == "" || strings.TrimSpace(modelID) == "" {
+		return false
+	}
+	baseURL := GetBaseUrlFromToken(copilotToken)
+	if baseURL == "" {
+		if strings.TrimSpace(domain) != "" && domain != "github.com" {
+			baseURL = fmt.Sprintf("https://copilot-api.%s", domain)
+		} else {
+			baseURL = "https://api.individual.githubcopilot.com"
+		}
+	}
+
+	endpoint := fmt.Sprintf("%s/models/%s/policy", strings.TrimRight(baseURL, "/"), modelID)
+	req, err := http.NewRequest("POST", endpoint, strings.NewReader(`{"state":"enabled"}`))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+copilotToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("openai-intent", "chat-policy")
+	req.Header.Set("x-interaction-type", "chat-policy")
+	for k, v := range CopilotHeaders {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+func (g *GitHubCopilotOAuth) enableAllModels(copilotToken, domain string) {
+	for _, model := range llm.GitHubCopilotDefaultModels() {
+		_ = g.enableModel(copilotToken, model.ID, domain)
+	}
 }
 
 func (g *GitHubCopilotOAuth) RefreshToken(credentials *llm.OAuthCredentials) (*llm.OAuthCredentials, error) {
@@ -303,6 +468,124 @@ func (g *GitHubCopilotOAuth) RefreshToken(credentials *llm.OAuthCredentials) (*l
 
 func (g *GitHubCopilotOAuth) GetAPIKey(credentials *llm.OAuthCredentials) string {
 	return credentials.Access
+}
+
+type CopilotPremiumUsage struct {
+	Used  int
+	Total int
+}
+
+// FetchCopilotPremiumUsage attempts to fetch monthly premium request usage.
+// This data is not guaranteed to be available for all accounts/plans.
+func FetchCopilotPremiumUsage(githubToken, domain string) (*CopilotPremiumUsage, error) {
+	if strings.TrimSpace(githubToken) == "" {
+		return nil, fmt.Errorf("missing github token")
+	}
+	if strings.TrimSpace(domain) == "" {
+		domain = "github.com"
+	}
+
+	endpoints := []string{fmt.Sprintf("https://api.%s/copilot_internal/user", domain)}
+	if domain == "github.com" {
+		endpoints = append([]string{"https://api.github.com/copilot_internal/user"}, endpoints...)
+	}
+
+	for _, endpoint := range endpoints {
+		req, err := http.NewRequest("GET", endpoint, nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+githubToken)
+		req.Header.Set("Accept", "application/json")
+		for k, v := range CopilotHeaders {
+			req.Header.Set(k, v)
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			continue
+		}
+
+		used, total, ok := parsePremiumUsage(body)
+		if ok {
+			return &CopilotPremiumUsage{Used: used, Total: total}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("premium usage not available")
+}
+
+func parsePremiumUsage(body []byte) (used int, total int, ok bool) {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return 0, 0, false
+	}
+
+	usedKeys := []string{
+		"monthly_premium_interactions_used",
+		"premium_interactions_used",
+		"chat_premium_requests_used",
+		"premium_requests_used",
+		"used_this_month",
+		"used",
+	}
+	totalKeys := []string{
+		"monthly_premium_interactions_limit",
+		"premium_interactions_limit",
+		"chat_premium_requests_total",
+		"premium_requests_total",
+		"limit",
+		"total",
+	}
+
+	used, uok := findFirstInt(payload, usedKeys)
+	total, tok := findFirstInt(payload, totalKeys)
+	if uok && tok && total > 0 {
+		return used, total, true
+	}
+	return 0, 0, false
+}
+
+func findFirstInt(v any, keys []string) (int, bool) {
+	for _, key := range keys {
+		if val, ok := findIntByKey(v, key); ok {
+			return val, true
+		}
+	}
+	return 0, false
+}
+
+func findIntByKey(v any, target string) (int, bool) {
+	switch n := v.(type) {
+	case map[string]any:
+		for k, child := range n {
+			if strings.EqualFold(k, target) {
+				switch x := child.(type) {
+				case float64:
+					return int(x), true
+				case int:
+					return x, true
+				case int64:
+					return int(x), true
+				}
+			}
+			if val, ok := findIntByKey(child, target); ok {
+				return val, true
+			}
+		}
+	case []any:
+		for _, child := range n {
+			if val, ok := findIntByKey(child, target); ok {
+				return val, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func (g *GitHubCopilotOAuth) ModifyModels(models []*llm.Model, credentials *llm.OAuthCredentials) []*llm.Model {

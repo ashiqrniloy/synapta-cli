@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/synapta/synapta-cli/internal/core/tools"
 	"github.com/synapta/synapta-cli/internal/llm"
@@ -381,8 +382,15 @@ func (s *ChatService) tokenFromAuthOrEnv(providerID, envVar string) string {
 		if entry := s.auth.Get(providerID); entry != nil {
 			switch entry.Type {
 			case "oauth":
-				if entry.OAuth != nil && entry.OAuth.Access != "" {
-					return entry.OAuth.Access
+				if entry.OAuth != nil {
+					if providerID == ProviderGitHubCopilot {
+						if token := s.ensureFreshCopilotToken(entry.OAuth); token != "" {
+							return token
+						}
+					}
+					if entry.OAuth.Access != "" {
+						return entry.OAuth.Access
+					}
 				}
 			case "api":
 				if entry.API != nil && entry.API.APIKey != "" {
@@ -395,4 +403,37 @@ func (s *ChatService) tokenFromAuthOrEnv(providerID, envVar string) string {
 		return ""
 	}
 	return strings.TrimSpace(os.Getenv(envVar))
+}
+
+func (s *ChatService) ensureFreshCopilotToken(creds *llm.OAuthCredentials) string {
+	if creds == nil {
+		return ""
+	}
+	if creds.Access == "" && creds.Refresh == "" {
+		return ""
+	}
+
+	refreshNeeded := creds.Access == ""
+	if !refreshNeeded && creds.Expires > 0 {
+		refreshNeeded = time.Now().UnixMilli() >= creds.Expires-60_000
+	}
+	if !refreshNeeded {
+		return creds.Access
+	}
+	if strings.TrimSpace(creds.Refresh) == "" {
+		return creds.Access
+	}
+
+	provider := oauth.NewGitHubCopilotOAuth("")
+	refreshed, err := provider.RefreshToken(creds)
+	if err != nil || refreshed == nil || strings.TrimSpace(refreshed.Access) == "" {
+		return creds.Access
+	}
+	if len(refreshed.ExtraData) == 0 && len(creds.ExtraData) > 0 {
+		refreshed.ExtraData = creds.ExtraData
+	}
+	if s.auth != nil {
+		_ = s.auth.SetOAuthCredentials(ProviderGitHubCopilot, refreshed)
+	}
+	return refreshed.Access
 }
