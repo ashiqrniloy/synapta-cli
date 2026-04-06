@@ -392,7 +392,7 @@ func (m *CodeAgentModel) renderContextModal() string {
 				lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render("Estimated usage: "+usage),
 			)
 
-			contentLines := wordWrap(strings.TrimSpace(selected.Content), max(rightW-4, 20))
+			contentLines := wrapMultiline(strings.TrimSpace(selected.Content), max(rightW-4, 20))
 			if len(contentLines) == 0 {
 				contentLines = []string{""}
 			}

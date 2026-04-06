@@ -265,7 +265,7 @@ func (m *CodeAgentModel) contextModalMaxPreviewOffset() int {
 	innerH := max(height-8, 8)
 	fixedLines := 11
 	contentViewportH := max(innerH-fixedLines, 1)
-	contentLines := wordWrap(strings.TrimSpace(selected.Content), max(rightW-4, 20))
+	contentLines := wrapMultiline(strings.TrimSpace(selected.Content), max(rightW-4, 20))
 	if len(contentLines) <= contentViewportH {
 		return 0
 	}
