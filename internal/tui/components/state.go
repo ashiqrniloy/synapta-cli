@@ -219,7 +219,7 @@ func (m *CodeAgentModel) chatWorkingStatusText() string {
 	if m.streamStartedAt.IsZero() {
 		elapsed = 0
 	}
-	return fmt.Sprintf("[Chat] %s Working with %s/%s... %s", spinner, m.selectedProvider, m.selectedModelID, elapsed)
+	return fmt.Sprintf("%s Working with %s/%s... %s", spinner, m.selectedProvider, m.selectedModelID, elapsed)
 }
 
 func (m *CodeAgentModel) bashWorkingStatusText() string {

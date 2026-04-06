@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/ashiqrniloy/synapta-cli/internal/core"
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
@@ -27,7 +28,7 @@ func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quit
 	}
 	if keyStr == quitKey {
 		m.quit = true
-		return true, tea.Quit
+		return true, tea.Sequence(tea.Raw(ansi.ResetModeMouseButtonEvent+ansi.ResetModeMouseAnyEvent+ansi.ResetModeMouseExtSgr), tea.Quit)
 	}
 	if keyStr == "esc" && m.inputMode == inputModeBash && strings.TrimSpace(m.ta.Value()) == "" {
 		m.applyInputMode(inputModeChat)

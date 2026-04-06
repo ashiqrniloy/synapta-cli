@@ -455,8 +455,8 @@ func (m *CodeAgentModel) View() tea.View {
 	}
 	if m.height < 1 || m.width < 1 {
 		v := tea.NewView("")
-		v.AltScreen = false
-		v.MouseMode = tea.MouseModeNone
+		v.AltScreen = true
+		v.MouseMode = tea.MouseModeCellMotion
 		v.KeyboardEnhancements.ReportEventTypes = true
 		return v
 	}
@@ -485,8 +485,8 @@ func (m *CodeAgentModel) View() tea.View {
 	}
 
 	v := tea.NewView(base)
-	v.AltScreen = false
-	v.MouseMode = tea.MouseModeNone
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	v.KeyboardEnhancements.ReportEventTypes = true
 	return v
 }

@@ -327,7 +327,6 @@ func (g *GitHubCopilotOAuth) pollForAccessToken(tokenURL, deviceCode string, int
 
 		switch result.Error {
 		case "authorization_pending":
-			callbacks.OnProgress(fmt.Sprintf("Waiting for browser authorization... (%.0fs remaining)", time.Until(deadline).Seconds()))
 			continue
 		case "slow_down":
 			slowDownResponses++
