@@ -170,6 +170,20 @@ func (m *CodeAgentModel) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea
 	if m.picker.IsActive() {
 		return m, nil
 	}
+	if m.contextModalOpen && !m.contextModalEditMode {
+		if msg.Button == tea.MouseWheelUp {
+			if m.contextModalPreviewOffset > 0 {
+				m.contextModalPreviewOffset--
+			}
+			return m, nil
+		}
+		if msg.Button == tea.MouseWheelDown {
+			if m.contextModalPreviewOffset < m.contextModalMaxPreviewOffset() {
+				m.contextModalPreviewOffset++
+			}
+			return m, nil
+		}
+	}
 	var cmd tea.Cmd
 	m.chatViewport, cmd = m.chatViewport.Update(msg)
 	m.chatAutoScroll = m.chatViewport.AtBottom()

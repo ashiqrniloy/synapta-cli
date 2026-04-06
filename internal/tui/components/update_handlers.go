@@ -313,9 +313,9 @@ func (m *CodeAgentModel) handleChatStreamDone() (tea.Model, tea.Cmd) {
 	m.streamCharCount = 0
 	m.activeToolIndices = map[string]int{}
 	if elapsed > 0 {
-		m.finalizeWorkingSystemMessage(fmt.Sprintf("[Chat] ✓ Done in %s", elapsed.Round(time.Millisecond)), "done")
+		m.finalizeWorkingSystemMessage(fmt.Sprintf("✓ Done in %s", elapsed.Round(time.Millisecond)), "done")
 	} else {
-		m.finalizeWorkingSystemMessage("[Chat] ✓ Done", "done")
+		m.finalizeWorkingSystemMessage("✓ Done", "done")
 	}
 	m.refreshChatViewport()
 	return m, nil
@@ -332,7 +332,7 @@ func (m *CodeAgentModel) handleChatStreamErr(msg chatStreamErrMsg) (tea.Model, t
 	m.streamChunkCount = 0
 	m.streamCharCount = 0
 	m.activeToolIndices = map[string]int{}
-	m.finalizeWorkingSystemMessage("[Chat] ✗ "+msg.Err.Error(), "error")
+	m.finalizeWorkingSystemMessage("✗ "+msg.Err.Error(), "error")
 	m.refreshChatViewport()
 	return m, nil
 }

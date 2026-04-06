@@ -260,7 +260,7 @@ func (m *CodeAgentModel) contextModalMaxPreviewOffset() int {
 	}
 	width := m.width
 	height := m.height
-	leftW := max((width-10)*45/100, 30)
+	leftW := max((width-10)*25/100, 30)
 	rightW := max((width-10)-leftW, 30)
 	innerH := max(height-8, 8)
 	fixedLines := 11

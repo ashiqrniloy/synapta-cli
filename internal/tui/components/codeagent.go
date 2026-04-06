@@ -205,6 +205,7 @@ type CodeAgentModel struct {
 	activeSystemStatusIdx int
 	activeToolIndices     map[string]int
 	toolExpanded          map[string]bool
+	selectedToolCallID    string
 	streamCh              <-chan tea.Msg
 	authCh                <-chan tea.Msg
 	chatService           *core.ChatService

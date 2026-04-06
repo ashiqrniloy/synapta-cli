@@ -106,7 +106,9 @@ func (m *CodeAgentModel) keybindingRows() []keybindingRow {
 		{Action: "Extensions", Binding: m.extensionKeybinding(), Description: "Open extension launcher"},
 		{Action: "Context manager", Binding: m.getContextKey(), Description: "Open context modal"},
 		{Action: "Keybindings help", Binding: m.getHelpKey(), Description: "Open keybindings modal"},
-		{Action: "Toggle tool expansion", Binding: "ctrl+o", Description: "Expand/collapse latest tool block"},
+		{Action: "Select previous tool block", Binding: "ctrl+left / alt+up", Description: "Move tool selection upward"},
+		{Action: "Select next tool block", Binding: "ctrl+right / alt+down", Description: "Move tool selection downward"},
+		{Action: "Toggle tool expansion", Binding: "ctrl+o", Description: "Expand/collapse selected tool block"},
 		{Action: "Copy latest block", Binding: "ctrl+shift+c / ctrl+y", Description: "Copy latest message/tool output to clipboard"},
 		{Action: "Thinking level", Binding: "ctrl+t", Description: "Cycle thinking level for selected model"},
 		{Action: "Skill picker", Binding: "@", Description: "Open skills suggestions"},
@@ -327,13 +329,7 @@ func (m *CodeAgentModel) hasRunningTool() bool {
 }
 
 func (m *CodeAgentModel) lastToolCallID() (string, bool) {
-	for i := len(m.chatMessages) - 1; i >= 0; i-- {
-		msg := m.chatMessages[i]
-		if msg.Role == "tool" && msg.ToolCallID != "" {
-			return msg.ToolCallID, true
-		}
-	}
-	return "", false
+	return m.selectedOrLastToolCallID()
 }
 
 func (m *CodeAgentModel) copyLatestMessageToClipboard() error {

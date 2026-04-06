@@ -346,7 +346,7 @@ func (m *CodeAgentModel) renderContextModal() string {
 			m.contextModalSelection = len(m.contextModalEntries) - 1
 		}
 
-		leftW := max((width-10)*45/100, 30)
+		leftW := max((width-10)*25/100, 30)
 		rightW := max((width-10)-leftW, 30)
 		innerH := max(height-8, 8)
 
@@ -645,6 +645,10 @@ func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
 		toolName = "TOOL"
 	}
 	header := lipgloss.NewStyle().Foreground(stateColor).Bold(true).Render(toolName)
+	selected := msg.ToolCallID != "" && msg.ToolCallID == m.selectedToolCallID
+	if selected {
+		header = lipgloss.NewStyle().Foreground(stateColor).Bold(true).Render(toolName + "  [selected]")
+	}
 
 	meta := []string{}
 	if strings.TrimSpace(msg.ToolPath) != "" {
@@ -702,9 +706,15 @@ func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(stateColor).
 		Padding(0, 1).
 		Width(maxWidth)
+	if selected {
+		box = box.
+			Background(lipgloss.Color("236")).
+			BorderForeground(lipgloss.Color("15"))
+	} else {
+		box = box.BorderForeground(stateColor)
+	}
 
 	return box.Render(strings.Join(blockLines, "\n"))
 }

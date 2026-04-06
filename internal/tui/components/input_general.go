@@ -43,8 +43,18 @@ func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quit
 		}
 		return true, nil
 	}
+	if keyStr == "ctrl+left" || keyStr == "alt+up" {
+		if m.stepSelectedTool(-1) {
+			return true, nil
+		}
+	}
+	if keyStr == "ctrl+right" || keyStr == "alt+down" {
+		if m.stepSelectedTool(1) {
+			return true, nil
+		}
+	}
 	if keyStr == "ctrl+o" {
-		if id, ok := m.lastToolCallID(); ok {
+		if id, ok := m.selectedOrLastToolCallID(); ok {
 			m.toolExpanded[id] = !m.toolExpanded[id]
 			m.refreshChatViewport()
 		}
@@ -135,7 +145,7 @@ func (m *CodeAgentModel) handleSubmitKeyPress() (bool, tea.Cmd) {
 	}
 
 	if m.selectedProvider == "" || m.selectedModelID == "" {
-		m.appendSystemMessage("[Chat] Select a model first via :set-model", "error")
+		m.appendSystemMessage("Select a model first via :set-model", "error")
 		return true, nil
 	}
 
@@ -154,7 +164,7 @@ func (m *CodeAgentModel) handleSubmitKeyPress() (bool, tea.Cmd) {
 	}
 	history, err := m.chatHistoryAsLLM()
 	if err != nil {
-		m.appendSystemMessage("[Chat] ✗ Failed to build context: "+err.Error(), "error")
+		m.appendSystemMessage("✗ Failed to build context: "+err.Error(), "error")
 		return true, nil
 	}
 
