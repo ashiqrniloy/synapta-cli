@@ -254,7 +254,6 @@ func (p *OpenAIProvider) buildResponsesRequestBody(req ChatRequest, stream bool)
 				}
 				input = append(input, map[string]any{
 					"type":      "function_call",
-					"id":        normalizeResponsesItemID("fc_" + callID),
 					"call_id":   callID,
 					"name":      name,
 					"arguments": "{}",
@@ -282,7 +281,7 @@ func (p *OpenAIProvider) buildResponsesRequestBody(req ChatRequest, stream bool)
 				})
 			}
 			for _, tc := range msg.ToolCalls {
-				callID, itemID := splitToolCallID(tc.ID)
+				callID, _ := splitToolCallID(tc.ID)
 				if callID == "" {
 					continue
 				}
@@ -290,13 +289,8 @@ func (p *OpenAIProvider) buildResponsesRequestBody(req ChatRequest, stream bool)
 				if arguments == "" {
 					arguments = "{}"
 				}
-				if itemID == "" {
-					itemID = "fc_" + callID
-				}
-				itemID = normalizeResponsesItemID(itemID)
 				item := map[string]any{
 					"type":      "function_call",
-					"id":        itemID,
 					"call_id":   callID,
 					"name":      tc.Function.Name,
 					"arguments": arguments,
