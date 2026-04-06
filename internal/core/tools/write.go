@@ -1,9 +1,12 @@
 package tools
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -19,7 +22,7 @@ func NewWriteTool(cwd string) *WriteTool {
 func (t *WriteTool) Name() string { return "write" }
 
 func (t *WriteTool) Description() string {
-	return "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories."
+	return "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Uses cat for new files and patch for existing files. Automatically creates parent directories."
 }
 
 type diffOpKind string
@@ -50,7 +53,11 @@ func (t *WriteTool) Execute(ctx context.Context, in WriteInput) (Result, error) 
 	absPath := resolveToCwd(in.Path, t.cwd)
 	dir := filepath.Dir(absPath)
 
-	oldContent, _ := os.ReadFile(absPath)
+	oldContent, readErr := os.ReadFile(absPath)
+	oldExists := readErr == nil
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return Result{}, fmt.Errorf("reading existing file: %w", readErr)
+	}
 	newContent := []byte(in.Content)
 
 	err := withFileMutationQueue(absPath, func() error {
@@ -64,8 +71,14 @@ func (t *WriteTool) Execute(ctx context.Context, in WriteInput) (Result, error) 
 			return fmt.Errorf("creating parent dirs: %w", err)
 		}
 
-		if err := os.WriteFile(absPath, newContent, 0o644); err != nil {
-			return fmt.Errorf("writing file: %w", err)
+		if oldExists {
+			if err := applyExistingFileWithPatch(ctx, absPath, oldContent, newContent); err != nil {
+				return err
+			}
+		} else {
+			if err := writeNewFileWithCat(ctx, absPath, newContent); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -93,6 +106,114 @@ func (t *WriteTool) Execute(ctx context.Context, in WriteInput) (Result, error) 
 			Text: message,
 		}},
 	}, nil
+}
+
+func writeNewFileWithCat(ctx context.Context, absPath string, newContent []byte) error {
+	if _, err := exec.LookPath("cat"); err != nil {
+		return fmt.Errorf("cat command is required to create new files: %w", err)
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(absPath), ".synapta-new-*")
+	if err != nil {
+		return fmt.Errorf("creating temp file for new content: %w", err)
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(tmpPath)
+
+	if err := os.WriteFile(tmpPath, newContent, 0o644); err != nil {
+		return fmt.Errorf("writing temp content: %w", err)
+	}
+
+	dst, err := os.OpenFile(absPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("opening destination file: %w", err)
+	}
+	defer dst.Close()
+
+	catCmd := exec.CommandContext(ctx, "cat", tmpPath)
+	catCmd.Stdout = dst
+	var stderr bytes.Buffer
+	catCmd.Stderr = &stderr
+	if err := catCmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return fmt.Errorf("writing new file with cat: %w: %s", err, msg)
+		}
+		return fmt.Errorf("writing new file with cat: %w", err)
+	}
+	return nil
+}
+
+func applyExistingFileWithPatch(ctx context.Context, absPath string, oldContent, newContent []byte) error {
+	if bytes.Equal(oldContent, newContent) {
+		return nil
+	}
+	if _, err := exec.LookPath("patch"); err != nil {
+		return fmt.Errorf("gnu patch is required to edit existing files: %w", err)
+	}
+	if _, err := exec.LookPath("diff"); err != nil {
+		return fmt.Errorf("diff command is required to generate patch: %w", err)
+	}
+
+	dir := filepath.Dir(absPath)
+	oldTmp, err := os.CreateTemp(dir, ".synapta-old-*")
+	if err != nil {
+		return fmt.Errorf("creating temp old file: %w", err)
+	}
+	oldTmpPath := oldTmp.Name()
+	_ = oldTmp.Close()
+	defer os.Remove(oldTmpPath)
+
+	newTmp, err := os.CreateTemp(dir, ".synapta-new-*")
+	if err != nil {
+		return fmt.Errorf("creating temp new file: %w", err)
+	}
+	newTmpPath := newTmp.Name()
+	_ = newTmp.Close()
+	defer os.Remove(newTmpPath)
+
+	if err := os.WriteFile(oldTmpPath, oldContent, 0o644); err != nil {
+		return fmt.Errorf("writing temp old content: %w", err)
+	}
+	if err := os.WriteFile(newTmpPath, newContent, 0o644); err != nil {
+		return fmt.Errorf("writing temp new content: %w", err)
+	}
+
+	var patchBuf bytes.Buffer
+	var diffErr bytes.Buffer
+	diffCmd := exec.CommandContext(ctx, "diff", "-u", oldTmpPath, newTmpPath)
+	diffCmd.Stdout = &patchBuf
+	diffCmd.Stderr = &diffErr
+	err = diffCmd.Run()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			msg := strings.TrimSpace(diffErr.String())
+			if msg != "" {
+				return fmt.Errorf("generating patch: %w: %s", err, msg)
+			}
+			return fmt.Errorf("generating patch: %w", err)
+		}
+	}
+
+	if patchBuf.Len() == 0 {
+		return nil
+	}
+
+	var patchErr bytes.Buffer
+	patchCmd := exec.CommandContext(ctx, "patch", "--silent", "--output", absPath, oldTmpPath)
+	patchCmd.Stdin = bytes.NewReader(patchBuf.Bytes())
+	patchCmd.Stderr = &patchErr
+	if err := patchCmd.Run(); err != nil {
+		msg := strings.TrimSpace(patchErr.String())
+		if msg != "" {
+			return fmt.Errorf("applying patch: %w: %s", err, msg)
+		}
+		return fmt.Errorf("applying patch: %w", err)
+	}
+
+	return nil
 }
 
 func buildWriteDiffSummary(path, oldContent, newContent string) string {

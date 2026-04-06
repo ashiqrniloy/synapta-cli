@@ -310,6 +310,13 @@ func (m *CodeAgentModel) chatHistoryAsLLM() ([]llm.Message, error) {
 		for insertAt < len(msgs) && msgs[insertAt].Role == "system" {
 			insertAt++
 		}
+		// Keep runtime metadata as the last message for prompt-prefix stability.
+		if len(msgs) > 0 {
+			last := msgs[len(msgs)-1]
+			if last.Role == "system" && strings.Contains(last.Content, "# Runtime Metadata") {
+				insertAt = len(msgs) - 1
+			}
+		}
 		withThinking := make([]llm.Message, 0, len(msgs)+1)
 		withThinking = append(withThinking, msgs[:insertAt]...)
 		withThinking = append(withThinking, sys)

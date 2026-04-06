@@ -13,7 +13,7 @@ import (
 const CompactionSummarizationSystemPrompt = "You are a precise technical summarizer. Produce structured, concise summaries that preserve critical implementation details, exact file paths, function names, and errors."
 
 const (
-	CompactionPromptFileName = "compaction-prompt.md"
+	CompactionPromptFileName = "compaction.md"
 
 	defaultCompactionPrompt = `The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
 
@@ -77,11 +77,13 @@ func LoadCompactionPrompt(agentDir string) error {
 	if strings.TrimSpace(agentDir) == "" {
 		return fmt.Errorf("agent dir is required")
 	}
-	if err := os.MkdirAll(agentDir, 0755); err != nil {
-		return fmt.Errorf("creating agent dir: %w", err)
+
+	promptDir := filepath.Join(agentDir, "system-prompts", AgentCode)
+	if err := os.MkdirAll(promptDir, 0755); err != nil {
+		return fmt.Errorf("creating compaction prompt dir: %w", err)
 	}
 
-	promptPath := filepath.Join(agentDir, CompactionPromptFileName)
+	promptPath := filepath.Join(promptDir, CompactionPromptFileName)
 	if _, err := os.Stat(promptPath); err != nil {
 		if os.IsNotExist(err) {
 			if err := os.WriteFile(promptPath, []byte(strings.TrimSpace(defaultCompactionPrompt)+"\n"), 0644); err != nil {

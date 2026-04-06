@@ -9,24 +9,22 @@ import (
 
 const AgentCode = "code"
 
-// DefaultCodeSystemPrompt is the built-in base prompt for Synapta Code.
-// User prompt content from code.md is appended to this prompt.
-const DefaultCodeSystemPrompt = `You are an expert coding assistant operating inside Synapta Code, a coding agent harness. You help users by reading files, executing commands, editing code, and writing files.
+// DefaultCodeSystemPrompt is the user-editable default prompt seeded at
+// ~/.synapta/system-prompts/code/code.md when missing.
+const DefaultCodeSystemPrompt = `You are an expert coding assistant operating inside Synapta Code, a coding agent harness. You help users by reading files, executing commands, and editing code safely.
 
 Available tools:
-- read: Read the contents of a file
-- bash: Execute a bash command in the current working directory
-- write: Create or overwrite a file
+- read: Read file contents
+- write: Replace/create files
+- bash: Execute shell commands
 
 Guidelines:
-- Use bash for file discovery/search operations (for example: ls, find, rg).
-- Prefer rg (ripgrep) for code/text search and find for file/path discovery.
-- Use read to inspect file contents instead of cat, sed, head, tail, or awk one-liners for reading.
-- Use write for file creation/replacement instead of shell redirection scripts.
-- Avoid perl/ruby/python one-liners for file operations when a direct shell utility or built-in tool is available.
-- Prefer modern CLI utilities when appropriate: rg/find for search, jq for JSON, and standard POSIX tools (cp/mv/mkdir/rm) for filesystem work.
-- Be concise in your responses.
-- Show file paths clearly when working with files.`
+- Use bash with rg and find to discover relevant files and symbols.
+- Use READ (the read tool) to inspect file contents.
+- Prefer patch/ed-based edits when modifying existing files.
+- Use cat for creating brand-new files when needed.
+- Use sed for focused search/replace updates.
+- Be concise and show file paths clearly.`
 
 // SystemPromptStore manages user-editable per-agent system prompt files.
 type SystemPromptStore struct {
@@ -41,26 +39,26 @@ func (s *SystemPromptStore) PromptPath(agentID string) string {
 	return filepath.Join(s.baseDir, "system-prompts", agentID, agentID+".md")
 }
 
-// EnsureDefaultIfAgentDirMissing creates the prompt directory (and optionally
-// seeds a file) when the agent prompt directory does not exist yet.
+// EnsureDefaultIfAgentDirMissing ensures the prompt directory exists and creates
+// the default prompt file when missing. Existing files are never overwritten.
 func (s *SystemPromptStore) EnsureDefaultIfAgentDirMissing(agentID, defaultPrompt string) error {
 	agentDir := filepath.Dir(s.PromptPath(agentID))
-	if info, err := os.Stat(agentDir); err == nil && info.IsDir() {
-		return nil
-	} else if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("checking system prompt dir: %w", err)
-	}
-
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
 		return fmt.Errorf("creating system prompt dir: %w", err)
 	}
 
-	if strings.TrimSpace(defaultPrompt) == "" {
+	promptPath := s.PromptPath(agentID)
+	if _, err := os.Stat(promptPath); err == nil {
 		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("checking system prompt file: %w", err)
 	}
 
-	promptPath := s.PromptPath(agentID)
-	if err := os.WriteFile(promptPath, []byte(strings.TrimSpace(defaultPrompt)+"\n"), 0644); err != nil {
+	content := strings.TrimSpace(defaultPrompt)
+	if content == "" {
+		content = strings.TrimSpace(DefaultCodeSystemPrompt)
+	}
+	if err := os.WriteFile(promptPath, []byte(content+"\n"), 0644); err != nil {
 		return fmt.Errorf("writing default system prompt: %w", err)
 	}
 	return nil

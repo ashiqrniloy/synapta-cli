@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
@@ -140,9 +141,6 @@ func (m *ContextManager) Build(history []llm.Message) ([]llm.Message, error) {
 	if strings.TrimSpace(stablePrefix) != "" {
 		messages = append(messages, llm.Message{Role: "system", Content: stablePrefix})
 	}
-	if strings.TrimSpace(metadata) != "" {
-		messages = append(messages, llm.Message{Role: "system", Content: metadata})
-	}
 
 	for _, msg := range history {
 		if !isContextRole(msg.Role) {
@@ -153,6 +151,12 @@ func (m *ContextManager) Build(history []llm.Message) ([]llm.Message, error) {
 			continue
 		}
 		messages = append(messages, llm.Message{Role: msg.Role, Content: msg.Content})
+	}
+
+	if strings.TrimSpace(metadata) != "" {
+		// Keep runtime metadata at the end so the stable prompt prefix remains
+		// unchanged across turns (prompt cache friendliness).
+		messages = append(messages, llm.Message{Role: "system", Content: metadata})
 	}
 
 	m.mu.Lock()
@@ -191,23 +195,16 @@ func (m *ContextManager) buildStablePrefix() (string, error) {
 		return override, nil
 	}
 
-	basePrompt := strings.TrimSpace(DefaultCodeSystemPrompt)
+	basePrompt := ""
 	if store != nil {
-		userAppend, err := store.Load(agentID)
+		loadedPrompt, err := store.Load(agentID)
 		if err != nil {
 			return "", err
 		}
-		userAppend = strings.TrimSpace(userAppend)
-		// Backward compatibility: older versions seeded code.md with the full default prompt.
-		defaultPrompt := strings.TrimSpace(DefaultCodeSystemPrompt)
-		if userAppend == defaultPrompt {
-			userAppend = ""
-		} else if strings.HasPrefix(userAppend, defaultPrompt) {
-			userAppend = strings.TrimSpace(strings.TrimPrefix(userAppend, defaultPrompt))
-		}
-		if userAppend != "" {
-			basePrompt = strings.TrimSpace(basePrompt + "\n\n" + userAppend)
-		}
+		basePrompt = strings.TrimSpace(loadedPrompt)
+	}
+	if basePrompt == "" {
+		basePrompt = strings.TrimSpace(DefaultCodeSystemPrompt)
 	}
 	if basePrompt == "" {
 		return "", nil
@@ -265,7 +262,13 @@ func (m *ContextManager) buildStablePrefix() (string, error) {
 }
 
 func (m *ContextManager) buildRuntimeMetadata() string {
-	return ""
+	m.mu.Lock()
+	cwd := strings.TrimSpace(m.cwd)
+	m.mu.Unlock()
+	if cwd == "" {
+		cwd = "(unknown cwd)"
+	}
+	return fmt.Sprintf("# Runtime Metadata\n\n- timestamp: %s\n- cwd: %s", time.Now().Format(time.RFC3339), cwd)
 }
 
 func discoverProjectContextPaths(agentDir, cwd string) []string {
