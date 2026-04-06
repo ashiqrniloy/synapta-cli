@@ -1,0 +1,453 @@
+package components
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/ashiqrniloy/synapta-cli/internal/core"
+	"github.com/ashiqrniloy/synapta-cli/internal/llm"
+)
+
+func (m *CodeAgentModel) handleCommandAction(msg CommandActionMsg) (tea.Model, tea.Cmd) {
+	if len(msg.Path) == 0 {
+		m.clearCommandMode()
+		return m, nil
+	}
+
+	commandID := msg.Path[0].ID
+	if extID, ok := parseExtensionCommandID(commandID); ok {
+		m.clearCommandMode()
+		ext, found := m.extensionByID(extID)
+		if !found {
+			m.appendSystemMessage("[Extension] Unknown extension: "+extID, "error")
+			return m, nil
+		}
+		m.appendSystemMessage("[Extension] Launching: "+m.extensionLaunchLabel(ext), "working")
+		touchExtensionLastLaunched(ext.Source)
+		return m, m.launchExtensionCmd(ext)
+	}
+
+	switch commandID {
+	case "bash":
+		m.clearCommandMode()
+		m.applyInputMode(inputModeBash)
+		m.appendSystemMessage("[Bash] Mode enabled. Enter a command and press Enter.", "info")
+		return m, nil
+	case "add-provider":
+		m.clearCommandMode()
+		if len(msg.Path) > 1 {
+			providerID := msg.Path[1].ID
+			switch providerID {
+			case "kilo":
+				m.appendSystemMessage("[Kilo] Starting authentication...", "working")
+				return m, m.startKiloAuth()
+			case "github-copilot":
+				m.appendSystemMessage("[GitHub Copilot] Starting device authentication...", "working")
+				return m, m.startCopilotAuth()
+			default:
+				m.appendSystemMessage("[Add Provider] Selected: "+msg.Path[1].Name, "info")
+			}
+		}
+	case "set-model":
+		if len(msg.Path) > 1 {
+			providerID, modelID, ok := parseModelSelectionKey(msg.Path[1].ID)
+			if !ok {
+				m.appendSystemMessage("[Model] Invalid selection", "error")
+				m.clearCommandMode()
+				return m, nil
+			}
+
+			m.selectedProvider = providerID
+			m.selectedModelID = modelID
+			m.selectedModelName = msg.Path[1].Name
+			m.selectedThinkingLevel = inferThinkingLevel(modelID, msg.Path[1].Name)
+			m.selectedContextWindow = resolveModelContextWindow(providerID, modelID)
+			if m.cfg != nil {
+				if err := m.cfg.SetProvider(providerID, modelID); err != nil {
+					m.appendSystemMessage("[Model] Warning: failed to save config: "+err.Error(), "error")
+				}
+			}
+			m.clearCommandMode()
+			m.appendSystemMessage("[Model] Selected: "+msg.Path[1].Name, "done")
+			m.providerBalance = ""
+			if providerID == "kilo" || providerID == "github-copilot" {
+				return m, m.fetchProviderBalanceCmd(providerID)
+			}
+		} else {
+			return m, m.loadModels()
+		}
+	case "compact":
+		m.clearCommandMode()
+		m.appendSystemMessage("[Compact] Running manual compaction...", "working")
+		return m, m.manualCompactCmd()
+	case "new-session":
+		m.clearCommandMode()
+		m.appendSystemMessage("[Session] Starting new session...", "working")
+		return m, m.newSessionCmd()
+	case "resume-session":
+		if len(msg.Path) > 1 {
+			m.clearCommandMode()
+			m.appendSystemMessage("[Session] Resuming selected session...", "working")
+			return m, m.resumeSessionCmd(msg.Path[1].ID)
+		}
+		return m, m.loadSessions()
+	}
+
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleModelsLoaded(msg ModelsLoadedMsg) (tea.Model, tea.Cmd) {
+	if len(msg.Models) == 0 {
+		m.appendSystemMessage("[Model] No models available. Add a provider first.", "info")
+		m.clearCommandMode()
+		return m, nil
+	}
+	m.picker.LoadModels(msg.Models)
+	m.ta.SetValue(":")
+	m.recalculateLayout()
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleModelsLoadErr(msg ModelsLoadErrMsg) (tea.Model, tea.Cmd) {
+	m.appendSystemMessage("[Model] ✗ "+msg.Err.Error(), "error")
+	m.clearCommandMode()
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleSessionsLoaded(msg SessionsLoadedMsg) (tea.Model, tea.Cmd) {
+	if len(msg.Sessions) == 0 {
+		m.appendSystemMessage("[Session] No previous sessions found", "info")
+		m.clearCommandMode()
+		return m, nil
+	}
+	items := make([]CommandItem, 0, len(msg.Sessions))
+	for _, s := range msg.Sessions {
+		preview := strings.ReplaceAll(strings.TrimSpace(s.FirstMessage), "\n", " ")
+		if len(preview) > 60 {
+			preview = preview[:60] + "..."
+		}
+		cwdLabel := s.CWD
+		if cwdLabel == "" {
+			cwdLabel = "(unknown cwd)"
+		}
+		name := fmt.Sprintf("%s  (%d msgs)  %s  [%s]", s.Modified.Format("2006-01-02 15:04"), s.MessageCount, preview, cwdLabel)
+		items = append(items, CommandItem{ID: s.Path, Name: name})
+	}
+	m.picker.LoadItems(items)
+	m.ta.SetValue(":")
+	m.recalculateLayout()
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleSessionsLoadErr(msg SessionsLoadErrMsg) (tea.Model, tea.Cmd) {
+	m.appendSystemMessage("[Session] ✗ "+msg.Err.Error(), "error")
+	m.clearCommandMode()
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleKiloAuthProgress(msg KiloAuthProgressMsg) (tea.Model, tea.Cmd) {
+	m.appendSystemMessage("[Kilo] "+string(msg), "info")
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleProviderBalance(msg providerBalanceMsg) (tea.Model, tea.Cmd) {
+	if msg.ProviderID == m.selectedProvider {
+		if msg.Err != nil {
+			m.providerBalance = ""
+		} else {
+			m.providerBalance = msg.Balance
+		}
+	}
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleCopilotAuthProgress(msg CopilotAuthProgressMsg) (tea.Model, tea.Cmd) {
+	m.appendSystemMessage("[GitHub Copilot] "+string(msg), "info")
+	return m, waitForAuthMsg(m.authCh)
+}
+
+func (m *CodeAgentModel) handleCopilotAuthPrompt(msg CopilotAuthPromptMsg) (tea.Model, tea.Cmd) {
+	if strings.TrimSpace(msg.VerificationURL) != "" {
+		m.appendSystemMessage("[GitHub Copilot] Open: "+msg.VerificationURL, "info")
+	}
+	if strings.TrimSpace(msg.UserCode) != "" {
+		m.appendSystemMessage("[GitHub Copilot] Device code: "+msg.UserCode, "done")
+	}
+	m.appendSystemMessage("[GitHub Copilot] Authorize this device in your browser, then return here.", "info")
+	return m, waitForAuthMsg(m.authCh)
+}
+
+func (m *CodeAgentModel) handleKiloAuthComplete(msg KiloAuthCompleteMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		errLines := strings.Split(msg.Err.Error(), "\n")
+		m.appendSystemMessage("[Kilo] ✗ Authentication failed:", "error")
+		for _, line := range errLines {
+			m.appendSystemMessage("[Kilo]   "+line, "error")
+		}
+		return m, nil
+	}
+	m.appendSystemMessage("[Kilo] ✓ Authentication successful! "+msg.Email, "done")
+	m.appendSystemMessage("[Kilo] ✓ "+fmt.Sprintf("%d models available", msg.ModelCount), "done")
+	return m, m.fetchProviderBalanceCmd("kilo")
+}
+
+func (m *CodeAgentModel) handleCopilotAuthComplete(msg CopilotAuthCompleteMsg) (tea.Model, tea.Cmd) {
+	m.authCh = nil
+	if msg.Err != nil {
+		errLines := strings.Split(msg.Err.Error(), "\n")
+		m.appendSystemMessage("[GitHub Copilot] ✗ Authentication failed:", "error")
+		for _, line := range errLines {
+			m.appendSystemMessage("[GitHub Copilot]   "+line, "error")
+		}
+		return m, nil
+	}
+	m.appendSystemMessage("[GitHub Copilot] ✓ Authentication successful!", "done")
+	m.appendSystemMessage("[GitHub Copilot] ✓ "+fmt.Sprintf("%d models available", msg.ModelCount), "done")
+	return m, m.fetchProviderBalanceCmd("github-copilot")
+}
+
+func (m *CodeAgentModel) handleAuthFlowDone() (tea.Model, tea.Cmd) {
+	m.authCh = nil
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleExtensionProcessDone(msg extensionProcessDoneMsg) (tea.Model, tea.Cmd) {
+	m.handleExtensionDone(msg)
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleChatStreamChunk(msg chatStreamChunkMsg) (tea.Model, tea.Cmd) {
+	if m.firstChunkAt.IsZero() {
+		m.firstChunkAt = time.Now()
+	}
+	m.streamChunkCount++
+	m.streamCharCount += len(msg.Text)
+	m.currentAssistantText.WriteString(msg.Text)
+	if m.activeAssistantIdx < 0 || m.activeAssistantIdx >= len(m.chatMessages) {
+		m.activeAssistantIdx = m.appendChatMessage(ChatMessage{Role: "assistant", Content: ""})
+	}
+	m.chatMessages[m.activeAssistantIdx].Content += msg.Text
+	m.refreshChatViewport()
+	return m, waitForStreamMsg(m.streamCh)
+}
+
+func (m *CodeAgentModel) handleAssistantToolCalls() (tea.Model, tea.Cmd) {
+	return m, waitForStreamMsg(m.streamCh)
+}
+
+func (m *CodeAgentModel) handleToolEvent(msg toolEventMsg) (tea.Model, tea.Cmd) {
+	e := msg.Event
+	switch e.Type {
+	case core.ToolEventStart:
+		m.activeAssistantIdx = -1
+		idx := m.appendChatMessage(ChatMessage{Role: "tool", ToolCallID: e.CallID, ToolName: e.ToolName, ToolPath: e.Path, ToolCommand: e.Command, ToolState: "running", Content: "", IsPartial: true, ToolStartedAt: time.Now()})
+		m.activeToolIndices[e.CallID] = idx
+		m.toolExpanded[e.CallID] = false
+		m.refreshChatViewport()
+		return m, tea.Batch(waitForStreamMsg(m.streamCh), toolTickCmd())
+	case core.ToolEventUpdate:
+		if idx, ok := m.activeToolIndices[e.CallID]; ok && idx >= 0 && idx < len(m.chatMessages) {
+			m.chatMessages[idx].Content = e.Output
+			m.chatMessages[idx].IsPartial = true
+			m.chatMessages[idx].ToolState = "running"
+		}
+	case core.ToolEventEnd:
+		if idx, ok := m.activeToolIndices[e.CallID]; ok && idx >= 0 && idx < len(m.chatMessages) {
+			if strings.TrimSpace(e.Output) != "" {
+				m.chatMessages[idx].Content = e.Output
+			}
+			if strings.TrimSpace(e.Path) != "" {
+				m.chatMessages[idx].ToolPath = e.Path
+			}
+			if strings.TrimSpace(e.Command) != "" {
+				m.chatMessages[idx].ToolCommand = e.Command
+			}
+			m.chatMessages[idx].IsPartial = false
+			m.chatMessages[idx].ToolEndedAt = time.Now()
+			if e.IsError {
+				m.chatMessages[idx].ToolState = "error"
+				m.toolExpanded[e.CallID] = true
+			} else {
+				m.chatMessages[idx].ToolState = "done"
+			}
+			delete(m.activeToolIndices, e.CallID)
+		}
+	}
+	m.refreshChatViewport()
+	return m, waitForStreamMsg(m.streamCh)
+}
+
+func (m *CodeAgentModel) handleToolTick() (tea.Model, tea.Cmd) {
+	if m.hasRunningTool() {
+		m.refreshChatViewport()
+		return m, toolTickCmd()
+	}
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleChatStreamDone() (tea.Model, tea.Cmd) {
+	elapsed := time.Duration(0)
+	if !m.streamStartedAt.IsZero() {
+		elapsed = time.Since(m.streamStartedAt)
+	}
+	m.isWorking = false
+	m.workingFrame = 0
+	assistantText := strings.TrimSpace(m.currentAssistantText.String())
+	if assistantText != "" {
+		assistantMsg := llm.Message{Role: "assistant", Content: assistantText}
+		m.conversationHistory = append(m.conversationHistory, assistantMsg)
+		if m.sessionStore != nil {
+			_ = m.sessionStore.AppendMessage(assistantMsg)
+		}
+	}
+	m.currentAssistantText.Reset()
+	m.activeAssistantIdx = -1
+	m.streamCh = nil
+	m.streamStartedAt = time.Time{}
+	m.firstChunkAt = time.Time{}
+	m.streamChunkCount = 0
+	m.streamCharCount = 0
+	m.activeToolIndices = map[string]int{}
+	if elapsed > 0 {
+		m.finalizeWorkingSystemMessage(fmt.Sprintf("[Chat] ✓ Done in %s", elapsed.Round(time.Millisecond)), "done")
+	} else {
+		m.finalizeWorkingSystemMessage("[Chat] ✓ Done", "done")
+	}
+	m.refreshChatViewport()
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleChatStreamErr(msg chatStreamErrMsg) (tea.Model, tea.Cmd) {
+	m.isWorking = false
+	m.workingFrame = 0
+	m.currentAssistantText.Reset()
+	m.activeAssistantIdx = -1
+	m.streamCh = nil
+	m.streamStartedAt = time.Time{}
+	m.firstChunkAt = time.Time{}
+	m.streamChunkCount = 0
+	m.streamCharCount = 0
+	m.activeToolIndices = map[string]int{}
+	m.finalizeWorkingSystemMessage("[Chat] ✗ "+msg.Err.Error(), "error")
+	m.refreshChatViewport()
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleCompactDone(msg compactDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		m.appendSystemMessage("[Compact] ✗ "+msg.Err.Error(), "error")
+		return m, nil
+	}
+	if msg.History != nil {
+		m.conversationHistory = append([]llm.Message(nil), msg.History...)
+	}
+	if msg.Compacted {
+		m.appendSystemMessage("[Compact] ✓ Session compacted", "done")
+		m.contextActions = nil
+		m.contextModalEntries = nil
+		m.lastPromptFingerprint = core.PromptFingerprint{}
+		m.lastPromptHash = ""
+		m.recordContextAction("Compaction applied")
+	} else {
+		m.appendSystemMessage("[Compact] No compaction needed", "info")
+	}
+	m.refreshChatViewport()
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleNewSessionDone(msg newSessionDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		m.appendSystemMessage("[Session] ✗ "+msg.Err.Error(), "error")
+		return m, nil
+	}
+	m.sessionStore = msg.Store
+	if m.contextManager != nil {
+		m.contextManager.ClearSessionSystemPromptOverride()
+	}
+	m.conversationHistory = m.sessionStore.ContextMessages()
+	m.currentAssistantText.Reset()
+	m.rebuildTranscriptFromHistory()
+	m.appendSystemMessage("[Session] ✓ New session started ("+msg.SessionID+")", "done")
+	m.recordContextAction("New session started")
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleResumeSessionDone(msg resumeSessionDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		m.appendSystemMessage("[Session] ✗ "+msg.Err.Error(), "error")
+		return m, nil
+	}
+	m.sessionStore = msg.Store
+	sessionCWD := m.sessionStore.CWD()
+	if strings.TrimSpace(sessionCWD) != "" {
+		m.currentCwd = sessionCWD
+		m.currentGitBranch = detectGitBranch(m.currentCwd)
+		m.chatService = core.NewChatService(m.authStorage, core.NewToolSet(m.currentCwd))
+	}
+	if m.contextManager != nil {
+		m.contextManager.SetCWD(m.currentCwd)
+		m.contextManager.ClearSessionSystemPromptOverride()
+	}
+	m.reloadAvailableSkills()
+	m.reloadAvailableExtensions()
+	m.conversationHistory = m.sessionStore.ContextMessages()
+	m.currentAssistantText.Reset()
+	m.rebuildTranscriptFromHistory()
+	m.appendSystemMessage("[Session] ✓ Session resumed ("+m.sessionStore.SessionID()+")", "done")
+	m.recordContextAction("Session resumed")
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleBashCommandDone(msg bashCommandDoneMsg) (tea.Model, tea.Cmd) {
+	m.isExecutingBash = false
+	m.workingFrame = 0
+	if msg.IsCD && msg.Err == nil {
+		if err := os.Chdir(msg.NewCwd); err != nil {
+			msg.Err = err
+			msg.Output = "Failed to change directory: " + err.Error()
+		} else {
+			m.currentCwd = msg.NewCwd
+			m.currentGitBranch = detectGitBranch(m.currentCwd)
+			m.chatService = core.NewChatService(m.authStorage, core.NewToolSet(m.currentCwd))
+			if m.contextManager != nil {
+				m.contextManager.SetCWD(m.currentCwd)
+			}
+			m.reloadAvailableSkills()
+			m.reloadAvailableExtensions()
+		}
+	}
+
+	state := "done"
+	if msg.Err != nil {
+		state = "error"
+	}
+	if msg.Err != nil {
+		m.finalizeWorkingSystemMessage("[Bash] ✗ Command failed", "error")
+	} else {
+		m.finalizeWorkingSystemMessage("[Bash] ✓ Command finished", "done")
+	}
+	m.appendChatMessage(ChatMessage{Role: "tool", ToolName: "bash", ToolCommand: msg.Command, ToolState: state, Content: msg.Output, ToolStartedAt: msg.StartedAt, ToolEndedAt: msg.EndedAt})
+	if msg.IsCD && msg.Err == nil {
+		m.appendSystemMessage("[Bash] cwd: "+m.currentCwd, "info")
+	}
+	m.refreshChatViewport()
+	return m, nil
+}
+
+func (m *CodeAgentModel) handleWorkingTick() (tea.Model, tea.Cmd) {
+	if m.isWorking || m.isExecutingBash {
+		m.workingFrame = (m.workingFrame + 1) % 4
+		if m.isWorking {
+			m.updateWorkingSystemMessage(m.chatWorkingStatusText())
+		} else if m.isExecutingBash {
+			m.updateWorkingSystemMessage(m.bashWorkingStatusText())
+		}
+		m.refreshChatViewport()
+		return m, workingTickCmd()
+	}
+	return m, nil
+}

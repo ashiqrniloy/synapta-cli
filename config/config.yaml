@@ -20,6 +20,7 @@ keybindings:
   command: "ctrl+p"       # Ctrl+P opens command palette
   context: "ctrl+k"       # Ctrl+K opens context manager modal
   help: "ctrl+j"          # Ctrl+J opens keybindings modal
+  extensions: "ctrl+e"    # Ctrl+E opens extension launcher
   # Alternative submit options (uncomment if needed):
   # submit: "ctrl+enter"  # Ctrl+Enter submits
   # submit: "ctrl+j"      # Ctrl+J submits (fallback for terminals without Kitty)

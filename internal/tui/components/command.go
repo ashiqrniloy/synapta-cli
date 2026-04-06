@@ -81,6 +81,7 @@ type CommandActionMsg struct {
 // CommandPicker manages the inline command picker state.
 type CommandPicker struct {
 	active     bool
+	rootItems  []CommandItem
 	items      []CommandItem // current list
 	filtered   []CommandItem // filtered list
 	cursor     int           // selected index
@@ -91,11 +92,28 @@ type CommandPicker struct {
 
 // NewCommandPicker creates a new command picker.
 func NewCommandPicker(styles *theme.Styles) *CommandPicker {
+	root := DefaultCommands()
 	return &CommandPicker{
-		items:      DefaultCommands(),
-		filtered:   DefaultCommands(),
+		rootItems:  append([]CommandItem(nil), root...),
+		items:      append([]CommandItem(nil), root...),
+		filtered:   append([]CommandItem(nil), root...),
 		styles:     styles,
 		maxVisible: 5,
+	}
+}
+
+// SetRootItems sets top-level items shown when command mode is activated.
+func (cp *CommandPicker) SetRootItems(items []CommandItem) {
+	if len(items) == 0 {
+		items = DefaultCommands()
+	}
+	cp.rootItems = append([]CommandItem(nil), items...)
+	if !cp.active || len(cp.path) == 0 {
+		cp.items = append([]CommandItem(nil), cp.rootItems...)
+		cp.filtered = append([]CommandItem(nil), cp.rootItems...)
+		if cp.cursor >= len(cp.filtered) {
+			cp.cursor = 0
+		}
 	}
 }
 
@@ -107,8 +125,11 @@ func (cp *CommandPicker) IsActive() bool {
 // Activate starts command mode with the initial command list.
 func (cp *CommandPicker) Activate() {
 	cp.active = true
-	cp.items = DefaultCommands()
-	cp.filtered = DefaultCommands()
+	if len(cp.rootItems) == 0 {
+		cp.rootItems = DefaultCommands()
+	}
+	cp.items = append([]CommandItem(nil), cp.rootItems...)
+	cp.filtered = append([]CommandItem(nil), cp.rootItems...)
 	cp.cursor = 0
 	cp.path = nil
 }
@@ -190,7 +211,7 @@ func (cp *CommandPicker) HandleSelect() (completed bool) {
 			// Return false - caller will load dynamic items via LoadItems()
 			return false
 		}
-		// Other commands are complete
+		// Other commands (including extensions) are complete
 		return true
 	case 2:
 		// Second level (provider selected, model selected, etc.)
@@ -226,10 +247,10 @@ func (cp *CommandPicker) HandleBack() bool {
 	// Reset to appropriate level
 	if len(cp.path) == 0 {
 		// Back to root commands
-		cp.items = DefaultCommands()
+		cp.items = append([]CommandItem(nil), cp.rootItems...)
 	} else {
 		// Would need to handle deeper levels here if we add more
-		cp.items = DefaultCommands()
+		cp.items = append([]CommandItem(nil), cp.rootItems...)
 	}
 
 	cp.filtered = cp.items

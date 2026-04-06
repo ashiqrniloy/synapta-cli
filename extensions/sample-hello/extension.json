@@ -1,0 +1,8 @@
+{
+  "id": "sample-hello",
+  "name": "Sample Hello",
+  "description": "Print hello from extension and exit",
+  "command": "bash",
+  "args": ["-lc", "echo '[sample-hello] hello from extension'; read -n 1 -s -r -p 'Press any key to return...'"],
+  "workdir": "."
+}

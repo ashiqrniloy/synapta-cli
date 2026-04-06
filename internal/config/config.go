@@ -18,12 +18,13 @@ import (
 // Key format: modifier+key (e.g. shift+enter, ctrl+c, alt+q).
 // Supported modifiers: ctrl, alt, shift.
 type Keybindings struct {
-	Newline string `mapstructure:"newline"`
-	Submit  string `mapstructure:"submit"`
-	Quit    string `mapstructure:"quit"`
-	Command string `mapstructure:"command"`
-	Context string `mapstructure:"context"`
-	Help    string `mapstructure:"help"`
+	Newline    string `mapstructure:"newline"`
+	Submit     string `mapstructure:"submit"`
+	Quit       string `mapstructure:"quit"`
+	Command    string `mapstructure:"command"`
+	Context    string `mapstructure:"context"`
+	Help       string `mapstructure:"help"`
+	Extensions string `mapstructure:"extensions"`
 }
 
 // Theme defines a complete colour palette for a named theme.
@@ -142,12 +143,13 @@ func (c *AppConfig) ActiveTheme() Theme {
 
 func defaultKeybindings() Keybindings {
 	return Keybindings{
-		Newline: "shift+enter",
-		Submit:  "enter",
-		Quit:    "ctrl+c",
-		Command: "ctrl+p",
-		Context: "ctrl+k",
-		Help:    "ctrl+j",
+		Newline:    "shift+enter",
+		Submit:     "enter",
+		Quit:       "ctrl+c",
+		Command:    "ctrl+p",
+		Context:    "ctrl+k",
+		Help:       "ctrl+j",
+		Extensions: "ctrl+e",
 	}
 }
 
@@ -215,6 +217,9 @@ func LoadConfig() (*AppConfig, error) {
 		}
 		if v, ok := kb["help"]; ok && v != "" {
 			cfg.Keybindings.Help = v
+		}
+		if v, ok := kb["extensions"]; ok && v != "" {
+			cfg.Keybindings.Extensions = v
 		}
 	}
 
