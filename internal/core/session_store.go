@@ -18,8 +18,10 @@ import (
 const (
 	currentSessionVersion = 1
 
-	compactionSummaryPrefix = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n"
-	compactionSummarySuffix = "\n</summary>"
+	compactionSummaryPrefix       = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n"
+	compactionSummarySuffix       = "\n</summary>"
+	compactionMethodModel         = "model"
+	compactionMethodDeterministic = "fallback"
 )
 
 type CompactionSettings struct {
@@ -58,6 +60,7 @@ type sessionEntry struct {
 	Summary               string            `json:"summary,omitempty"`
 	FirstKeptMessageIndex int               `json:"firstKeptMessageIndex,omitempty"`
 	TokensBefore          int               `json:"tokensBefore,omitempty"`
+	CompactionMethod      string            `json:"compactionMethod,omitempty"`
 	Operation             *ContextOperation `json:"operation,omitempty"`
 }
 
@@ -629,21 +632,21 @@ func (s *SessionStore) RemoveContextMessageAt(index int) error {
 	return s.rewriteAllLocked()
 }
 
-func (s *SessionStore) CompactIfNeeded(ctx context.Context, contextWindow int, summarizer CompactionSummarizer) (bool, error) {
+func (s *SessionStore) CompactIfNeeded(ctx context.Context, contextWindow int, summarizer CompactionSummarizer) (bool, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.compactLocked(ctx, false, contextWindow, summarizer)
 }
 
-func (s *SessionStore) ManualCompact(ctx context.Context, contextWindow int, summarizer CompactionSummarizer) (bool, error) {
+func (s *SessionStore) ManualCompact(ctx context.Context, contextWindow int, summarizer CompactionSummarizer) (bool, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.compactLocked(ctx, true, contextWindow, summarizer)
 }
 
-func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWindow int, summarizer CompactionSummarizer) (bool, error) {
+func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWindow int, summarizer CompactionSummarizer) (bool, string, error) {
 	if !s.settings.Enabled && !force {
-		return false, nil
+		return false, "", nil
 	}
 
 	messages := s.messageEntriesLocked()
@@ -663,7 +666,7 @@ func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWin
 
 	currentSlice := messages[start:]
 	if len(currentSlice) < 2 {
-		return false, nil
+		return false, "", nil
 	}
 
 	tokensBefore := estimateContextTokens(currentSlice)
@@ -673,7 +676,7 @@ func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWin
 
 	if !force {
 		if tokensBefore <= contextWindow-s.settings.ReserveTokens {
-			return false, nil
+			return false, "", nil
 		}
 	}
 
@@ -682,21 +685,25 @@ func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWin
 		keepRel = len(currentSlice) / 2
 	}
 	if keepRel <= 0 || keepRel >= len(currentSlice) {
-		return false, nil
+		return false, "", nil
 	}
 
 	toSummarize := currentSlice[:keepRel]
-	var summary string
-	var err error
+	method := compactionMethodModel
+	newSummary := ""
 	if summarizer != nil {
-		summary, err = summarizer(ctx, toSummarize, previousSummary)
+		var err error
+		newSummary, err = summarizer(ctx, toSummarize, previousSummary)
 		if err != nil {
-			return false, err
+			return false, "", err
 		}
 	}
-	if strings.TrimSpace(summary) == "" {
-		summary = summarizeMessagesDeterministic(toSummarize, previousSummary)
+	if strings.TrimSpace(newSummary) == "" {
+		method = compactionMethodDeterministic
+		newSummary = summarizeMessagesDeterministic(toSummarize)
 	}
+
+	summary := joinCompactionSummaries(previousSummary, newSummary)
 
 	compaction := sessionEntry{
 		Type:                  "compaction",
@@ -704,12 +711,13 @@ func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWin
 		Summary:               summary,
 		FirstKeptMessageIndex: start + keepRel,
 		TokensBefore:          tokensBefore,
+		CompactionMethod:      method,
 	}
 	s.entries = append(s.entries, compaction)
 	if err := s.appendEntryLocked(compaction); err != nil {
-		return false, err
+		return false, "", err
 	}
-	return true, nil
+	return true, method, nil
 }
 
 func (s *SessionStore) messageEntriesLocked() []llm.Message {
@@ -816,12 +824,21 @@ func estimateTextTokens(text string) int {
 	return (len(text) + 3) / 4
 }
 
-func summarizeMessagesDeterministic(messages []llm.Message, previousSummary string) string {
+func joinCompactionSummaries(previousSummary, newSummary string) string {
+	prev := strings.TrimSpace(previousSummary)
+	next := strings.TrimSpace(newSummary)
+	if prev == "" {
+		return next
+	}
+	if next == "" {
+		return prev
+	}
+	return prev + "\n\n## Incremental Compaction Update\n" + next
+}
+
+func summarizeMessagesDeterministic(messages []llm.Message) string {
 	base := "## Goal\nContinue the session with preserved context.\n\n## Progress\n"
 	base += fmt.Sprintf("Messages summarized: %d\n", len(messages))
-	if previousSummary != "" {
-		base += "\n## Previous Summary\n" + previousSummary + "\n"
-	}
 	base += "\n## Key Context\n"
 	for i, m := range messages {
 		if i >= 10 {

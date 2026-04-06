@@ -128,6 +128,7 @@ type chatStreamErrMsg struct {
 type compactDoneMsg struct {
 	Compacted bool
 	History   []llm.Message
+	Method    string
 	Err       error
 }
 
@@ -257,11 +258,11 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	t := cfg.ActiveTheme()
 	styles := theme.NewStyles(t)
 
-	homeDir, _ := os.UserHomeDir()
-	agentDir := homeDir + "/.synapta"
+	agentDir := llm.GetAgentDir()
 	authStorage, _ := llm.NewAuthStorage(agentDir)
 	systemPromptStore := core.NewSystemPromptStore(agentDir)
 	_ = systemPromptStore.EnsureDefaultIfAgentDirMissing(core.AgentCode, "")
+	_ = core.LoadCompactionPrompt(agentDir)
 
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(10))
 	vp.SoftWrap = true

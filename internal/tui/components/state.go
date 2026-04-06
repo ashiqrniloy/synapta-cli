@@ -274,7 +274,7 @@ func (m *CodeAgentModel) chatHistoryAsLLM() ([]llm.Message, error) {
 			}
 			return m.chatService.SummarizeCompaction(ctx, m.selectedProvider, m.selectedModelID, toSummarize, previousSummary)
 		}
-		compacted, err := m.sessionStore.CompactIfNeeded(context.Background(), contextWindow, summarizer)
+		compacted, _, err := m.sessionStore.CompactIfNeeded(context.Background(), contextWindow, summarizer)
 		if err != nil {
 			return nil, err
 		}

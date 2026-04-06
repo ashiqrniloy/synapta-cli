@@ -229,12 +229,12 @@ func (m *CodeAgentModel) manualCompactCmd() tea.Cmd {
 			return m.chatService.SummarizeCompaction(ctx, m.selectedProvider, m.selectedModelID, toSummarize, previousSummary)
 		}
 
-		compacted, err := m.sessionStore.ManualCompact(context.Background(), contextWindow, summarizer)
+		compacted, method, err := m.sessionStore.ManualCompact(context.Background(), contextWindow, summarizer)
 		if err != nil {
 			return compactDoneMsg{Err: err}
 		}
 		history := m.sessionStore.ContextMessages()
-		return compactDoneMsg{Compacted: compacted, History: history}
+		return compactDoneMsg{Compacted: compacted, History: history, Method: method}
 	}
 }
 

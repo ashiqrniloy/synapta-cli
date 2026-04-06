@@ -346,7 +346,11 @@ func (m *CodeAgentModel) handleCompactDone(msg compactDoneMsg) (tea.Model, tea.C
 		m.conversationHistory = append([]llm.Message(nil), msg.History...)
 	}
 	if msg.Compacted {
-		m.appendSystemMessage("[Compact] ✓ Session compacted", "done")
+		methodLabel := "model"
+		if strings.TrimSpace(msg.Method) == "fallback" {
+			methodLabel = "fallback synthetic"
+		}
+		m.appendSystemMessage("[Compact] ✓ Session compacted ("+methodLabel+")", "done")
 		m.contextActions = nil
 		m.contextModalEntries = nil
 		m.lastPromptFingerprint = core.PromptFingerprint{}
