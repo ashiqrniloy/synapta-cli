@@ -3,6 +3,7 @@ package components
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
 
@@ -21,6 +22,16 @@ type CommandItem struct {
 type CommandStep struct {
 	Name string
 	ID   string
+}
+
+// CommandDisplayName returns the display label for a command ID.
+func CommandDisplayName(id string) string {
+	for _, item := range DefaultCommands() {
+		if item.ID == id {
+			return item.Name
+		}
+	}
+	return id
 }
 
 // ─── Data ──────────────────────────────────────────────────────────
@@ -136,6 +147,17 @@ func (cp *CommandPicker) Activate() {
 	cp.path = nil
 }
 
+// BeginSubmenu puts the picker directly into a sub-menu for a command.
+func (cp *CommandPicker) BeginSubmenu(commandID, commandName string) {
+	if !cp.active {
+		cp.Activate()
+	}
+	cp.path = []CommandStep{{Name: commandName, ID: commandID}}
+	cp.items = nil
+	cp.filtered = nil
+	cp.cursor = 0
+}
+
 // Deactivate exits command mode.
 func (cp *CommandPicker) Deactivate() {
 	cp.active = false
@@ -148,6 +170,11 @@ func (cp *CommandPicker) Deactivate() {
 // Filter updates the filtered list based on the query.
 func (cp *CommandPicker) Filter(query string) {
 	query = strings.ToLower(strings.TrimSpace(query))
+	if len(cp.path) == 0 && utf8.RuneCountInString(query) < 3 {
+		cp.filtered = nil
+		cp.cursor = 0
+		return
+	}
 	if query == "" {
 		cp.filtered = cp.items
 	} else {

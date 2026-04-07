@@ -28,6 +28,15 @@ func (m *CodeAgentModel) handleCommandPickerKeyPress(msg tea.KeyPressMsg, keyStr
 	}
 	if keyStr == "enter" {
 		if commandID := m.commandShortcutCommandID(); commandID != "" {
+			if commandID == "set-model" || commandID == "resume-session" {
+				m.picker.BeginSubmenu(commandID, CommandDisplayName(commandID))
+				m.ta.SetValue(":")
+				m.recalculateLayout()
+				if commandID == "set-model" {
+					return true, m.loadModels()
+				}
+				return true, m.loadSessions()
+			}
 			m.picker.Deactivate()
 			return true, func() tea.Msg {
 				return CommandActionMsg{Path: []CommandStep{{Name: commandID, ID: commandID}}}

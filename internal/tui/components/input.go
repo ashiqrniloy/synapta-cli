@@ -122,6 +122,7 @@ func (m *CodeAgentModel) enterCommandMode() {
 	}
 	m.picker.Activate()
 	m.ta.SetValue(":")
+	m.picker.Filter(m.getFilterText())
 	m.ta.Placeholder = "Command mode… type to filter"
 	m.recalculateLayout()
 }
