@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
@@ -135,7 +134,7 @@ func (m *ContextManager) Build(history []llm.Message) ([]llm.Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	metadata := m.buildRuntimeMetadata()
+	metadata := ""
 
 	messages := make([]llm.Message, 0, len(history)+2)
 	if strings.TrimSpace(stablePrefix) != "" {
@@ -151,12 +150,6 @@ func (m *ContextManager) Build(history []llm.Message) ([]llm.Message, error) {
 			continue
 		}
 		messages = append(messages, llm.Message{Role: msg.Role, Content: msg.Content})
-	}
-
-	if strings.TrimSpace(metadata) != "" {
-		// Keep runtime metadata at the end so the stable prompt prefix remains
-		// unchanged across turns (prompt cache friendliness).
-		messages = append(messages, llm.Message{Role: "system", Content: metadata})
 	}
 
 	m.mu.Lock()
@@ -259,16 +252,6 @@ func (m *ContextManager) buildStablePrefix() (string, error) {
 	content := m.stablePrefixFragment.content
 	m.mu.Unlock()
 	return content, nil
-}
-
-func (m *ContextManager) buildRuntimeMetadata() string {
-	m.mu.Lock()
-	cwd := strings.TrimSpace(m.cwd)
-	m.mu.Unlock()
-	if cwd == "" {
-		cwd = "(unknown cwd)"
-	}
-	return fmt.Sprintf("# Runtime Metadata\n\n- timestamp: %s\n- cwd: %s", time.Now().Format(time.RFC3339), cwd)
 }
 
 func discoverProjectContextPaths(agentDir, cwd string) []string {

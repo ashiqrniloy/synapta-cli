@@ -506,8 +506,8 @@ func (s *SessionStore) contextMessagesLocked() []llm.Message {
 func (s *SessionStore) contextMessageRefsLocked() []contextMessageRef {
 	messages := s.messageEntriesLocked()
 	messageEntryIndices := s.messageEntryIndicesLocked()
-	lastCompaction := s.latestCompactionLocked()
-	if lastCompaction == nil {
+	compactions := s.compactionEntriesLocked()
+	if len(compactions) == 0 {
 		out := make([]contextMessageRef, 0, len(messages))
 		for i, msg := range messages {
 			entryIdx := -1
@@ -519,7 +519,7 @@ func (s *SessionStore) contextMessageRefsLocked() []contextMessageRef {
 		return out
 	}
 
-	start := lastCompaction.FirstKeptMessageIndex
+	start := compactions[len(compactions)-1].FirstKeptMessageIndex
 	if start < 0 {
 		start = 0
 	}
@@ -527,13 +527,15 @@ func (s *SessionStore) contextMessageRefsLocked() []contextMessageRef {
 		start = len(messages)
 	}
 
-	result := make([]contextMessageRef, 0, len(messages)-start+1)
-	result = append(result, contextMessageRef{
-		Message:      llm.Message{Role: "user", Content: compactionSummaryPrefix + strings.TrimSpace(lastCompaction.Summary) + compactionSummarySuffix},
-		EntryIndex:   -1,
-		MessageIndex: -1,
-		IsCompaction: true,
-	})
+	result := make([]contextMessageRef, 0, len(compactions)+len(messages)-start)
+	for _, compaction := range compactions {
+		result = append(result, contextMessageRef{
+			Message:      llm.Message{Role: "user", Content: compactionSummaryPrefix + strings.TrimSpace(compaction.Summary) + compactionSummarySuffix},
+			EntryIndex:   -1,
+			MessageIndex: -1,
+			IsCompaction: true,
+		})
+	}
 	for i := start; i < len(messages); i++ {
 		entryIdx := -1
 		if i >= 0 && i < len(messageEntryIndices) {
@@ -680,12 +682,18 @@ func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWin
 		}
 	}
 
-	keepRel := findKeepStartIndex(currentSlice, s.settings.KeepRecentTokens)
-	if keepRel <= 0 || keepRel >= len(currentSlice) {
-		keepRel = len(currentSlice) / 2
+	keepRel := len(currentSlice)
+	if !force {
+		keepRel = findKeepStartIndex(currentSlice, s.settings.KeepRecentTokens)
+		if keepRel <= 0 || keepRel >= len(currentSlice) {
+			keepRel = len(currentSlice) / 2
+		}
 	}
-	if keepRel <= 0 || keepRel >= len(currentSlice) {
+	if keepRel <= 0 {
 		return false, "", nil
+	}
+	if keepRel > len(currentSlice) {
+		keepRel = len(currentSlice)
 	}
 
 	toSummarize := currentSlice[:keepRel]
@@ -703,7 +711,7 @@ func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWin
 		newSummary = summarizeMessagesDeterministic(toSummarize)
 	}
 
-	summary := joinCompactionSummaries(previousSummary, newSummary)
+	summary := strings.TrimSpace(newSummary)
 
 	compaction := sessionEntry{
 		Type:                  "compaction",
@@ -755,6 +763,17 @@ func (s *SessionStore) latestCompactionLocked() *sessionEntry {
 		}
 	}
 	return nil
+}
+
+func (s *SessionStore) compactionEntriesLocked() []sessionEntry {
+	entries := make([]sessionEntry, 0)
+	for i := 0; i < len(s.entries); i++ {
+		if s.entries[i].Type != "compaction" {
+			continue
+		}
+		entries = append(entries, s.entries[i])
+	}
+	return entries
 }
 
 func (s *SessionStore) appendEntryLocked(e sessionEntry) error {
@@ -822,18 +841,6 @@ func estimateTextTokens(text string) int {
 		return 0
 	}
 	return (len(text) + 3) / 4
-}
-
-func joinCompactionSummaries(previousSummary, newSummary string) string {
-	prev := strings.TrimSpace(previousSummary)
-	next := strings.TrimSpace(newSummary)
-	if prev == "" {
-		return next
-	}
-	if next == "" {
-		return prev
-	}
-	return prev + "\n\n## Incremental Compaction Update\n" + next
 }
 
 func summarizeMessagesDeterministic(messages []llm.Message) string {

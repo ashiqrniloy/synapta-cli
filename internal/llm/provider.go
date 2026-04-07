@@ -9,7 +9,46 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
+
+// ─── HTTP Client Constants ────────────────────────────────────────────
+
+const (
+	// Default timeout for API requests - generous for streaming responses
+	defaultHTTPTimeout = 120 * time.Second
+	// Timeout for reading response headers
+	headerTimeout = 30 * time.Second
+	// Buffer size for reading response bodies
+	bodyBufferSize = 32 * 1024 // 32KB
+)
+
+// defaultHTTPClient is a shared HTTP client with appropriate timeouts
+// for LLM API requests. It uses a Transport with connection pooling
+// for better performance.
+var defaultHTTPClient *http.Client
+
+func init() {
+	// Initialize the default HTTP client with timeouts
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	}
+
+	defaultHTTPClient = &http.Client{
+		Transport: transport,
+		Timeout:   defaultHTTPTimeout,
+	}
+}
+
+// HTTPClient returns the default HTTP client for LLM requests.
+// It is configured with reasonable timeouts for API interactions.
+func HTTPClient() *http.Client {
+	return defaultHTTPClient
+}
+
+// ─── OpenAIProvider ──────────────────────────────────────────────────
 
 // OpenAIProvider implements an OpenAI-compatible LLM provider.
 type OpenAIProvider struct {
@@ -120,7 +159,7 @@ func (p *OpenAIProvider) chatCompletions(ctx context.Context, req ChatRequest) (
 		httpReq.Header.Set("Accept", "text/event-stream")
 	}
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := HTTPClient().Do(httpReq)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sending request: %w", err)
 	}
@@ -159,7 +198,7 @@ func (p *OpenAIProvider) chatResponses(ctx context.Context, req ChatRequest) (*C
 	p.setDynamicHeaders(httpReq, req.Messages)
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := HTTPClient().Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("sending request: %w", err)
 	}
@@ -199,7 +238,7 @@ func (p *OpenAIProvider) chatStreamResponses(ctx context.Context, req ChatReques
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := HTTPClient().Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("sending request: %w", err)
 	}

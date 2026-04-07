@@ -8,7 +8,7 @@ import (
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
 
-func TestContextManagerBuild_RuntimeMetadataAppendedAtEnd(t *testing.T) {
+func TestContextManagerBuild_DoesNotAppendRuntimeMetadata(t *testing.T) {
 	m := NewContextManager(AgentCode, t.TempDir(), "/tmp/project", nil)
 	history := []llm.Message{
 		{Role: "user", Content: "hello"},
@@ -23,38 +23,9 @@ func TestContextManagerBuild_RuntimeMetadataAppendedAtEnd(t *testing.T) {
 		t.Fatalf("expected non-empty messages")
 	}
 
-	last := msgs[len(msgs)-1]
-	if last.Role != "system" {
-		t.Fatalf("expected last role system, got %q", last.Role)
-	}
-	if !strings.Contains(last.Content, "# Runtime Metadata") {
-		t.Fatalf("expected runtime metadata in last message, got: %q", last.Content)
-	}
-	if !strings.Contains(last.Content, "cwd: /tmp/project") {
-		t.Fatalf("expected cwd in metadata, got: %q", last.Content)
-	}
-}
-
-func TestContextManagerBuild_RuntimeMetadataAlwaysLastAcrossBuilds(t *testing.T) {
-	m := NewContextManager(AgentCode, t.TempDir(), "/tmp/project", nil)
-
-	cases := [][]llm.Message{
-		{},
-		{{Role: "user", Content: "one"}},
-		{{Role: "user", Content: "one"}, {Role: "assistant", Content: "two"}, {Role: "user", Content: "three"}},
-	}
-
-	for i, history := range cases {
-		msgs, err := m.Build(history)
-		if err != nil {
-			t.Fatalf("case %d: Build() error = %v", i, err)
-		}
-		if len(msgs) == 0 {
-			t.Fatalf("case %d: expected non-empty messages", i)
-		}
-		last := msgs[len(msgs)-1]
-		if last.Role != "system" || !strings.Contains(last.Content, "# Runtime Metadata") {
-			t.Fatalf("case %d: expected runtime metadata as last message, got role=%q content=%q", i, last.Role, last.Content)
+	for i, msg := range msgs {
+		if msg.Role == "system" && strings.Contains(msg.Content, "# Runtime Metadata") {
+			t.Fatalf("message %d unexpectedly contains runtime metadata", i)
 		}
 	}
 }
