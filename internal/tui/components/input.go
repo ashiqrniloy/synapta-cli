@@ -65,6 +65,47 @@ func (m *CodeAgentModel) getFilterText() string {
 	return ""
 }
 
+func normalizeCommandShortcut(value string) string {
+	v := strings.ToLower(strings.TrimSpace(value))
+	v = strings.TrimPrefix(v, ":")
+	if strings.ContainsAny(v, " \t\n") {
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
+func (m *CodeAgentModel) commandShortcutCommandID() string {
+	shortcut := normalizeCommandShortcut(m.ta.Value())
+	if shortcut == "" {
+		return ""
+	}
+	if m.cfg != nil && len(m.cfg.CommandShortcuts) > 0 {
+		if id, ok := m.cfg.CommandShortcuts[shortcut]; ok {
+			return strings.TrimSpace(id)
+		}
+	}
+	switch shortcut {
+	case "q":
+		return "quit"
+	case "b":
+		return "bash"
+	case "h":
+		return "help"
+	case "k":
+		return "context-manager"
+	case "m":
+		return "set-model"
+	case "n":
+		return "new-session"
+	case "c":
+		return "compact"
+	case "r":
+		return "resume-session"
+	default:
+		return ""
+	}
+}
+
 func (m *CodeAgentModel) clearCommandMode() {
 	m.ta.SetValue("")
 	m.picker.Deactivate()

@@ -26,6 +26,18 @@ keybindings:
   # submit: "ctrl+j"      # Ctrl+J submits (fallback for terminals without Kitty)
   # submit: "escape"      # Escape key submits
 
+# Command shortcuts (vim-style) used in command mode.
+# Type ":" then one of these shortcuts and press Enter.
+command_shortcuts:
+  q: "quit"
+  b: "bash"
+  h: "help"
+  k: "context-manager"
+  m: "set-model"
+  n: "new-session"
+  c: "compact"
+  r: "resume-session"
+
 # UI density controls overall information spacing.
 # - comfortable: more whitespace (default)
 # - compact: tighter layout

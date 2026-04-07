@@ -27,6 +27,12 @@ func (m *CodeAgentModel) handleCommandPickerKeyPress(msg tea.KeyPressMsg, keyStr
 		return true, nil
 	}
 	if keyStr == "enter" {
+		if commandID := m.commandShortcutCommandID(); commandID != "" {
+			m.picker.Deactivate()
+			return true, func() tea.Msg {
+				return CommandActionMsg{Path: []CommandStep{{Name: commandID, ID: commandID}}}
+			}
+		}
 		selected := m.picker.Selected()
 		completed := m.picker.HandleSelect()
 		if completed {

@@ -116,10 +116,11 @@ type UIConfig struct {
 
 // AppConfig is the top-level configuration structure.
 type AppConfig struct {
-	Keybindings Keybindings    `mapstructure:"keybindings"`
-	Themes      RawThemes      `mapstructure:"themes"`
-	Provider    ProviderConfig `mapstructure:"provider"`
-	UI          UIConfig       `mapstructure:"ui"`
+	Keybindings      Keybindings       `mapstructure:"keybindings"`
+	CommandShortcuts map[string]string `mapstructure:"command_shortcuts"`
+	Themes           RawThemes         `mapstructure:"themes"`
+	Provider         ProviderConfig    `mapstructure:"provider"`
+	UI               UIConfig          `mapstructure:"ui"`
 }
 
 // ActiveTheme returns the currently selected Theme, falling back to the
@@ -160,10 +161,24 @@ func defaultThemesMap() map[string]Theme {
 	}
 }
 
+func defaultCommandShortcuts() map[string]string {
+	return map[string]string{
+		"q": "quit",
+		"b": "bash",
+		"h": "help",
+		"k": "context-manager",
+		"m": "set-model",
+		"n": "new-session",
+		"c": "compact",
+		"r": "resume-session",
+	}
+}
+
 // DefaultConfig returns a fully-populated config with built-in defaults.
 func DefaultConfig() *AppConfig {
 	return &AppConfig{
-		Keybindings: defaultKeybindings(),
+		Keybindings:      defaultKeybindings(),
+		CommandShortcuts: defaultCommandShortcuts(),
 		Themes: RawThemes{
 			Default: "nord-aurora-dark",
 			Map:     defaultThemesMap(),
@@ -173,6 +188,12 @@ func DefaultConfig() *AppConfig {
 }
 
 // ── Loading ───────────────────────────────────────────────────────────
+
+func normalizeShortcutKey(key string) string {
+	k := strings.ToLower(strings.TrimSpace(key))
+	k = strings.TrimPrefix(k, ":")
+	return strings.TrimSpace(k)
+}
 
 // LoadConfig reads YAML config from the user directory (~/.synapta/config.yaml),
 // falling through to the local config/ directory, then to hard-coded defaults.
@@ -220,6 +241,17 @@ func LoadConfig() (*AppConfig, error) {
 		}
 		if v, ok := kb["extensions"]; ok && v != "" {
 			cfg.Keybindings.Extensions = v
+		}
+	}
+
+	if shortcuts := v.GetStringMapString("command_shortcuts"); len(shortcuts) > 0 {
+		for rawKey, commandID := range shortcuts {
+			key := normalizeShortcutKey(rawKey)
+			id := strings.TrimSpace(commandID)
+			if key == "" || id == "" {
+				continue
+			}
+			cfg.CommandShortcuts[key] = id
 		}
 	}
 

@@ -31,6 +31,8 @@ func DefaultCommands() []CommandItem {
 		{ID: "add-provider", Name: "Add Provider"},
 		{ID: "bash", Name: "Bash"},
 		{ID: "compact", Name: "Compact"},
+		{ID: "context-manager", Name: "Context Manager"},
+		{ID: "help", Name: "Help"},
 		{ID: "new-session", Name: "New Session"},
 		{ID: "resume-session", Name: "Resume Session"},
 		{ID: "set-model", Name: "Set Model"},

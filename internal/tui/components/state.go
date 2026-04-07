@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -99,7 +100,8 @@ func (m *CodeAgentModel) keybindingRows() []keybindingRow {
 	if m.cfg != nil && m.cfg.Keybindings.Newline != "" {
 		newline = normalizeKeyName(m.cfg.Keybindings.Newline)
 	}
-	return []keybindingRow{
+
+	rows := []keybindingRow{
 		{Action: "Submit", Binding: m.getSubmitKey(), Description: "Send message / run bash"},
 		{Action: "Newline", Binding: newline, Description: "Insert newline in input"},
 		{Action: "Command palette", Binding: m.getCommandKey(), Description: "Open command picker"},
@@ -114,6 +116,72 @@ func (m *CodeAgentModel) keybindingRows() []keybindingRow {
 		{Action: "Skill picker", Binding: "@", Description: "Open skills suggestions"},
 		{Action: "Quit", Binding: m.getQuitKey(), Description: "Exit Synapta Code"},
 	}
+
+	rows = append(rows, m.commandShortcutRows()...)
+	return rows
+}
+
+func (m *CodeAgentModel) commandShortcutRows() []keybindingRow {
+	if m.cfg == nil {
+		return nil
+	}
+	actionLabel := map[string]string{
+		"quit":            "Quit",
+		"bash":            "Bash",
+		"help":            "Help",
+		"context-manager": "Context Manager",
+		"set-model":       "Set Model",
+		"new-session":     "New Session",
+		"compact":         "Compact",
+		"resume-session":  "Resume Session",
+	}
+	actionDesc := map[string]string{
+		"quit":            "Exit Synapta Code",
+		"bash":            "Switch to bash mode",
+		"help":            "Open keybindings modal",
+		"context-manager": "Open context modal",
+		"set-model":       "Choose model",
+		"new-session":     "Start a new session",
+		"compact":         "Run manual compaction",
+		"resume-session":  "Resume a previous session",
+	}
+
+	type pair struct {
+		shortcut string
+		command  string
+	}
+	pairs := make([]pair, 0, len(m.cfg.CommandShortcuts))
+	for shortcut, commandID := range m.cfg.CommandShortcuts {
+		shortcut = strings.TrimSpace(shortcut)
+		commandID = strings.TrimSpace(commandID)
+		if shortcut == "" || commandID == "" {
+			continue
+		}
+		if _, ok := actionLabel[commandID]; !ok {
+			continue
+		}
+		pairs = append(pairs, pair{shortcut: shortcut, command: commandID})
+	}
+	if len(pairs) == 0 {
+		return nil
+	}
+
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].command == pairs[j].command {
+			return pairs[i].shortcut < pairs[j].shortcut
+		}
+		return pairs[i].command < pairs[j].command
+	})
+
+	rows := make([]keybindingRow, 0, len(pairs))
+	for _, p := range pairs {
+		rows = append(rows, keybindingRow{
+			Action:      "Shortcut: " + actionLabel[p.command],
+			Binding:     ":" + p.shortcut + " ↵",
+			Description: actionDesc[p.command],
+		})
+	}
+	return rows
 }
 
 func (m *CodeAgentModel) filteredKeybindingRows() []keybindingRow {

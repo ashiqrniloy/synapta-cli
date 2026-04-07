@@ -10,6 +10,7 @@ import (
 
 	"github.com/ashiqrniloy/synapta-cli/internal/core"
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func (m *CodeAgentModel) handleCommandAction(msg CommandActionMsg) (tea.Model, tea.Cmd) {
@@ -32,10 +33,24 @@ func (m *CodeAgentModel) handleCommandAction(msg CommandActionMsg) (tea.Model, t
 	}
 
 	switch commandID {
+	case "quit":
+		m.clearCommandMode()
+		m.quit = true
+		return m, tea.Sequence(tea.Raw(ansi.ResetModeMouseButtonEvent+ansi.ResetModeMouseAnyEvent+ansi.ResetModeMouseExtSgr), tea.Quit)
 	case "bash":
 		m.clearCommandMode()
 		m.applyInputMode(inputModeBash)
 		m.appendSystemMessage("[Bash] Mode enabled. Enter a command and press Enter.", "info")
+		return m, nil
+	case "help":
+		m.clearCommandMode()
+		m.keybindingsModalOpen = true
+		m.keybindingsSearch = ""
+		m.keybindingsSelection = 0
+		return m, nil
+	case "context-manager":
+		m.clearCommandMode()
+		m.openContextModal()
 		return m, nil
 	case "add-provider":
 		m.clearCommandMode()
