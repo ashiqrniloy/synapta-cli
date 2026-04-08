@@ -58,7 +58,10 @@ func (m *CodeAgentModel) shouldInsertNewline(msg tea.KeyPressMsg, keyStr string)
 }
 
 func (m *CodeAgentModel) getFilterText() string {
-	value := m.ta.Value()
+	return getFilterTextFromValue(m.commandInputValue())
+}
+
+func getFilterTextFromValue(value string) string {
 	if strings.HasPrefix(value, ":") {
 		return value[1:]
 	}
@@ -75,7 +78,7 @@ func normalizeCommandShortcut(value string) string {
 }
 
 func (m *CodeAgentModel) commandShortcutCommandID() string {
-	shortcut := normalizeCommandShortcut(m.ta.Value())
+	shortcut := normalizeCommandShortcut(m.commandInputValue())
 	if shortcut == "" {
 		return ""
 	}
@@ -106,8 +109,41 @@ func (m *CodeAgentModel) commandShortcutCommandID() string {
 	}
 }
 
+func (m *CodeAgentModel) commandInputValue() string {
+	if m.commandModalOpen {
+		return m.commandModalInput.Value()
+	}
+	return m.ta.Value()
+}
+
+func (m *CodeAgentModel) setCommandInputValue(value string) {
+	if m.commandModalOpen {
+		m.commandModalInput.SetValue(value)
+		return
+	}
+	m.ta.SetValue(value)
+}
+
+func (m *CodeAgentModel) updateCommandInput(msg tea.KeyPressMsg) tea.Cmd {
+	if m.commandModalOpen {
+		var cmd tea.Cmd
+		m.commandModalInput, cmd = m.commandModalInput.Update(msg)
+		return cmd
+	}
+	var cmd tea.Cmd
+	m.ta, cmd = m.ta.Update(msg)
+	return cmd
+}
+
 func (m *CodeAgentModel) clearCommandMode() {
-	m.ta.SetValue("")
+	if m.commandModalOpen {
+		m.commandModalOpen = false
+		m.commandModalInput.SetValue("")
+		m.commandModalInput.Blur()
+		m.ta.Focus()
+	} else {
+		m.ta.SetValue("")
+	}
 	m.picker.Deactivate()
 	if m.skillPicker != nil {
 		m.skillPicker.Deactivate()
@@ -122,8 +158,22 @@ func (m *CodeAgentModel) enterCommandMode() {
 	}
 	m.picker.Activate()
 	m.ta.SetValue(":")
-	m.picker.Filter(m.getFilterText())
+	m.picker.Filter(getFilterTextFromValue(m.ta.Value()))
 	m.ta.Placeholder = "Command mode… type to filter"
+	m.recalculateLayout()
+}
+
+func (m *CodeAgentModel) openCommandModal() {
+	if m.skillPicker != nil {
+		m.skillPicker.Deactivate()
+	}
+	m.commandModalOpen = true
+	m.picker.Activate()
+	m.commandModalInput.SetValue(":")
+	m.commandModalInput.Placeholder = "Command mode… type to filter"
+	m.commandModalInput.Focus()
+	m.ta.Blur()
+	m.picker.Filter(getFilterTextFromValue(m.commandModalInput.Value()))
 	m.recalculateLayout()
 }
 
@@ -258,6 +308,13 @@ func (m *CodeAgentModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 		return m, cmd
 	}
 	if handled, cmd := m.handleGeneralKeyPress(msg, keyStr, quitKey); handled {
+		return m, cmd
+	}
+
+	if m.commandModalOpen {
+		cmd := m.updateCommandInput(msg)
+		m.picker.Filter(m.getFilterText())
+		m.recalculateLayout()
 		return m, cmd
 	}
 

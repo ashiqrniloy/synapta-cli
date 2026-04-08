@@ -245,6 +245,8 @@ type CodeAgentModel struct {
 	keybindingsModalOpen      bool
 	keybindingsSearch         string
 	keybindingsSelection      int
+	commandModalOpen          bool
+	commandModalInput         textarea.Model
 	lastPromptHash            string
 	lastPromptFingerprint     core.PromptFingerprint
 	likelyPromptCacheHit      bool
@@ -329,6 +331,10 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	}
 	model.contextModalEditor = buildTextarea(t, cfg)
 	model.contextModalEditor.Placeholder = "Edit selected context (Ctrl+S to save, Esc to cancel)"
+	model.commandModalInput = buildTextarea(t, cfg)
+	model.commandModalInput.Placeholder = "Command mode… type to filter"
+	model.commandModalInput.SetValue(":")
+	model.commandModalInput.Blur()
 
 	model.applyInputMode(inputModeChat)
 	return model
@@ -484,6 +490,9 @@ func (m *CodeAgentModel) View() tea.View {
 	}
 	if m.keybindingsModalOpen {
 		base = m.renderKeybindingsModal()
+	}
+	if m.commandModalOpen {
+		base = m.renderCommandModal(base)
 	}
 
 	v := tea.NewView(base)

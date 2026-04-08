@@ -65,10 +65,39 @@ type ReadInput struct {
 	Limit  *int   `json:"limit,omitempty"`
 }
 
+// WriteMode selects the edit strategy for write.
+type WriteMode string
+
+const (
+	WriteModeOverwrite    WriteMode = "overwrite"     // default; write full content
+	WriteModeReplace      WriteMode = "replace"       // literal find/replace in existing content
+	WriteModeReplaceRegex WriteMode = "replace_regex" // regex find/replace in existing content
+	WriteModeLineEdit     WriteMode = "line_edit"     // replace [start_line,end_line] inclusive
+	WriteModePatch        WriteMode = "patch"         // apply unified diff
+)
+
 // WriteInput is the input for the write tool.
 type WriteInput struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path    string    `json:"path"`
+	Content string    `json:"content,omitempty"`
+	Mode    WriteMode `json:"mode,omitempty"`
+
+	// replace and replace_regex modes
+	Find            string `json:"find,omitempty"`
+	Replace         string `json:"replace,omitempty"`
+	ExpectedMatches *int   `json:"expected_matches,omitempty"`
+	MaxReplacements *int   `json:"max_replacements,omitempty"`
+
+	// line_edit mode (1-indexed, inclusive)
+	StartLine *int `json:"start_line,omitempty"`
+	EndLine   *int `json:"end_line,omitempty"`
+
+	// patch mode
+	UnifiedDiff string `json:"unified_diff,omitempty"`
+
+	// behavior flags
+	DryRun                  *bool `json:"dry_run,omitempty"`
+	PreserveTrailingNewline *bool `json:"preserve_trailing_newline,omitempty"`
 }
 
 // BashInput is the input for the bash tool.

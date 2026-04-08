@@ -457,11 +457,11 @@ func contextBadgeLabel(category string) (string, string) {
 	case "compacted-output":
 		bg, label = "172", "Compacted"
 	case "files-read":
-		bg, label = "31", "Tool:Read"
+		bg, label = "31", "Read"
 	case "files-written":
-		bg, label = "29", "Tool:Write"
+		bg, label = "29", "Write"
 	case "tool-bash":
-		bg, label = "130", "Tool:Bash"
+		bg, label = "130", "Bash"
 	case "llm-output":
 		bg, label = "64", "LLM"
 	case "user-input":
@@ -470,6 +470,39 @@ func contextBadgeLabel(category string) (string, string) {
 		bg, label = "67", "Tool"
 	}
 	return bg, label
+}
+
+func (m *CodeAgentModel) renderCommandModal(base string) string {
+	_ = base
+	width := max(m.width-8, 60)
+	height := max(m.height-8, 12)
+	innerWidth := max(width-4, 20)
+
+	inputView := strings.TrimRight(m.commandModalInput.View(), "\n")
+	inputView = lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(inputView)
+	pickerView := strings.TrimRight(m.picker.View(innerWidth), "\n")
+	if pickerView != "" {
+		divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(innerWidth, 1)))
+		inputView += "\n" + divider + "\n" + pickerView
+	}
+
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(m.styles.CommandHighlightStyle.GetForeground()).
+		Align(lipgloss.Center).
+		Width(innerWidth).
+		Render("COMMAND")
+
+	body := title + "\n\n" + inputView
+	modal := lipgloss.NewStyle().
+		Width(width).
+		Height(height).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(m.styles.CommandHighlightStyle.GetForeground()).
+		Padding(1, 2).
+		Render(body)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
 
 func (m *CodeAgentModel) renderKeybindingsModal() string {

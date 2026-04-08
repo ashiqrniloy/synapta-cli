@@ -122,7 +122,7 @@ func (m *CodeAgentModel) handleModelsLoaded(msg ModelsLoadedMsg) (tea.Model, tea
 		return m, nil
 	}
 	m.picker.LoadModels(msg.Models)
-	m.ta.SetValue(":")
+	m.setCommandInputValue(":")
 	m.recalculateLayout()
 	return m, nil
 }
@@ -153,7 +153,7 @@ func (m *CodeAgentModel) handleSessionsLoaded(msg SessionsLoadedMsg) (tea.Model,
 		items = append(items, CommandItem{ID: s.Path, Name: name})
 	}
 	m.picker.LoadItems(items)
-	m.ta.SetValue(":")
+	m.setCommandInputValue(":")
 	m.recalculateLayout()
 	return m, nil
 }

@@ -2,6 +2,7 @@ package components
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -550,17 +551,107 @@ func max(a, b int) int {
 	return b
 }
 
+type toolInvocationMeta struct {
+	Name    string
+	Path    string
+	Command string
+}
+
+func parseToolInvocationMeta(toolName, args string) toolInvocationMeta {
+	meta := toolInvocationMeta{Name: strings.TrimSpace(toolName)}
+	switch meta.Name {
+	case "read":
+		var in tools.ReadInput
+		if err := json.Unmarshal([]byte(args), &in); err == nil {
+			meta.Path = strings.TrimSpace(in.Path)
+		}
+	case "write":
+		var in tools.WriteInput
+		if err := json.Unmarshal([]byte(args), &in); err == nil {
+			meta.Path = strings.TrimSpace(in.Path)
+		}
+	case "bash":
+		var in tools.BashInput
+		if err := json.Unmarshal([]byte(args), &in); err == nil {
+			meta.Command = strings.TrimSpace(in.Command)
+		}
+	}
+	return meta
+}
+
+func buildToolInvocationMetaByCallID(history []llm.Message) map[string]toolInvocationMeta {
+	metaByCallID := map[string]toolInvocationMeta{}
+	for _, msg := range history {
+		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
+			continue
+		}
+		for _, tc := range msg.ToolCalls {
+			callID := strings.TrimSpace(tc.ID)
+			if callID == "" {
+				continue
+			}
+			metaByCallID[callID] = parseToolInvocationMeta(tc.Function.Name, tc.Function.Arguments)
+		}
+	}
+	return metaByCallID
+}
+
+func parseToolContentForTranscript(raw string) string {
+	content := strings.TrimSpace(raw)
+	if content == "" {
+		return ""
+	}
+
+	var result tools.Result
+	if err := json.Unmarshal([]byte(content), &result); err == nil {
+		text := toolResultPlainText(result)
+		if strings.TrimSpace(text) != "" {
+			return text
+		}
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal([]byte(content), &m); err == nil {
+		if errText, ok := m["error"].(string); ok && strings.TrimSpace(errText) != "" {
+			return strings.TrimSpace(errText)
+		}
+	}
+
+	return content
+}
+
 func (m *CodeAgentModel) rebuildTranscriptFromHistory() {
 	messages := make([]ChatMessage, 0, len(m.conversationHistory))
+	toolMetaByCallID := buildToolInvocationMetaByCallID(m.conversationHistory)
+
 	for _, msg := range m.conversationHistory {
-		if msg.Role != "user" && msg.Role != "assistant" {
-			continue
+		switch msg.Role {
+		case "user", "assistant":
+			content := strings.TrimSpace(msg.Content)
+			if content == "" {
+				continue
+			}
+			messages = append(messages, ChatMessage{Role: msg.Role, Content: content})
+		case "tool":
+			content := parseToolContentForTranscript(msg.Content)
+			if strings.TrimSpace(content) == "" {
+				continue
+			}
+			meta := toolMetaByCallID[strings.TrimSpace(msg.ToolCallID)]
+			toolName := strings.TrimSpace(msg.Name)
+			if toolName == "" {
+				toolName = strings.TrimSpace(meta.Name)
+			}
+			messages = append(messages, ChatMessage{
+				Role:        "tool",
+				ToolCallID:  msg.ToolCallID,
+				ToolName:    toolName,
+				ToolPath:    meta.Path,
+				ToolCommand: meta.Command,
+				ToolState:   "done",
+				Content:     content,
+			})
 		}
-		content := strings.TrimSpace(msg.Content)
-		if content == "" {
-			continue
-		}
-		messages = append(messages, ChatMessage{Role: msg.Role, Content: content})
 	}
 	m.chatMessages = messages
 	m.activeAssistantIdx = -1

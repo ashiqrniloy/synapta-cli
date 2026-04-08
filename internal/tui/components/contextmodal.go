@@ -32,49 +32,68 @@ func (m *CodeAgentModel) buildContextEntries() []ContextEntry {
 	if err != nil {
 		return nil
 	}
-	historyIdx := make([]int, 0)
+
+	filteredHistoryRawIdx := make([]int, 0, len(m.conversationHistory))
+	filteredHistoryMsgs := make([]llm.Message, 0, len(m.conversationHistory))
 	for i, msg := range m.conversationHistory {
-		if (msg.Role == "user" || msg.Role == "assistant") && strings.TrimSpace(msg.Content) != "" {
-			historyIdx = append(historyIdx, i)
+		if !isContextRoleLocal(msg.Role) || !hasContextPayloadLocal(msg) {
+			continue
 		}
+		filteredHistoryRawIdx = append(filteredHistoryRawIdx, i)
+		filteredHistoryMsgs = append(filteredHistoryMsgs, msg)
 	}
+
 	timestamps := []time.Time{}
 	if m.sessionStore != nil {
 		timestamps = m.sessionStore.ContextMessageTimestamps()
 	}
+	toolMetaByCallID := buildToolInvocationMetaByCallID(m.conversationHistory)
+
 	entries := make([]ContextEntry, 0, len(msgs))
-	hPos := 0
 	order := 0
+	hPos := 0
 	for i, msg := range msgs {
 		category := categorizeContextMessage(msg)
-		if strings.TrimSpace(msg.Content) == "" && msg.Role != "system" {
+		content := strings.TrimSpace(msg.Content)
+		if content == "" && msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			content = assistantToolCallsContent(msg.ToolCalls)
+		}
+		if content == "" && msg.Role == "tool" {
+			content = "(no output)"
+		}
+		if content == "" && msg.Role != "system" {
 			continue
 		}
+
 		entry := ContextEntry{
 			Order:           order + 1,
 			ContextIndex:    i,
 			Role:            msg.Role,
-			Content:         strings.TrimSpace(msg.Content),
+			Content:         content,
 			HistoryIndex:    -1,
 			RawHistoryIndex: -1,
 			Category:        category,
 			Timestamp:       time.Time{},
-			EstimatedTokens: estimateTextTokens(strings.TrimSpace(msg.Content)),
+			EstimatedTokens: estimateTextTokens(content),
 		}
-		if msg.Role == "system" && category == "system-prompt" {
-			entry.Editable = true
-			entry.Removable = false
-		} else if msg.Role != "system" && hPos < len(historyIdx) {
+
+		isHistoryMessage := hPos < len(filteredHistoryMsgs) && contextMessageEquals(msg, filteredHistoryMsgs[hPos])
+		if isHistoryMessage {
 			entry.HistoryIndex = hPos
-			entry.RawHistoryIndex = historyIdx[hPos]
-			entry.Editable = true
-			entry.Removable = true
+			entry.RawHistoryIndex = filteredHistoryRawIdx[hPos]
+			entry.Editable = msg.Role != "system"
+			entry.Removable = msg.Role != "system"
 			if hPos < len(timestamps) {
 				entry.Timestamp = timestamps[hPos]
 			}
 			hPos++
 		}
-		entry.Label = contextEntryLabel(msg, category, entry.Timestamp)
+		if msg.Role == "system" && category == "system-prompt" {
+			entry.Editable = true
+			entry.Removable = false
+		}
+
+		entry.Label = m.contextEntryLabel(msg, category, entry.Timestamp, toolMetaByCallID)
 		if entry.Category == "compacted-output" {
 			entry.Editable = false
 			entry.Removable = false
@@ -120,18 +139,22 @@ func categorizeContextMessage(msg llm.Message) string {
 	return "context"
 }
 
-func contextEntryLabel(msg llm.Message, category string, ts time.Time) string {
+func (m *CodeAgentModel) contextEntryLabel(msg llm.Message, category string, ts time.Time, toolMetaByCallID map[string]toolInvocationMeta) string {
 	content := strings.TrimSpace(msg.Content)
 	stamp := ""
 	if ts.IsZero() {
 		ts = time.Now()
 	}
 	stamp = ts.Local().Format("15:04:05")
+	toolMeta := toolMetaByCallID[strings.TrimSpace(msg.ToolCallID)]
 
 	switch category {
 	case "user-input":
 		return "User Input · " + stamp
 	case "llm-output":
+		if len(msg.ToolCalls) > 0 && strings.TrimSpace(msg.Content) == "" {
+			return "Assistant Tool Calls · " + stamp
+		}
 		return "LLM Output · " + stamp
 	case "compacted-output":
 		return "Compacted Summary"
@@ -141,22 +164,34 @@ func contextEntryLabel(msg llm.Message, category string, ts time.Time) string {
 		}
 		return "Skill"
 	case "files-read":
+		if p := strings.TrimSpace(toolMeta.Path); p != "" {
+			return "read · " + p
+		}
 		if p := extractAfterPrefixLine(content, "Path: "); p != "" {
 			return "read · " + p
 		}
 		return "read"
 	case "files-written":
+		if p := strings.TrimSpace(toolMeta.Path); p != "" {
+			return "write · " + p
+		}
 		if p := extractAfterPrefixLine(content, "Path: "); p != "" {
 			return "write · " + p
 		}
 		return "write"
 	case "tool-bash":
+		if cmd := strings.TrimSpace(toolMeta.Command); cmd != "" {
+			return "bash · " + cmd
+		}
 		if cmd := extractAfterPrefixLine(content, "Command: "); cmd != "" {
 			return "bash · " + cmd
 		}
 		return "bash"
 	case "tool-output":
 		tool := strings.TrimSpace(msg.Name)
+		if tool == "" {
+			tool = strings.TrimSpace(toolMeta.Name)
+		}
 		if tool == "" {
 			tool = "tool"
 		}
@@ -189,6 +224,63 @@ func extractBetween(text, start, end string) string {
 		return ""
 	}
 	return strings.TrimSpace(s[:j])
+}
+
+func assistantToolCallsContent(calls []llm.ToolCall) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(calls))
+	for _, tc := range calls {
+		name := strings.TrimSpace(tc.Function.Name)
+		if name == "" {
+			name = "tool"
+		}
+		args := strings.TrimSpace(tc.Function.Arguments)
+		if args == "" {
+			lines = append(lines, fmt.Sprintf("tool call: %s", name))
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("tool call: %s\nargs: %s", name, args))
+	}
+	return strings.Join(lines, "\n\n")
+}
+
+func hasContextPayloadLocal(msg llm.Message) bool {
+	hasContent := strings.TrimSpace(msg.Content) != ""
+	switch msg.Role {
+	case "assistant":
+		return hasContent || len(msg.ToolCalls) > 0
+	case "tool":
+		return hasContent || strings.TrimSpace(msg.ToolCallID) != "" || strings.TrimSpace(msg.Name) != ""
+	default:
+		return hasContent
+	}
+}
+
+func isContextRoleLocal(role string) bool {
+	switch role {
+	case "user", "assistant", "tool", "system":
+		return true
+	default:
+		return false
+	}
+}
+
+func contextMessageEquals(a, b llm.Message) bool {
+	if a.Role != b.Role || strings.TrimSpace(a.Content) != strings.TrimSpace(b.Content) || strings.TrimSpace(a.ToolCallID) != strings.TrimSpace(b.ToolCallID) || strings.TrimSpace(a.Name) != strings.TrimSpace(b.Name) {
+		return false
+	}
+	if len(a.ToolCalls) != len(b.ToolCalls) {
+		return false
+	}
+	for i := range a.ToolCalls {
+		at, bt := a.ToolCalls[i], b.ToolCalls[i]
+		if strings.TrimSpace(at.ID) != strings.TrimSpace(bt.ID) || strings.TrimSpace(at.Type) != strings.TrimSpace(bt.Type) || strings.TrimSpace(at.Function.Name) != strings.TrimSpace(bt.Function.Name) || strings.TrimSpace(at.Function.Arguments) != strings.TrimSpace(bt.Function.Arguments) {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *CodeAgentModel) applyContextEntryEdit(entry ContextEntry, content string) {

@@ -16,7 +16,7 @@ import (
 
 const (
 	// Default timeout for API requests - generous for streaming responses
-	defaultHTTPTimeout = 120 * time.Second
+	defaultHTTPTimeout = 300 * time.Second
 	// Timeout for reading response headers
 	headerTimeout = 30 * time.Second
 	// Buffer size for reading response bodies
@@ -27,18 +27,26 @@ const (
 // for LLM API requests. It uses a Transport with connection pooling
 // for better performance.
 var defaultHTTPClient *http.Client
+var streamingHTTPClient *http.Client
 
 func init() {
 	// Initialize the default HTTP client with timeouts
 	transport := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: headerTimeout,
 	}
 
 	defaultHTTPClient = &http.Client{
 		Transport: transport,
 		Timeout:   defaultHTTPTimeout,
+	}
+
+	// Streaming responses can remain open for long periods while tokens
+	// are emitted, so avoid client-level timeouts for SSE streams.
+	streamingHTTPClient = &http.Client{
+		Transport: transport,
 	}
 }
 
@@ -46,6 +54,11 @@ func init() {
 // It is configured with reasonable timeouts for API interactions.
 func HTTPClient() *http.Client {
 	return defaultHTTPClient
+}
+
+// HTTPStreamClient returns an HTTP client intended for SSE/streaming calls.
+func HTTPStreamClient() *http.Client {
+	return streamingHTTPClient
 }
 
 // ─── OpenAIProvider ──────────────────────────────────────────────────
@@ -159,7 +172,12 @@ func (p *OpenAIProvider) chatCompletions(ctx context.Context, req ChatRequest) (
 		httpReq.Header.Set("Accept", "text/event-stream")
 	}
 
-	resp, err := HTTPClient().Do(httpReq)
+	httpClient := HTTPClient()
+	if req.Stream {
+		httpClient = HTTPStreamClient()
+	}
+
+	resp, err := httpClient.Do(httpReq)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sending request: %w", err)
 	}
@@ -238,7 +256,7 @@ func (p *OpenAIProvider) chatStreamResponses(ctx context.Context, req ChatReques
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
 
-	resp, err := HTTPClient().Do(httpReq)
+	resp, err := HTTPStreamClient().Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("sending request: %w", err)
 	}

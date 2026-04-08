@@ -30,7 +30,7 @@ func (m *CodeAgentModel) handleCommandPickerKeyPress(msg tea.KeyPressMsg, keyStr
 		if commandID := m.commandShortcutCommandID(); commandID != "" {
 			if commandID == "set-model" || commandID == "resume-session" {
 				m.picker.BeginSubmenu(commandID, CommandDisplayName(commandID))
-				m.ta.SetValue(":")
+				m.setCommandInputValue(":")
 				m.recalculateLayout()
 				if commandID == "set-model" {
 					return true, m.loadModels()
@@ -55,15 +55,15 @@ func (m *CodeAgentModel) handleCommandPickerKeyPress(msg tea.KeyPressMsg, keyStr
 		if selected != nil && selected.ID == "resume-session" {
 			return true, m.loadSessions()
 		}
-		m.ta.SetValue(":")
+		m.setCommandInputValue(":")
 		return true, nil
 	}
-	if keyStr == "backspace" && len(m.ta.Value()) <= 1 {
+	if keyStr == "backspace" && len(m.commandInputValue()) <= 1 {
 		m.clearCommandMode()
 		return true, nil
 	}
 	var cmd tea.Cmd
-	m.ta, cmd = m.ta.Update(msg)
+	cmd = m.updateCommandInput(msg)
 	m.picker.Filter(m.getFilterText())
 	m.recalculateLayout()
 	return true, cmd

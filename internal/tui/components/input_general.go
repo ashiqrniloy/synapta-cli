@@ -6,9 +6,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/charmbracelet/x/ansi"
 	"github.com/ashiqrniloy/synapta-cli/internal/core"
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quitKey string) (bool, tea.Cmd) {
@@ -77,12 +77,16 @@ func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quit
 		return true, cmd
 	}
 	if keyStr == m.getCommandKey() {
-		m.enterCommandMode()
+		m.openCommandModal()
 		return true, nil
 	}
 	if keyStr == extensionsKey {
-		m.enterCommandMode()
-		m.ta.SetValue(":extension")
+		if m.commandModalOpen {
+			m.setCommandInputValue(":extension")
+		} else {
+			m.enterCommandMode()
+			m.ta.SetValue(":extension")
+		}
 		m.picker.Filter("extension")
 		m.recalculateLayout()
 		return true, nil
