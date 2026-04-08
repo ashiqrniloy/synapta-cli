@@ -28,14 +28,15 @@ const (
 )
 
 type ToolEvent struct {
-	Type      ToolEventType
-	CallID    string
-	ToolName  string
-	Output    string
-	IsError   bool
-	IsPartial bool
-	Path      string
-	Command   string
+	Type           ToolEventType
+	CallID         string
+	ToolName       string
+	Output         string
+	IsError        bool
+	IsPartial      bool
+	Path           string
+	Command        string
+	ContextContent string
 }
 
 // ChatService provides chat + tool-calling runtime behavior.
@@ -92,14 +93,11 @@ func (s *ChatService) SummarizeCompaction(ctx context.Context, providerID, model
 		return "", err
 	}
 
-	prompt := BuildCompactionSummarizationInput(messages, previousSummary)
+	requestMessages := BuildCompactionRequestMessages(messages, previousSummary)
 	resp, err := provider.Chat(ctx, llm.ChatRequest{
-		Model: modelID,
-		Messages: []llm.Message{
-			{Role: "system", Content: CompactionSummarizationSystemPrompt},
-			{Role: "user", Content: prompt},
-		},
-		Stream: false,
+		Model:    modelID,
+		Messages: requestMessages,
+		Stream:   false,
 	})
 	if err != nil {
 		return "", err
@@ -122,7 +120,7 @@ func (s *ChatService) Stream(
 	modelID string,
 	messages []llm.Message,
 	onDelta func(text string) error,
-	onAssistantToolCalls func(toolCalls []llm.ToolCall) error,
+	onAssistantToolCalls func(message llm.Message) error,
 	onToolEvent func(event ToolEvent) error,
 ) error {
 	provider, err := s.providerFor(providerID)
@@ -146,14 +144,14 @@ func (s *ChatService) Stream(
 			return nil
 		}
 
+		assistantMsg := llm.Message{Role: "assistant", Content: assistantText, ToolCalls: append([]llm.ToolCall(nil), toolCalls...)}
 		if onAssistantToolCalls != nil {
-			copied := append([]llm.ToolCall(nil), toolCalls...)
-			if err := onAssistantToolCalls(copied); err != nil {
+			if err := onAssistantToolCalls(assistantMsg); err != nil {
 				return err
 			}
 		}
 
-		messages = append(messages, llm.Message{Role: "assistant", Content: assistantText, ToolCalls: toolCalls})
+		messages = append(messages, assistantMsg)
 
 		for _, tc := range toolCalls {
 			callID := tc.ID
@@ -177,13 +175,14 @@ func (s *ChatService) Stream(
 			if onToolEvent != nil {
 				output := toolResultText(toolResult)
 				_ = onToolEvent(ToolEvent{
-					Type:     ToolEventEnd,
-					CallID:   callID,
-					ToolName: tc.Function.Name,
-					Output:   output,
-					IsError:  execErr != nil,
-					Path:     path,
-					Command:  command,
+					Type:           ToolEventEnd,
+					CallID:         callID,
+					ToolName:       tc.Function.Name,
+					Output:         output,
+					ContextContent: string(payload),
+					IsError:        execErr != nil,
+					Path:           path,
+					Command:        command,
 				})
 			}
 		}

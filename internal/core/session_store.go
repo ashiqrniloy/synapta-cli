@@ -667,11 +667,15 @@ func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWin
 	}
 
 	currentSlice := messages[start:]
-	if len(currentSlice) < 2 {
+	contextSlice := s.contextMessagesLocked()
+	if len(contextSlice) < 2 {
 		return false, "", nil
 	}
 
 	tokensBefore := estimateContextTokens(currentSlice)
+	if force {
+		tokensBefore = estimateContextTokens(contextSlice)
+	}
 	if previousSummary != "" {
 		tokensBefore += estimateTextTokens(compactionSummaryPrefix + previousSummary + compactionSummarySuffix)
 	}
@@ -697,6 +701,9 @@ func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWin
 	}
 
 	toSummarize := currentSlice[:keepRel]
+	if force {
+		toSummarize = contextSlice
+	}
 	method := compactionMethodModel
 	newSummary := ""
 	if summarizer != nil {
@@ -746,9 +753,11 @@ func isDynamicContextMessage(msg llm.Message) bool {
 	hasContent := strings.TrimSpace(msg.Content) != ""
 
 	switch msg.Role {
-	case "user":
-		return hasContent
 	case "assistant":
+		return hasContent || len(msg.ToolCalls) > 0
+	case "tool":
+		return hasContent || strings.TrimSpace(msg.ToolCallID) != "" || strings.TrimSpace(msg.Name) != ""
+	case "user", "system":
 		return hasContent
 	default:
 		return false

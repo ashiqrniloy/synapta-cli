@@ -250,7 +250,15 @@ func (m *CodeAgentModel) handleChatStreamChunk(msg chatStreamChunkMsg) (tea.Mode
 	return m, waitForStreamMsg(m.streamCh)
 }
 
-func (m *CodeAgentModel) handleAssistantToolCalls() (tea.Model, tea.Cmd) {
+func (m *CodeAgentModel) handleAssistantToolCalls(msg assistantToolCallsMsg) (tea.Model, tea.Cmd) {
+	assistantMsg := msg.Message
+	if len(assistantMsg.ToolCalls) > 0 {
+		assistantMsg.ToolCalls = append([]llm.ToolCall(nil), assistantMsg.ToolCalls...)
+	}
+	m.conversationHistory = append(m.conversationHistory, assistantMsg)
+	if m.sessionStore != nil {
+		_ = m.sessionStore.AppendMessage(assistantMsg)
+	}
 	return m, waitForStreamMsg(m.streamCh)
 }
 
@@ -289,6 +297,17 @@ func (m *CodeAgentModel) handleToolEvent(msg toolEventMsg) (tea.Model, tea.Cmd) 
 			} else {
 				m.chatMessages[idx].ToolState = "done"
 			}
+			toolContent := strings.TrimSpace(e.ContextContent)
+			if toolContent == "" {
+				toolContent = strings.TrimSpace(formatToolContextContent(e))
+			}
+			if toolContent != "" {
+				toolMsg := llm.Message{Role: "tool", ToolCallID: e.CallID, Name: e.ToolName, Content: toolContent}
+				m.conversationHistory = append(m.conversationHistory, toolMsg)
+				if m.sessionStore != nil {
+					_ = m.sessionStore.AppendMessage(toolMsg)
+				}
+			}
 			delete(m.activeToolIndices, e.CallID)
 		}
 	}
@@ -313,10 +332,19 @@ func (m *CodeAgentModel) handleChatStreamDone() (tea.Model, tea.Cmd) {
 	m.workingFrame = 0
 	assistantText := strings.TrimSpace(m.currentAssistantText.String())
 	if assistantText != "" {
-		assistantMsg := llm.Message{Role: "assistant", Content: assistantText}
-		m.conversationHistory = append(m.conversationHistory, assistantMsg)
-		if m.sessionStore != nil {
-			_ = m.sessionStore.AppendMessage(assistantMsg)
+		needAppend := true
+		if n := len(m.conversationHistory); n > 0 {
+			last := m.conversationHistory[n-1]
+			if last.Role == "assistant" && strings.TrimSpace(last.Content) == assistantText {
+				needAppend = false
+			}
+		}
+		if needAppend {
+			assistantMsg := llm.Message{Role: "assistant", Content: assistantText}
+			m.conversationHistory = append(m.conversationHistory, assistantMsg)
+			if m.sessionStore != nil {
+				_ = m.sessionStore.AppendMessage(assistantMsg)
+			}
 		}
 	}
 	m.currentAssistantText.Reset()

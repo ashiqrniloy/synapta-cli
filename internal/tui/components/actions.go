@@ -40,8 +40,12 @@ func (m *CodeAgentModel) startChatStream(history []llm.Message) tea.Cmd {
 				streamCh <- chatStreamChunkMsg{Text: text}
 				return nil
 			},
-			func(toolCalls []llm.ToolCall) error {
-				streamCh <- assistantToolCallsMsg{ToolCalls: append([]llm.ToolCall(nil), toolCalls...)}
+			func(message llm.Message) error {
+				copyMsg := message
+				if len(message.ToolCalls) > 0 {
+					copyMsg.ToolCalls = append([]llm.ToolCall(nil), message.ToolCalls...)
+				}
+				streamCh <- assistantToolCallsMsg{Message: copyMsg}
 				return nil
 			},
 			func(event core.ToolEvent) error {
@@ -226,7 +230,13 @@ func (m *CodeAgentModel) manualCompactCmd() tea.Cmd {
 			if m.chatService == nil || m.selectedProvider == "" || m.selectedModelID == "" {
 				return "", nil
 			}
-			return m.chatService.SummarizeCompaction(ctx, m.selectedProvider, m.selectedModelID, toSummarize, previousSummary)
+			messagesForSummary := toSummarize
+			if m.contextManager != nil {
+				if built, err := m.contextManager.Build(toSummarize); err == nil && len(built) > 0 {
+					messagesForSummary = built
+				}
+			}
+			return m.chatService.SummarizeCompaction(ctx, m.selectedProvider, m.selectedModelID, messagesForSummary, previousSummary)
 		}
 
 		compacted, method, err := m.sessionStore.ManualCompact(context.Background(), contextWindow, summarizer)

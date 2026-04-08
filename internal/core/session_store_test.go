@@ -8,7 +8,7 @@ import (
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
 
-func TestSessionStoreManualCompactionReplacesTailWithOnlySummary(t *testing.T) {
+func TestSessionStoreManualCompactionRetainsOnlySummaryAfterCompaction(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewSessionStore(dir, AgentCode, "/tmp/project", DefaultCompactionSettings())
 	if err != nil {
@@ -106,5 +106,99 @@ func TestSessionStoreMultipleManualCompactionsKeepAllSummaries(t *testing.T) {
 	}
 	if !strings.Contains(ctx[1].Content, "summary-2") {
 		t.Fatalf("second summary missing: %q", ctx[1].Content)
+	}
+}
+
+
+func TestSessionStoreToolAndSystemMessagesArePersistedInContext(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewSessionStore(dir, AgentCode, "/tmp/project", DefaultCompactionSettings())
+	if err != nil {
+		t.Fatalf("NewSessionStore() error = %v", err)
+	}
+
+	seed := []llm.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "u1"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "tool", Name: "read", ToolCallID: "t1", Content: `{"ok":true}`},
+	}
+	for _, msg := range seed {
+		if err := store.AppendMessage(msg); err != nil {
+			t.Fatalf("AppendMessage() error = %v", err)
+		}
+	}
+
+	ctx := store.ContextMessages()
+	if len(ctx) != len(seed) {
+		t.Fatalf("expected %d context messages, got %d", len(seed), len(ctx))
+	}
+	if ctx[0].Role != "system" || ctx[3].Role != "tool" {
+		t.Fatalf("expected system+tool roles to be preserved, got %#v", ctx)
+	}
+}
+
+func TestSessionStoreManualCompactionSummarizesEntireContextEachTime(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewSessionStore(dir, AgentCode, "/tmp/project", DefaultCompactionSettings())
+	if err != nil {
+		t.Fatalf("NewSessionStore() error = %v", err)
+	}
+
+	for _, msg := range []llm.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "u1"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "tool", Content: "tool-1"},
+	} {
+		if err := store.AppendMessage(msg); err != nil {
+			t.Fatalf("AppendMessage() error = %v", err)
+		}
+	}
+
+	calls := 0
+	summarizer := func(ctx context.Context, toSummarize []llm.Message, previousSummary string) (string, error) {
+		calls++
+		if calls == 1 {
+			if len(toSummarize) != 4 {
+				t.Fatalf("first compaction expected 4 msgs, got %d", len(toSummarize))
+			}
+			if previousSummary != "" {
+				t.Fatalf("expected empty previous summary on first compaction")
+			}
+			return "summary-1", nil
+		}
+		if len(toSummarize) != 3 {
+			t.Fatalf("second compaction expected current context (prior summary + new msgs), got %d", len(toSummarize))
+		}
+		if strings.TrimSpace(previousSummary) != "summary-1" {
+			t.Fatalf("expected previous summary to be summary-1, got %q", previousSummary)
+		}
+		return "summary-2", nil
+	}
+
+	compacted, _, err := store.ManualCompact(context.Background(), 128000, summarizer)
+	if err != nil || !compacted {
+		t.Fatalf("first ManualCompact() = (%v, %v)", compacted, err)
+	}
+
+	if err := store.AppendMessage(llm.Message{Role: "user", Content: "u2"}); err != nil {
+		t.Fatalf("AppendMessage() error = %v", err)
+	}
+	if err := store.AppendMessage(llm.Message{Role: "assistant", Content: "a2"}); err != nil {
+		t.Fatalf("AppendMessage() error = %v", err)
+	}
+
+	compacted, _, err = store.ManualCompact(context.Background(), 128000, summarizer)
+	if err != nil || !compacted {
+		t.Fatalf("second ManualCompact() = (%v, %v)", compacted, err)
+	}
+
+	ctx := store.ContextMessages()
+	if len(ctx) != 2 {
+		t.Fatalf("expected two compaction summaries in context, got %d messages", len(ctx))
+	}
+	if !strings.Contains(ctx[0].Content, "summary-1") || !strings.Contains(ctx[1].Content, "summary-2") {
+		t.Fatalf("expected both summaries in context, got %#v", ctx)
 	}
 }

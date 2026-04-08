@@ -113,7 +113,7 @@ type toolEventMsg struct {
 }
 
 type assistantToolCallsMsg struct {
-	ToolCalls []llm.ToolCall
+	Message llm.Message
 }
 
 type toolTickMsg struct{}
@@ -420,7 +420,7 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatStreamChunkMsg:
 		return m.handleChatStreamChunk(msg)
 	case assistantToolCallsMsg:
-		return m.handleAssistantToolCalls()
+		return m.handleAssistantToolCalls(msg)
 	case toolEventMsg:
 		return m.handleToolEvent(msg)
 	case toolTickMsg:

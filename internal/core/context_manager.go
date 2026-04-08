@@ -145,11 +145,10 @@ func (m *ContextManager) Build(history []llm.Message) ([]llm.Message, error) {
 		if !isContextRole(msg.Role) {
 			continue
 		}
-		hasContent := strings.TrimSpace(msg.Content) != ""
-		if !hasContent {
+		if !hasContextPayload(msg) {
 			continue
 		}
-		messages = append(messages, llm.Message{Role: msg.Role, Content: msg.Content})
+		messages = append(messages, msg)
 	}
 
 	m.mu.Lock()
@@ -165,9 +164,22 @@ func (m *ContextManager) Build(history []llm.Message) ([]llm.Message, error) {
 	return messages, nil
 }
 
+
+func hasContextPayload(msg llm.Message) bool {
+	hasContent := strings.TrimSpace(msg.Content) != ""
+	switch msg.Role {
+	case "assistant":
+		return hasContent || len(msg.ToolCalls) > 0
+	case "tool":
+		return hasContent || strings.TrimSpace(msg.ToolCallID) != "" || strings.TrimSpace(msg.Name) != ""
+	default:
+		return hasContent
+	}
+}
+
 func isContextRole(role string) bool {
 	switch role {
-	case "user", "assistant":
+	case "user", "assistant", "tool", "system":
 		return true
 	default:
 		return false

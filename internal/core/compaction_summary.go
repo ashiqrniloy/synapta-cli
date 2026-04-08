@@ -10,12 +10,14 @@ import (
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
 
-const CompactionSummarizationSystemPrompt = "You are a precise technical summarizer. Produce structured, concise summaries that preserve critical implementation details, exact file paths, function names, and errors."
-
 const (
 	CompactionPromptFileName = "compaction.md"
 
-	defaultCompactionPrompt = `The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
+	defaultCompactionPrompt = `You are performing manual context compaction for this session.
+
+The conversation above is the exact working context. Generate the next structured compaction checkpoint summary.
+
+If previous compaction summaries exist, continue from them as a checkpoint chain. Do not restart from scratch and do not contradict earlier checkpoints.
 
 Use this EXACT format:
 
@@ -103,38 +105,17 @@ func LoadCompactionPrompt(agentDir string) error {
 	return nil
 }
 
-func BuildCompactionSummarizationInput(messages []llm.Message, previousSummary string) string {
-	var b strings.Builder
-	b.WriteString("<conversation>\n")
-	b.WriteString(serializeConversation(messages))
-	b.WriteString("\n</conversation>\n\n")
-	b.WriteString("Summarize only the conversation above.\n")
-	if strings.TrimSpace(previousSummary) != "" {
-		b.WriteString("<previous-summary-read-only>\n")
-		b.WriteString(strings.TrimSpace(previousSummary))
-		b.WriteString("\n</previous-summary-read-only>\n\n")
-		b.WriteString("The summary above is read-only prior context. Do NOT rewrite or incorporate it into the new summary output.\n\n")
-	}
-	b.WriteString(CurrentCompactionPrompt())
-	return b.String()
-}
+// BuildCompactionRequestMessages appends a compaction instruction message to the end
+// of the already-built conversation context so compaction uses the same request shape
+// and prefix as normal task requests.
+func BuildCompactionRequestMessages(messages []llm.Message, previousSummary string) []llm.Message {
+	out := make([]llm.Message, 0, len(messages)+1)
+	out = append(out, messages...)
 
-func serializeConversation(messages []llm.Message) string {
-	var b strings.Builder
-	for _, m := range messages {
-		role := strings.ToUpper(strings.TrimSpace(m.Role))
-		if role == "" {
-			role = "MESSAGE"
-		}
-		content := strings.TrimSpace(m.Content)
-		if content == "" {
-			continue
-		}
-		b.WriteString("[")
-		b.WriteString(role)
-		b.WriteString("]\n")
-		b.WriteString(content)
-		b.WriteString("\n\n")
+	instruction := strings.TrimSpace(CurrentCompactionPrompt())
+	if strings.TrimSpace(previousSummary) != "" {
+		instruction += "\n\nPrevious compaction summary exists in this session. Continue from it as a strict continuation, adding only new or changed facts when possible."
 	}
-	return strings.TrimSpace(b.String())
+	out = append(out, llm.Message{Role: "system", Content: instruction})
+	return out
 }

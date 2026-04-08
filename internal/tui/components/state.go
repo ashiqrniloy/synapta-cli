@@ -340,7 +340,13 @@ func (m *CodeAgentModel) chatHistoryAsLLM() ([]llm.Message, error) {
 			if m.chatService == nil || m.selectedProvider == "" || m.selectedModelID == "" {
 				return "", nil
 			}
-			return m.chatService.SummarizeCompaction(ctx, m.selectedProvider, m.selectedModelID, toSummarize, previousSummary)
+			messagesForSummary := toSummarize
+			if m.contextManager != nil {
+				if built, err := m.contextManager.Build(toSummarize); err == nil && len(built) > 0 {
+					messagesForSummary = built
+				}
+			}
+			return m.chatService.SummarizeCompaction(ctx, m.selectedProvider, m.selectedModelID, messagesForSummary, previousSummary)
 		}
 		compacted, _, err := m.sessionStore.CompactIfNeeded(context.Background(), contextWindow, summarizer)
 		if err != nil {
