@@ -36,7 +36,7 @@ Use this EXACT format:
 - [ ] [Current work]
 
 ### Blocked
-- [Issues preventing progress, if any]
+[Issues preventing progress, if any]
 
 ## Key Decisions
 - **[Decision]**: [Brief rationale]
@@ -108,6 +108,9 @@ func LoadCompactionPrompt(agentDir string) error {
 // BuildCompactionRequestMessages appends a compaction instruction message to the end
 // of the already-built conversation context so compaction uses the same request shape
 // and prefix as normal task requests.
+//
+// The instruction is appended as a "user" role message because some providers (e.g., Google Vertex AI)
+// require that the conversation must end with a user message.
 func BuildCompactionRequestMessages(messages []llm.Message, previousSummary string) []llm.Message {
 	out := make([]llm.Message, 0, len(messages)+1)
 	out = append(out, messages...)
@@ -116,6 +119,8 @@ func BuildCompactionRequestMessages(messages []llm.Message, previousSummary stri
 	if strings.TrimSpace(previousSummary) != "" {
 		instruction += "\n\nPrevious compaction summary exists in this session. Continue from it as a strict continuation, adding only new or changed facts when possible."
 	}
-	out = append(out, llm.Message{Role: "system", Content: instruction})
+	// Use "user" role so the conversation ends with a user message.
+	// This is required by providers like Google Vertex AI that do not support assistant message prefill.
+	out = append(out, llm.Message{Role: "user", Content: instruction})
 	return out
 }
