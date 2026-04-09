@@ -23,7 +23,21 @@ func NewWriteTool(cwd string) *WriteTool {
 func (t *WriteTool) Name() string { return "write" }
 
 func (t *WriteTool) Description() string {
-	return "Edit files using overwrite/replace/replace_regex/line-edit/patch modes. Supports dry-run and match-count safety. Creates files/directories as needed; uses patch/cat for durable writes."
+	return `Edit files using one of these modes (mode field is required for edits):
+
+MODES:
+- overwrite (default): Replace the entire file with new content. Use for new files or full rewrites. Requires: path, content.
+- replace: Find and replace an exact literal string. Requires: path, find, content (the replacement text). Optional: expected_matches (safety check).
+- replace_regex: Find and replace using a RE2 regex. Requires: path, find (regex pattern), content (replacement). Optional: expected_matches.
+- line_edit: Replace a range of lines (1-indexed, inclusive). Requires: path, start_line, end_line, content (new lines to substitute in).
+- patch: Apply a unified diff. Requires: path, unified_diff.
+
+IMPORTANT: Never use bash with sed/awk/python to edit files. Always use this write tool for all file modifications.
+
+EXAMPLES:
+  Replace a function: {"path":"foo.go","mode":"replace","find":"func old()","content":"func new()"}
+  Edit lines 5-8:     {"path":"foo.go","mode":"line_edit","start_line":5,"end_line":8,"content":"new line 5\nnew line 6\n"}
+  New file:           {"path":"bar.go","mode":"overwrite","content":"package main\n"}`
 }
 
 type diffOpKind string
