@@ -355,6 +355,16 @@ func (m *CodeAgentModel) handleChatStreamDone() (tea.Model, tea.Cmd) {
 	m.streamChunkCount = 0
 	m.streamCharCount = 0
 	m.activeToolIndices = map[string]int{}
+
+	// Check for pending user messages to continue the task
+	if m.pendingUserMessage != "" {
+		pendingMsg := m.pendingUserMessage
+		m.pendingUserMessage = ""
+		m.appendSystemMessage("[Steer] Processing queued message...", "working")
+		// Continue with the pending message
+		return m, m.continueWithPendingMessage(pendingMsg)
+	}
+
 	if elapsed > 0 {
 		m.finalizeWorkingSystemMessage(fmt.Sprintf("✓ Done in %s", elapsed.Round(time.Millisecond)), "done")
 	} else {
@@ -497,4 +507,42 @@ func (m *CodeAgentModel) handleWorkingTick() (tea.Model, tea.Cmd) {
 		return m, workingTickCmd()
 	}
 	return m, nil
+}
+
+
+func (m *CodeAgentModel) handleAgentStopRequested() (tea.Model, tea.Cmd) {
+	// Set the stop flag so the stream will be stopped when appropriate
+	m.stopRequested = true
+	m.appendSystemMessage("[Agent] Stopping after current operation completes...", "working")
+	return m, nil
+}
+
+func (m *CodeAgentModel) continueWithPendingMessage(pendingMsg string) tea.Cmd {
+	// Add the pending message as a user message
+	m.appendChatMessage(ChatMessage{Role: "user", Content: pendingMsg})
+	m.conversationHistory = append(m.conversationHistory, llm.Message{Role: "user", Content: pendingMsg})
+	if m.sessionStore != nil {
+		_ = m.sessionStore.AppendMessage(llm.Message{Role: "user", Content: pendingMsg})
+	}
+
+	// Start a new stream with updated history
+	history, err := m.chatHistoryAsLLM()
+	if err != nil {
+		m.appendSystemMessage("✗ Failed to build context: "+err.Error(), "error")
+		return nil
+	}
+
+	m.activeAssistantIdx = -1
+	m.isWorking = true
+	m.chatAutoScroll = true
+	m.activeToolIndices = map[string]int{}
+	m.streamStartedAt = time.Now()
+	m.firstChunkAt = time.Time{}
+	m.streamChunkCount = 0
+	m.streamCharCount = 0
+	m.workingFrame = 0
+	m.setWorkingSystemMessage(m.chatWorkingStatusText())
+	m.refreshChatViewport()
+
+	return tea.Batch(m.startChatStream(history), workingTickCmd())
 }

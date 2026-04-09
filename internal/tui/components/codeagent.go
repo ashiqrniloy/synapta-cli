@@ -125,6 +125,10 @@ type chatStreamErrMsg struct {
 	Err error
 }
 
+type agentStopRequestedMsg struct{}
+
+type streamStopMsg struct{}
+
 type compactDoneMsg struct {
 	Compacted bool
 	History   []llm.Message
@@ -252,7 +256,12 @@ type CodeAgentModel struct {
 	likelyPromptCacheHit      bool
 	promptBuildCount          int
 	stablePrefixChangeCount   int
+        stopRequested        bool
+        pendingUserMessage  string
 	availableExtensions       []core.Extension
+
+	// For stopping agentic tasks
+	stopChan chan struct{}
 }
 
 // NewCodeAgentModel creates the model using the loaded AppConfig.
@@ -445,6 +454,8 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleBashCommandDone(msg)
 	case workingTickMsg:
 		return m.handleWorkingTick()
+	case agentStopRequestedMsg:
+		return m.handleAgentStopRequested()
 	case tea.MouseWheelMsg:
 		return m.handleMouseWheel(msg)
 	case tea.KeyPressMsg:

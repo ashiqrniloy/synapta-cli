@@ -30,6 +30,15 @@ func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quit
 		m.quit = true
 		return true, tea.Sequence(tea.Raw(ansi.ResetModeMouseButtonEvent+ansi.ResetModeMouseAnyEvent+ansi.ResetModeMouseExtSgr), tea.Quit)
 	}
+
+	// Handle stop key - only works when agentic task is running
+	stopKey := m.getStopKey()
+	if keyStr == stopKey && m.isWorking {
+		m.stopRequested = true
+		m.appendSystemMessage("[Agent] Stop requested. Finishing current operation...", "info")
+		return true, nil
+	}
+
 	if keyStr == "esc" && m.inputMode == inputModeBash && strings.TrimSpace(m.ta.Value()) == "" {
 		m.applyInputMode(inputModeChat)
 		m.appendSystemMessage("[Bash] Mode disabled", "info")
@@ -118,7 +127,22 @@ func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quit
 }
 
 func (m *CodeAgentModel) handleSubmitKeyPress() (bool, tea.Cmd) {
-	if m.isWorking || m.isExecutingBash {
+	// Check if there's a pending message to incorporate into current task
+	if m.isWorking {
+		text := strings.TrimSpace(m.ta.Value())
+		if text != "" && !strings.HasPrefix(text, ":") {
+			// Store the message to be incorporated after current task completes
+			if m.pendingUserMessage != "" {
+				m.pendingUserMessage += "\n"
+			}
+			m.pendingUserMessage += text
+			m.ta.SetValue("")
+			m.appendSystemMessage("[Steer] Message queued. Will be processed after current task completes.", "info")
+			return true, nil
+		}
+		return true, nil
+	}
+	if m.isExecutingBash {
 		return true, nil
 	}
 	text := strings.TrimSpace(m.ta.Value())

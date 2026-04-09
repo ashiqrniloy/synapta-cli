@@ -21,6 +21,7 @@ type Keybindings struct {
 	Newline    string `mapstructure:"newline"`
 	Submit     string `mapstructure:"submit"`
 	Quit       string `mapstructure:"quit"`
+	Stop       string `mapstructure:"stop"`
 	Command    string `mapstructure:"command"`
 	Context    string `mapstructure:"context"`
 	Help       string `mapstructure:"help"`
@@ -147,6 +148,7 @@ func defaultKeybindings() Keybindings {
 		Newline:    "shift+enter",
 		Submit:     "enter",
 		Quit:       "ctrl+c",
+                Stop:       "ctrl+q",
 		Command:    "ctrl+p",
 		Context:    "ctrl+k",
 		Help:       "ctrl+j",
@@ -228,6 +230,9 @@ func LoadConfig() (*AppConfig, error) {
 			cfg.Keybindings.Submit = v
 		}
 		if v, ok := kb["quit"]; ok && v != "" {
+                if v, ok := kb["stop"]; ok && v != "" {
+			cfg.Keybindings.Stop = v
+		}
 			cfg.Keybindings.Quit = v
 		}
 		if v, ok := kb["command"]; ok && v != "" {

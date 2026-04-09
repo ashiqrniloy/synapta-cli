@@ -28,33 +28,71 @@ func (m *CodeAgentModel) startChatStream(history []llm.Message) tea.Cmd {
 	modelID := m.selectedModelID
 	streamCh := make(chan tea.Msg, 256)
 	m.streamCh = streamCh
+	// Reset stop flag and channel when starting a new stream
+	m.stopRequested = false
+	m.stopChan = make(chan struct{})
+	stopCh := m.stopChan
 
 	go func() {
 		defer close(streamCh)
+		// Create a cancellable context
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Goroutine to watch for stop requests via channel
+		go func() {
+			select {
+			case <-stopCh:
+				cancel()
+			case <-ctx.Done():
+				// Context cancelled for another reason
+			}
+		}()
+
 		err := m.chatService.Stream(
-			context.Background(),
+			ctx,
 			providerID,
 			modelID,
 			history,
 			func(text string) error {
-				streamCh <- chatStreamChunkMsg{Text: text}
-				return nil
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					streamCh <- chatStreamChunkMsg{Text: text}
+					return nil
+				}
 			},
 			func(message llm.Message) error {
-				copyMsg := message
-				if len(message.ToolCalls) > 0 {
-					copyMsg.ToolCalls = append([]llm.ToolCall(nil), message.ToolCalls...)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					copyMsg := message
+					if len(message.ToolCalls) > 0 {
+						copyMsg.ToolCalls = append([]llm.ToolCall(nil), message.ToolCalls...)
+					}
+					streamCh <- assistantToolCallsMsg{Message: copyMsg}
+					return nil
 				}
-				streamCh <- assistantToolCallsMsg{Message: copyMsg}
-				return nil
 			},
 			func(event core.ToolEvent) error {
-				streamCh <- toolEventMsg{Event: event}
-				return nil
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					streamCh <- toolEventMsg{Event: event}
+					return nil
+				}
 			},
 		)
 		if err != nil {
-			streamCh <- chatStreamErrMsg{Err: err}
+			// Check if it's a context cancellation (our stop)
+			if ctx.Err() == context.Canceled {
+				streamCh <- chatStreamErrMsg{Err: fmt.Errorf("agent stopped by user")}
+			} else {
+				streamCh <- chatStreamErrMsg{Err: err}
+			}
 			return
 		}
 		streamCh <- chatStreamDoneMsg{}
