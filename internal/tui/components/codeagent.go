@@ -119,6 +119,11 @@ type assistantToolCallsMsg struct {
 type toolTickMsg struct{}
 type workingTickMsg struct{}
 
+// FileAddedMsg is sent when a file is selected from the file browser.
+type FileAddedMsg struct {
+	Path string
+}
+
 type chatStreamDoneMsg struct{}
 
 type chatStreamErrMsg struct {
@@ -191,6 +196,7 @@ type CodeAgentModel struct {
 	// Inline command / skill pickers
 	picker      *CommandPicker
 	skillPicker *SkillPicker
+	fileBrowser  *FileBrowser
 
 	availableSkills   []core.Skill
 	skillCatalogCache *core.SkillCatalogCache
@@ -297,6 +303,7 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		cfg:                   cfg,
 		picker:                NewCommandPicker(styles),
 		skillPicker:           NewSkillPicker(styles),
+		fileBrowser:           NewFileBrowser(styles),
 		skillCatalogCache:     skillCatalogCache,
 		authStorage:           authStorage,
 		chatService:           core.NewChatService(authStorage, toolset),
@@ -456,6 +463,8 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleWorkingTick()
 	case agentStopRequestedMsg:
 		return m.handleAgentStopRequested()
+	case FileAddedMsg:
+		return m.handleFileAdded(msg)
 	case tea.MouseWheelMsg:
 		return m.handleMouseWheel(msg)
 	case tea.KeyPressMsg:

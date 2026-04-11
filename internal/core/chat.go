@@ -49,6 +49,11 @@ func NewChatService(auth *llm.AuthStorage, toolset *tools.ToolSet) *ChatService 
 	return &ChatService{auth: auth, tools: toolset}
 }
 
+// Tools returns the underlying tool set for direct access.
+func (s *ChatService) Tools() *tools.ToolSet {
+	return s.tools
+}
+
 func (s *ChatService) AvailableModels(ctx context.Context) ([]*llm.Model, error) {
 	_ = ctx
 

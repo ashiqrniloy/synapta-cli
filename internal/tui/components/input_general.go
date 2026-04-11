@@ -104,6 +104,14 @@ func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quit
 		m.enterCommandMode()
 		return true, nil
 	}
+	// Activate file browser when "/" is typed at the start
+	if keyStr == "/" && m.inputMode == inputModeChat && m.fileBrowser != nil && m.ta.Value() == "" {
+		var cmd tea.Cmd
+		m.ta, cmd = m.ta.Update(msg)
+		m.fileBrowser.Activate(m.currentCwd)
+		m.recalculateLayout()
+		return true, cmd
+	}
 	if keyStr == "@" && m.inputMode == inputModeChat && m.skillPicker != nil && len(m.availableSkills) > 0 {
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)

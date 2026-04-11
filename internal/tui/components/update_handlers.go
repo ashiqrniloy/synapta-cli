@@ -1,6 +1,7 @@
 package components
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/ashiqrniloy/synapta-cli/internal/core"
+	"github.com/ashiqrniloy/synapta-cli/internal/core/tools"
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -515,6 +517,146 @@ func (m *CodeAgentModel) handleAgentStopRequested() (tea.Model, tea.Cmd) {
 	m.stopRequested = true
 	m.appendSystemMessage("[Agent] Stopping after current operation completes...", "working")
 	return m, nil
+}
+
+func (m *CodeAgentModel) handleFileAdded(msg FileAddedMsg) (tea.Model, tea.Cmd) {
+	// When a file is selected from the file browser, we directly read the file
+	// and inject the result as a tool call into the conversation history.
+	// This ensures the LLM sees the file content without relying on it to call the Read tool.
+	path := strings.TrimSpace(msg.Path)
+	if path == "" {
+		return m, nil
+	}
+
+	// Record context action
+	m.recordContextAction("File context added: " + path)
+
+	// Read the file using the core tool
+	fileContent, readErr := m.readFileForContext(path)
+	
+	if readErr != nil {
+		// If we can't read the file, just send a message asking the LLM to read it
+		readInstruction := fmt.Sprintf("Please use the Read tool to read the file: %s", path)
+		m.appendChatMessage(ChatMessage{Role: "user", Content: readInstruction})
+		m.conversationHistory = append(m.conversationHistory, llm.Message{Role: "user", Content: readInstruction})
+		if m.sessionStore != nil {
+			_ = m.sessionStore.AppendMessage(llm.Message{Role: "user", Content: readInstruction})
+		}
+		m.appendSystemMessage("[File Browser] Could not read file: "+readErr.Error(), "error")
+	} else {
+		// Inject the read tool call and result directly into the conversation.
+		// This simulates what would happen if the LLM had called the Read tool itself.
+		// The LLM sees the file content as a tool result - it can analyze it directly
+		// without needing to call the Read tool itself.
+		callID := fmt.Sprintf("file_browser_%d", time.Now().UnixNano())
+		
+		// Create assistant message with the tool call - this is visible in UI
+		assistantMsg := llm.Message{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{
+				{
+					ID:   callID,
+					Type: "function",
+					Function: llm.ToolFunctionCall{
+						Name:      "read",
+						Arguments: fmt.Sprintf(`{"path": "%s"}`, path),
+					},
+				},
+			},
+		}
+		m.conversationHistory = append(m.conversationHistory, assistantMsg)
+		if m.sessionStore != nil {
+			_ = m.sessionStore.AppendMessage(assistantMsg)
+		}
+
+		// Create tool result message with the file content - this is visible in UI
+		toolResultMsg := llm.Message{
+			Role:       "tool",
+			ToolCallID: callID,
+			Name:       "read",
+			Content:    fileContent,
+		}
+		m.conversationHistory = append(m.conversationHistory, toolResultMsg)
+		if m.sessionStore != nil {
+			_ = m.sessionStore.AppendMessage(toolResultMsg)
+		}
+
+		// Add to chat transcript as a tool event (visible in UI)
+		toolMsg := ChatMessage{
+			Role:        "tool",
+			ToolCallID:  callID,
+			ToolName:    "read",
+			ToolPath:    path,
+			ToolState:   "done",
+			Content:     fileContent,
+			ToolStartedAt: time.Now(),
+			ToolEndedAt: time.Now(),
+		}
+		m.appendChatMessage(toolMsg)
+
+		// No user message needed - the tool result itself provides context.
+		// The LLM sees the file content and can respond appropriately.
+		
+		m.appendSystemMessage("[File Browser] ✓ File content loaded: "+path, "done")
+	}
+
+	// If model is selected, start the chat stream
+	if m.selectedProvider == "" || m.selectedModelID == "" {
+		m.appendSystemMessage("[File Browser] Select a model first via :set-model to process the file", "info")
+		return m, nil
+	}
+
+	// Start the chat stream
+	history, err := m.chatHistoryAsLLM()
+	if err != nil {
+		m.appendSystemMessage("✗ Failed to build context: "+err.Error(), "error")
+		return m, nil
+	}
+
+	m.activeAssistantIdx = -1
+	m.isWorking = true
+	m.chatAutoScroll = true
+	m.activeToolIndices = map[string]int{}
+	m.streamStartedAt = time.Now()
+	m.firstChunkAt = time.Time{}
+	m.streamChunkCount = 0
+	m.streamCharCount = 0
+	m.workingFrame = 0
+	m.setWorkingSystemMessage(m.chatWorkingStatusText())
+	m.refreshChatViewport()
+
+	return m, tea.Batch(m.startChatStream(history), workingTickCmd())
+}
+
+// readFileForContext reads a file and returns its content as a string.
+// It uses the same truncation logic as the core Read tool.
+func (m *CodeAgentModel) readFileForContext(path string) (string, error) {
+	// Get the Read tool from the toolset
+	if m.chatService == nil || m.chatService.Tools() == nil {
+		return "", fmt.Errorf("toolset not available")
+	}
+	
+	readTool := m.chatService.Tools().Read
+	if readTool == nil {
+		return "", fmt.Errorf("read tool not available")
+	}
+
+	// Execute the read tool
+	ctx := context.Background()
+	result, err := readTool.Execute(ctx, tools.ReadInput{Path: path})
+	if err != nil {
+		return "", err
+	}
+
+	// Convert result to text
+	var content strings.Builder
+	for _, part := range result.Content {
+		if part.Type == tools.ContentPartText {
+			content.WriteString(part.Text)
+		}
+	}
+	
+	return content.String(), nil
 }
 
 func (m *CodeAgentModel) continueWithPendingMessage(pendingMsg string) tea.Cmd {

@@ -33,6 +33,13 @@ func (m *CodeAgentModel) renderInputBox() string {
 			divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(innerWidth, 1)))
 			taView += "\n" + divider + "\n" + pickerView
 		}
+	} else if m.fileBrowser != nil && m.fileBrowser.IsActive() {
+		taView = lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(taView)
+		browserView := strings.TrimRight(m.fileBrowser.View(innerWidth), "\n")
+		if browserView != "" {
+			divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(innerWidth, 1)))
+			taView += "\n" + divider + "\n" + browserView
+		}
 	}
 	borderStyle := lipgloss.NewStyle().
 		Width(m.width).
