@@ -167,6 +167,7 @@ func defaultCommandShortcuts() map[string]string {
 	return map[string]string{
 		"q": "quit",
 		"b": "bash",
+		"f": "browse-files",
 		"h": "help",
 		"k": "context-manager",
 		"m": "set-model",

@@ -257,6 +257,12 @@ type CodeAgentModel struct {
 	keybindingsSelection      int
 	commandModalOpen          bool
 	commandModalInput         textarea.Model
+	fileBrowserModalOpen     bool
+	fileBrowserModalCursor   int
+	fileBrowserModalSearch   string
+	fileBrowserModalEntries []FileEntry
+	fileBrowserModalOffset  int  // For preview scrolling
+	fileBrowserModalPath    string // Current directory being browsed
 	lastPromptHash            string
 	lastPromptFingerprint     core.PromptFingerprint
 	likelyPromptCacheHit      bool
@@ -510,6 +516,9 @@ func (m *CodeAgentModel) View() tea.View {
 	}
 	if m.keybindingsModalOpen {
 		base = m.renderKeybindingsModal()
+	}
+	if m.fileBrowserModalOpen {
+		base = m.renderFileBrowserModal()
 	}
 	if m.commandModalOpen {
 		base = m.renderCommandModal(base)

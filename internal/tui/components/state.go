@@ -130,6 +130,7 @@ func (m *CodeAgentModel) commandShortcutRows() []keybindingRow {
 	actionLabel := map[string]string{
 		"quit":            "Quit",
 		"bash":            "Bash",
+		"browse-files":    "Browse Files",
 		"help":            "Help",
 		"context-manager": "Context Manager",
 		"set-model":       "Set Model",
@@ -140,6 +141,7 @@ func (m *CodeAgentModel) commandShortcutRows() []keybindingRow {
 	actionDesc := map[string]string{
 		"quit":            "Exit Synapta Code",
 		"bash":            "Switch to bash mode",
+		"browse-files":    "Browse and add files to context",
 		"help":            "Open keybindings modal",
 		"context-manager": "Open context modal",
 		"set-model":       "Choose model",

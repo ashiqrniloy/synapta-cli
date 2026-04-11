@@ -317,6 +317,9 @@ func (m *CodeAgentModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 	if handled, cmd := m.handleContextModalKeyPress(msg, keyStr); handled {
 		return m, cmd
 	}
+	if handled, cmd := m.handleFileBrowserModalKeyPress(msg, keyStr); handled {
+		return m, cmd
+	}
 	if handled, cmd := m.handleCommandPickerKeyPress(msg, keyStr, quitKey); handled {
 		return m, cmd
 	}
