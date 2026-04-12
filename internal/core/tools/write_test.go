@@ -444,3 +444,85 @@ func TestPatchModeEmptyDiffError(t *testing.T) {
 		t.Fatal("expected error for empty unified_diff, got nil")
 	}
 }
+func TestWriteHelpfulErrorMessagesByMode(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+
+	// replace: missing file
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path: "missing-replace.txt",
+		Mode: WriteModeReplace,
+		Find: "x",
+		Content: "y",
+	})
+	if err == nil || !strings.Contains(err.Error(), "replace mode requires an existing file") {
+		t.Fatalf("expected replace helpful error, got: %v", err)
+	}
+
+	// replace_regex: missing file
+	_, err = tool.Execute(context.Background(), WriteInput{
+		Path: "missing-rx.txt",
+		Mode: WriteModeReplaceRegex,
+		Find: "x+",
+		Content: "y",
+	})
+	if err == nil || !strings.Contains(err.Error(), "replace_regex mode requires an existing file") {
+		t.Fatalf("expected replace_regex helpful error, got: %v", err)
+	}
+
+	// line_edit: missing start/end
+	mustWrite(t, tool, WriteInput{Path: "line.txt", Content: "a\nb\n", Mode: WriteModeOverwrite})
+	_, err = tool.Execute(context.Background(), WriteInput{
+		Path:    "line.txt",
+		Mode:    WriteModeLineEdit,
+		Content: "x",
+	})
+	if err == nil || !strings.Contains(err.Error(), "line_edit mode requires start_line and end_line") {
+		t.Fatalf("expected line_edit helpful error, got: %v", err)
+	}
+
+	// patch: missing unified_diff
+	_, err = tool.Execute(context.Background(), WriteInput{
+		Path: "line.txt",
+		Mode: WriteModePatch,
+	})
+	if err == nil || !strings.Contains(err.Error(), "patch mode requires `unified_diff`") {
+		t.Fatalf("expected patch helpful error, got: %v", err)
+	}
+
+	// unsupported mode
+	_, err = tool.Execute(context.Background(), WriteInput{
+		Path: "line.txt",
+		Mode: WriteMode("wat"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "Supported modes") {
+		t.Fatalf("expected unsupported-mode helpful error, got: %v", err)
+	}
+}
+
+func TestPatchModeBeginPatchWrapperError(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "bp.txt", Content: "a\nb\n", Mode: WriteModeOverwrite})
+
+	beginPatch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: bp.txt",
+		"@@",
+		"-a",
+		"+A",
+		"*** End Patch",
+	}, "\n")
+
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:        "bp.txt",
+		Mode:        WriteModePatch,
+		UnifiedDiff: beginPatch,
+	})
+	if err == nil {
+		t.Fatal("expected error for Begin/End Patch wrapper, got nil")
+	}
+	if !strings.Contains(err.Error(), "Begin/End Patch wrapper format") {
+		t.Fatalf("expected Begin/End Patch guidance, got: %v", err)
+	}
+}

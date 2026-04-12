@@ -48,60 +48,9 @@ The codebase is a well-structured agentic coding assistant with a Bubbletea TUI,
 
 Addressing all items removes ~650+ lines of dead/duplicate code, eliminates redundant network calls on every chat interaction, and makes the codebase significantly easier to maintain and extend.
 
----
-
-## P0 — Critical: Architecture & Maintainability
-
-### 1. Decompose `codeagent.go` (3,405-line God Object)
-
-**Location:** `internal/tui/components/codeagent.go`
-
-**Problem:**
-A single file contains **all** TUI logic: state management, rendering, auth flows, command dispatch, bash execution, streaming, context modals, keybindings modals, markdown rendering, tool rendering, model selection, session management, layout calculation, and skill picking. This is the single biggest maintenance risk in the codebase. Any change requires reading and understanding 3,400+ lines of context.
-
-**What To Do:**
-
-Extract into the following files within `internal/tui/components/`:
-
-| New File | Contents | Approx Lines |
-|---|---|---|
-| `renderers.go` | All `render*` methods: `renderHeaderBar`, `renderInputBox`, `renderModelFooter`, `renderContextPane`, `renderContextModal`, `renderKeybindingsModal`, `renderUserMessage`, `renderAssistantMessage`, `renderSystemMessage`, `renderToolMessage`, `renderChatTranscript`, `renderContextPreviewLine`, `renderContextDiagnostics`, `renderMarkdownPreview`, `renderInlineCode`, `styleToolBody`, `renderContextBadge` | ~600 |
-| `actions.go` | All `tea.Cmd`-returning methods: `startChatStream`, `startKiloAuth`, `startCopilotAuth`, `executeBashCommand`, `loadModels`, `loadSessions`, `newSessionCmd`, `resumeSessionCmd`, `manualCompactCmd`, `fetchProviderBalanceCmd` | ~400 |
-| `contextmodal.go` | All `contextModal*` methods, `buildContextEntries`, `categorizeContextMessage`, `contextEntryLabel`, `applyContextEntryEdit`, `removeContextEntry` | ~300 |
-| `textutil.go` | `wordWrap`, `wrapMultiline`, `truncateLine`, `limitLines`, `countLines`, `looksLikeMarkdown` | ~100 |
-| `modelutil.go` | `inferThinkingLevel`, `thinkingLevelsForModel`, `nextThinkingLevel`, `resolveModelContextWindow`, `copilotModelTier`, `modelProviderRank`, `formatTokenCount`, `thinkingInstruction`, `parseModelSelectionKey` | ~80 |
-
-All extracted files remain in the same package (`components`), so methods on `CodeAgentModel` work without any import changes. The remaining `codeagent.go` would contain only the struct definition, `Init()`, `Update()`, `View()`, and core state transitions (~1,900 lines — still large but manageable and further splittable later).
-
-**Why:**
-- Each file becomes <500 lines and individually testable.
-- Changes to rendering don't require reading command dispatch logic.
-- New contributors can understand the system in pieces.
-- Git diffs/merge conflicts are dramatically reduced.
-
-**Effort:** ~4 hours
 
 ---
 
-### 2. Cache Providers in `ChatService.providerFor()`
-
-**Location:** `internal/core/chat.go` — `providerFor()` method
-
-**Problem:**
-`providerFor()` creates a brand-new `KiloProvider` or `GitHubCopilotProvider` on **every single API call**. For Kilo, this calls `NewKiloProviderWithAuth()` which invokes `gateway.FetchModels(token)` — a **network request to fetch the full model list** from the Kilo API. This means every chat turn, every model listing, and every compaction summary triggers a full model-list HTTP fetch.
-
-**What To Do:**
-1. Add a `providers map[string]llm.Provider` field to `ChatService`.
-2. In `providerFor()`, check the cache first. Only create a new provider on cache miss.
-3. Invalidate the cache when credentials change (auth/logout events).
-4. For Kilo specifically, cache the fetched model list with a TTL (e.g., 5 minutes) inside `KiloGateway` itself to protect against repeated `FetchModels()` calls even if the provider is recreated.
-
-**Why:**
-- Eliminates redundant network calls on every chat interaction.
-- Reduces TTFB (time-to-first-byte) for chat responses by potentially hundreds of milliseconds per turn.
-- The model list changes infrequently; a 5-minute cache is perfectly safe.
-
-**Effort:** ~1 hour
 
 ---
 

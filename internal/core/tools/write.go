@@ -24,21 +24,37 @@ func (t *WriteTool) Description() string {
 	return `Edit files using one of these modes (mode field is required for edits):
 
 MODES:
-- overwrite (default): Replace the entire file with new content. Use for new files or full rewrites. Requires: path, content.
-- replace: Find and replace an exact literal string. Requires: path, find, content (the replacement text). Optional: expected_matches (safety check).
-- replace_regex: Find and replace using a RE2 regex. Requires: path, find (regex pattern), content (replacement). Optional: expected_matches.
-- line_edit: Replace a range of lines (1-indexed, inclusive). Requires: path, start_line, end_line, content (new lines to substitute in).
-- patch: Apply a unified diff. Requires: path, unified_diff.
+- overwrite (default): Replace the entire file with new content.
+  Requires: path, content.
+  Example: {"path":"internal/core/chat.go","mode":"overwrite","content":"package core\n"}
 
-IMPORTANT: Never use bash with sed/awk/python to edit files. Always use this write tool for all file modifications.
+- replace: Find and replace an exact literal string in an existing file.
+  Requires: path, find, content (replacement text).
+  Optional: expected_matches, max_replacements.
+  Example: {"path":"internal/core/chat.go","mode":"replace","find":"old line","content":"new line","expected_matches":1}
+
+- replace_regex: Find and replace using a RE2 regex in an existing file.
+  Requires: path, find (regex pattern), content (replacement text).
+  Optional: expected_matches, max_replacements.
+  Example: {"path":"internal/core/chat.go","mode":"replace_regex","find":"func\\s+old","content":"func new","max_replacements":1}
+
+- line_edit: Replace a line range in an existing file (1-indexed, inclusive).
+  Requires: path, start_line, end_line, content.
+  Example: {"path":"internal/core/chat.go","mode":"line_edit","start_line":42,"end_line":48,"content":"new line 42\nnew line 43\n"}
+
+- patch: Apply a standard unified diff to an existing file.
+  Requires: path, unified_diff.
+  unified_diff is mandatory for patch mode.
+  The patch must be a standard unified diff and include hunk headers like @@ -old,+new @@.
+  Example: {"path":"internal/core/chat.go","mode":"patch","unified_diff":"--- a/internal/core/chat.go\n+++ b/internal/core/chat.go\n@@ -42,7 +42,8 @@\n old line\n+new line\n"}
+
+IMPORTANT:
+- Never use bash with sed/awk/python to edit files. Always use this write tool for file modifications.
+- For patch mode, custom wrappers like "*** Begin Patch" / "*** End Patch" are not accepted unless converted to unified diff.
 
 PARAMETERS:
-- include_preview: When true, append a head-truncated preview of the resulting file. Default false — keeps responses compact.
-
-EXAMPLES:
-  Replace a function: {"path":"foo.go","mode":"replace","find":"func old()","content":"func new()"}
-  Edit lines 5-8:     {"path":"foo.go","mode":"line_edit","start_line":5,"end_line":8,"content":"new line 5\nnew line 6\n"}
-  New file:           {"path":"bar.go","mode":"overwrite","content":"package main\n"}`
+- include_preview: When true, append a head-truncated preview of the resulting file. Default false.
+- dry_run: Plan and diff without writing changes.`
 }
 
 // ── diff primitives ──────────────────────────────────────────────────────────
@@ -112,7 +128,7 @@ type WriteDetails struct {
 
 func (t *WriteTool) Execute(ctx context.Context, in WriteInput) (Result, error) {
 	if strings.TrimSpace(in.Path) == "" {
-		return Result{}, fmt.Errorf("path is required")
+		return Result{}, fmt.Errorf("path is required. Provide `path` (relative or absolute). Example: {\"path\":\"internal/core/chat.go\",\"mode\":\"overwrite\",\"content\":\"...\"}")
 	}
 
 	absPath := resolveToCwd(in.Path, t.cwd)
@@ -264,7 +280,7 @@ func buildWritePlan(in WriteInput, oldContent string, oldExists bool) (writePlan
 		plan.NewContent = in.Content
 	case WriteModeReplace:
 		if !oldExists {
-			return writePlan{}, fmt.Errorf("replace mode requires existing file")
+			return writePlan{}, fmt.Errorf("replace mode requires an existing file. The target path does not exist. Use mode=\"overwrite\" to create a new file, or provide an existing file for mode=\"replace\".")
 		}
 		newContent, count, err := applyStringReplace(oldContent, in.Find, in.Replace, in.ExpectedMatches, in.MaxReplacements)
 		if err != nil {
@@ -276,7 +292,7 @@ func buildWritePlan(in WriteInput, oldContent string, oldExists bool) (writePlan
 		plan.NewContent = newContent
 	case WriteModeReplaceRegex:
 		if !oldExists {
-			return writePlan{}, fmt.Errorf("replace_regex mode requires existing file")
+			return writePlan{}, fmt.Errorf("replace_regex mode requires an existing file. The target path does not exist. Use mode=\"overwrite\" to create a new file, or provide an existing file for mode=\"replace_regex\".")
 		}
 		newContent, count, err := applyRegexReplace(oldContent, in.Find, in.Replace, in.ExpectedMatches, in.MaxReplacements)
 		if err != nil {
@@ -288,13 +304,13 @@ func buildWritePlan(in WriteInput, oldContent string, oldExists bool) (writePlan
 		plan.NewContent = newContent
 	case WriteModeLineEdit:
 		if !oldExists {
-			return writePlan{}, fmt.Errorf("line_edit mode requires existing file")
+			return writePlan{}, fmt.Errorf("line_edit mode requires an existing file. The target path does not exist. Use mode=\"overwrite\" to create a new file, or provide an existing file for mode=\"line_edit\".")
 		}
 		if in.StartLine == nil || in.EndLine == nil {
-			return writePlan{}, fmt.Errorf("start_line and end_line are required for line_edit mode")
+			return writePlan{}, fmt.Errorf("line_edit mode requires start_line and end_line (1-indexed, inclusive). Example: {\"mode\":\"line_edit\",\"path\":\"file.txt\",\"start_line\":10,\"end_line\":12,\"content\":\"new text\"}")
 		}
 		if *in.StartLine < 1 || *in.EndLine < *in.StartLine {
-			return writePlan{}, fmt.Errorf("invalid line range: %d-%d", *in.StartLine, *in.EndLine)
+			return writePlan{}, fmt.Errorf("invalid line range for line_edit mode: %d-%d (requires start_line >= 1 and end_line >= start_line)", *in.StartLine, *in.EndLine)
 		}
 		newContent, err := applyLineEdit(oldContent, *in.StartLine, *in.EndLine, in.Content, preserveNL)
 		if err != nil {
@@ -305,7 +321,7 @@ func buildWritePlan(in WriteInput, oldContent string, oldExists bool) (writePlan
 		plan.NewContent = newContent
 	case WriteModePatch:
 		if strings.TrimSpace(in.UnifiedDiff) == "" {
-			return writePlan{}, fmt.Errorf("unified_diff is required for patch mode")
+			return writePlan{}, fmt.Errorf("patch mode requires `unified_diff`. Provide a standard unified diff with hunk headers like @@ -old,+new @@. Example: {\"mode\":\"patch\",\"path\":\"internal/core/chat.go\",\"unified_diff\":\"--- a/internal/core/chat.go\\n+++ b/internal/core/chat.go\\n@@ -42,7 +42,8 @@\\n old line\\n+new line\\n\"}")
 		}
 		newContent, err := applyUnifiedPatchToContent(oldContent, in.UnifiedDiff)
 		if err != nil {
@@ -313,7 +329,7 @@ func buildWritePlan(in WriteInput, oldContent string, oldExists bool) (writePlan
 		}
 		plan.NewContent = newContent
 	default:
-		return writePlan{}, fmt.Errorf("unsupported write mode: %s", mode)
+		return writePlan{}, fmt.Errorf("unsupported write mode %q. Supported modes: overwrite, replace, replace_regex, line_edit, patch", mode)
 	}
 
 	return plan, nil
@@ -350,18 +366,18 @@ func writeFileDirect(absPath string, content []byte) error {
 
 func applyStringReplace(oldContent, find, replace string, expectedMatches, maxReplacements *int) (string, int, error) {
 	if find == "" {
-		return "", 0, fmt.Errorf("find is required for replace mode")
+		return "", 0, fmt.Errorf("replace mode requires `find` (literal text to match). Provide non-empty find and content. Example: {\"mode\":\"replace\",\"path\":\"file.txt\",\"find\":\"old\",\"content\":\"new\"}")
 	}
 	count := strings.Count(oldContent, find)
 	if expectedMatches != nil && count != *expectedMatches {
-		return "", 0, fmt.Errorf("replace expected %d matches, found %d", *expectedMatches, count)
+		return "", 0, fmt.Errorf("replace mode expected %d matches for %q, found %d. Update expected_matches, adjust `find`, or inspect the file first.", *expectedMatches, find, count)
 	}
 	if expectedMatches == nil && count == 0 {
-		return "", 0, fmt.Errorf("replace found no matches")
+		return "", 0, fmt.Errorf("replace mode found no matches for %q. Use read to confirm exact text, or use replace_regex/line_edit for flexible edits.", find)
 	}
 	if maxReplacements != nil {
 		if *maxReplacements < 0 {
-			return "", 0, fmt.Errorf("max_replacements must be >= 0")
+			return "", 0, fmt.Errorf("max_replacements must be >= 0 (got %d)", *maxReplacements)
 		}
 		applied := count
 		if applied > *maxReplacements {
@@ -374,23 +390,23 @@ func applyStringReplace(oldContent, find, replace string, expectedMatches, maxRe
 
 func applyRegexReplace(oldContent, find, replace string, expectedMatches, maxReplacements *int) (string, int, error) {
 	if strings.TrimSpace(find) == "" {
-		return "", 0, fmt.Errorf("find is required for replace_regex mode")
+		return "", 0, fmt.Errorf("replace_regex mode requires `find` (RE2 pattern). Provide non-empty find and content. Example: {\"mode\":\"replace_regex\",\"path\":\"file.txt\",\"find\":\"foo(\\\\d+)\",\"content\":\"bar$1\"}")
 	}
 	re, err := regexp.Compile(find)
 	if err != nil {
-		return "", 0, fmt.Errorf("invalid regex pattern: %w", err)
+		return "", 0, fmt.Errorf("replace_regex mode received an invalid RE2 pattern %q: %w", find, err)
 	}
 	matches := re.FindAllStringSubmatchIndex(oldContent, -1)
 	count := len(matches)
 	if expectedMatches != nil && count != *expectedMatches {
-		return "", 0, fmt.Errorf("replace_regex expected %d matches, found %d", *expectedMatches, count)
+		return "", 0, fmt.Errorf("replace_regex mode expected %d matches for pattern %q, found %d. Update expected_matches or adjust `find`.", *expectedMatches, find, count)
 	}
 	if expectedMatches == nil && count == 0 {
-		return "", 0, fmt.Errorf("replace_regex found no matches")
+		return "", 0, fmt.Errorf("replace_regex mode found no matches for pattern %q. Use read to verify the target text and pattern.", find)
 	}
 	if maxReplacements != nil {
 		if *maxReplacements < 0 {
-			return "", 0, fmt.Errorf("max_replacements must be >= 0")
+			return "", 0, fmt.Errorf("max_replacements must be >= 0 (got %d)", *maxReplacements)
 		}
 		if *maxReplacements == 0 {
 			return oldContent, 0, nil
@@ -419,7 +435,7 @@ func applyLineEdit(oldContent string, startLine, endLine int, replacement string
 	endsWithNL := strings.HasSuffix(oldContent, "\n")
 	oldLines := splitContentLines(oldContent)
 	if endLine > len(oldLines) {
-		return "", fmt.Errorf("line range %d-%d is out of bounds (file has %d lines)", startLine, endLine, len(oldLines))
+		return "", fmt.Errorf("line_edit mode range %d-%d is out of bounds (file has %d lines). Use read with include_line_numbers=true to choose a valid range.", startLine, endLine, len(oldLines))
 	}
 	prefix := append([]string(nil), oldLines[:startLine-1]...)
 	suffix := append([]string(nil), oldLines[endLine:]...)
@@ -442,6 +458,9 @@ func applyLineEdit(oldContent string, startLine, endLine int, replacement string
 
 func applyUnifiedPatchToContent(oldContent, unifiedDiff string) (string, error) {
 	rawLines := strings.Split(strings.ReplaceAll(unifiedDiff, "\r\n", "\n"), "\n")
+	if strings.Contains(strings.TrimSpace(unifiedDiff), "*** Begin Patch") {
+		return "", fmt.Errorf("patch mode requires a standard unified diff in `unified_diff`; detected Begin/End Patch wrapper format. Convert to unified diff with file headers (---/+++) and hunk headers (@@ -old,+new @@), or use mode=\"replace\"/\"line_edit\".")
+	}
 	oldLines := splitContentLines(oldContent)
 
 	// Parse into hunks first so we can validate before mutating.
@@ -490,7 +509,11 @@ func applyUnifiedPatchToContent(oldContent, unifiedDiff string) (string, error) 
 	}
 
 	if len(hunks) == 0 {
-		return "", fmt.Errorf("unified_diff contains no hunks")
+		trimmed := strings.TrimSpace(unifiedDiff)
+		if strings.Contains(trimmed, "*** Begin Patch") {
+			return "", fmt.Errorf("patch mode requires a standard unified diff in `unified_diff`; detected Begin/End Patch wrapper format. Convert to unified diff with file headers (---/+++) and hunk headers (@@ -old,+new @@), or use mode=\"replace\"/\"line_edit\".")
+		}
+		return "", fmt.Errorf("patch mode could not find any hunks in `unified_diff`. Provide a standard unified diff with hunk headers like @@ -old,+new @@.")
 	}
 
 	// Apply hunks sequentially.
@@ -566,11 +589,11 @@ func applyUnifiedPatchToContent(oldContent, unifiedDiff string) (string, error) 
 
 func parseUnifiedHunkHeader(header string) (oldStart int, newStart int, err error) {
 	if !strings.HasPrefix(header, "@@") {
-		return 0, 0, fmt.Errorf("invalid hunk header: %s", header)
+		return 0, 0, fmt.Errorf("invalid hunk header: %q. Expected standard unified diff hunk header like @@ -oldStart,oldCount +newStart,newCount @@", header)
 	}
 	parts := strings.Split(header, " ")
 	if len(parts) < 3 {
-		return 0, 0, fmt.Errorf("invalid hunk header: %s", header)
+		return 0, 0, fmt.Errorf("invalid hunk header: %q. Expected format: @@ -oldStart,oldCount +newStart,newCount @@", header)
 	}
 	oldPart := strings.TrimPrefix(parts[1], "-")
 	newPart := strings.TrimPrefix(parts[2], "+")
