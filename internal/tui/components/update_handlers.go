@@ -534,10 +534,9 @@ func (m *CodeAgentModel) handleFileAdded(msg FileAddedMsg) (tea.Model, tea.Cmd) 
 
 	// Record context action
 	m.recordContextAction("File reference added: " + path)
-
-	// Insert the file path into the textarea
-	// Wrap in backticks to indicate it's a file reference
+	// Insert the file path into the textarea as an attachment token.
 	reference := " `" + path + "`"
+
 
 	// Get current value
 	currentValue := m.ta.Value()

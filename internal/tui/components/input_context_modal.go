@@ -36,25 +36,29 @@ func (m *CodeAgentModel) handleContextModalKeyPress(msg tea.KeyPressMsg, keyStr 
 	}
 
 	if keyStr == "up" {
+		if m.contextModalSelection > 0 {
+			m.contextModalSelection--
+			m.contextModalPreviewOffset = 0
+		}
+		return true, nil
+	}
+	if keyStr == "down" {
+		if m.contextModalSelection < len(m.contextModalEntries)-1 {
+			m.contextModalSelection++
+			m.contextModalPreviewOffset = 0
+		}
+		return true, nil
+	}
+	if keyStr == "k" {
 		if m.contextModalPreviewOffset > 0 {
 			m.contextModalPreviewOffset--
 		}
 		return true, nil
 	}
-	if keyStr == "down" {
+	if keyStr == "j" {
 		if m.contextModalPreviewOffset < m.contextModalMaxPreviewOffset() {
 			m.contextModalPreviewOffset++
 		}
-		return true, nil
-	}
-	if (keyStr == "left" || keyStr == "k") && m.contextModalSelection > 0 {
-		m.contextModalSelection--
-		m.contextModalPreviewOffset = 0
-		return true, nil
-	}
-	if (keyStr == "right" || keyStr == "j") && m.contextModalSelection < len(m.contextModalEntries)-1 {
-		m.contextModalSelection++
-		m.contextModalPreviewOffset = 0
 		return true, nil
 	}
 	if keyStr == "d" || keyStr == "backspace" {

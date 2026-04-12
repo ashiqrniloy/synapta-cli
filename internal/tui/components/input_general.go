@@ -1,6 +1,10 @@
 package components
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -10,6 +14,8 @@ import (
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 	"github.com/charmbracelet/x/ansi"
 )
+
+var attachmentTokenRE = regexp.MustCompile("`([^`\\n]+)`")
 
 func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quitKey string) (bool, tea.Cmd) {
 	contextKey := m.getContextKey()
@@ -185,6 +191,18 @@ func (m *CodeAgentModel) handleSubmitKeyPress() (bool, tea.Cmd) {
 		return true, nil
 	}
 
+	if m.inputMode == inputModeChat {
+		withAttachments, attachedPaths, err := m.expandAttachmentTokens(expandedText)
+		if err != nil {
+			m.appendSystemMessage("[Files] ✗ "+err.Error(), "error")
+			return true, nil
+		}
+		expandedText = withAttachments
+		if len(attachedPaths) > 0 {
+			m.recordContextAction("File attachments added: " + strings.Join(attachedPaths, ", "))
+		}
+	}
+
 	m.appendChatMessage(ChatMessage{Role: "user", Content: text})
 	if len(usedSkills) > 0 {
 		names := make([]string, 0, len(usedSkills))
@@ -221,4 +239,65 @@ func (m *CodeAgentModel) handleSubmitKeyPress() (bool, tea.Cmd) {
 
 	cmd := m.startChatStream(history)
 	return true, tea.Batch(cmd, workingTickCmd())
+}
+
+func (m *CodeAgentModel) resolveAttachmentPath(raw string) (string, bool) {
+	candidate := strings.TrimSpace(raw)
+	if candidate == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(m.currentCwd, candidate)
+	}
+	candidate = filepath.Clean(candidate)
+	info, err := os.Stat(candidate)
+	if err != nil || info.IsDir() {
+		return "", false
+	}
+	return candidate, true
+}
+
+func (m *CodeAgentModel) extractAttachmentTokenPaths(text string) []string {
+	matches := attachmentTokenRE.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	paths := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		if path, ok := m.resolveAttachmentPath(match[1]); ok {
+			if _, exists := seen[path]; exists {
+				continue
+			}
+			seen[path] = struct{}{}
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
+func (m *CodeAgentModel) expandAttachmentTokens(text string) (string, []string, error) {
+	paths := m.extractAttachmentTokenPaths(text)
+	if len(paths) == 0 {
+		return text, nil, nil
+	}
+
+	var b strings.Builder
+	b.WriteString(text)
+	for _, path := range paths {
+		content, err := m.readFileForContext(path)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to attach %s: %w", path, err)
+		}
+		b.WriteString("\n\n<attached_file path=\"")
+		b.WriteString(path)
+		b.WriteString("\">\n")
+		b.WriteString(content)
+		b.WriteString("\n</attached_file>")
+	}
+
+	return b.String(), paths, nil
 }

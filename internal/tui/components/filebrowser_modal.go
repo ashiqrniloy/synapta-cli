@@ -353,11 +353,10 @@ func (m *CodeAgentModel) renderFileBrowserModal() string {
 			if m.fileBrowserModalOffset > maxOffset {
 				m.fileBrowserModalOffset = maxOffset
 			}
+			scrollInfo := fmt.Sprintf("j/k or wheel scroll (%d/%d)", m.fileBrowserModalOffset+1, maxOffset+1)
 
-			scrollInfo := fmt.Sprintf("↑↓ scroll (%d/%d)", m.fileBrowserModalOffset+1, maxOffset+1)
 			rightLines = append(rightLines, m.styles.MutedStyle.Render(scrollInfo))
 			rightLines = append(rightLines, "")
-
 			// Show visible lines
 			viewportH := innerH - 3
 			viewportEnd := min(m.fileBrowserModalOffset+viewportH, len(lines))
@@ -392,8 +391,7 @@ func (m *CodeAgentModel) renderFileBrowserModal() string {
 		Bold(true).
 		Foreground(m.styles.CommandHighlightStyle.GetForeground()).
 		Render("Browse Files")
-
-	foot := "← back  •  → enter  •  ↑↓ navigate & scroll  •  Enter select  •  Esc close"
+	foot := "← back  •  → enter  •  ↑↓ navigate list  •  j/k or wheel scroll preview  •  Enter select  •  Esc close"
 	if m.fileBrowserModalSearch != "" {
 		foot += "  •  Backspace clear search"
 	}

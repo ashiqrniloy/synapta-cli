@@ -270,6 +270,18 @@ func (m *CodeAgentModel) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea
 	if m.picker.IsActive() {
 		return m, nil
 	}
+	if m.fileBrowserModalOpen {
+		if msg.Button == tea.MouseWheelUp {
+			if m.fileBrowserModalOffset > 0 {
+				m.fileBrowserModalOffset--
+			}
+			return m, nil
+		}
+		if msg.Button == tea.MouseWheelDown {
+			m.fileBrowserModalOffset++
+			return m, nil
+		}
+	}
 	if m.contextModalOpen && !m.contextModalEditMode {
 		if msg.Button == tea.MouseWheelUp {
 			if m.contextModalPreviewOffset > 0 {

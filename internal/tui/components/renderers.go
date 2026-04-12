@@ -410,7 +410,8 @@ func (m *CodeAgentModel) renderContextModal() string {
 			}
 			start := m.contextModalPreviewOffset
 			end := min(start+contentViewportH, len(contentLines))
-			previewLines = append(previewLines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(fmt.Sprintf("Scroll: ↑/↓  (%d/%d)", start+1, maxOffset+1)))
+			previewLines = append(previewLines, lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(fmt.Sprintf("Scroll: j/k or wheel  (%d/%d)", start+1, maxOffset+1)))
+
 			previewLines = append(previewLines, contentLines[start:end]...)
 		} else {
 			m.contextModalPreviewOffset = 0
@@ -430,14 +431,14 @@ func (m *CodeAgentModel) renderContextModal() string {
 			BorderForeground(m.styles.CommandHighlightStyle.GetForeground()).
 			Padding(0, 1).
 			Render(previewContent)
-
 		head := lipgloss.NewStyle().
 			Width(max(width-6, 20)).
 			Align(lipgloss.Center).
 			Bold(true).
 			Foreground(m.styles.CommandHighlightStyle.GetForeground()).
 			Render("Context Manager")
-		foot := "↑↓ scroll preview  •  ←/→ or k/j select entry  •  Enter/E edit  •  D remove  •  C compact  •  Esc close"
+		foot := "↑↓ select entry  •  j/k or wheel scroll preview  •  Enter/E edit  •  D remove  •  C compact  •  Esc close"
+
 		body = head + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, leftPane, " ", rightPane) + "\n\n" + foot
 	}
 	if m.contextModalEditorHint != "" {
