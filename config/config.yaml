@@ -20,6 +20,7 @@ keybindings:
   stop: "ctrl+q"          # Ctrl+Q stops the running agentic task
   command: "ctrl+p"       # Ctrl+P opens command palette
   context: "ctrl+k"       # Ctrl+K opens context manager modal
+  file_browser: "ctrl+f"  # Ctrl+F opens file browser modal
   help: "ctrl+j"          # Ctrl+J opens keybindings modal
   extensions: "ctrl+e"    # Ctrl+E opens extension launcher
   # Alternative submit options (uncomment if needed):

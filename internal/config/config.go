@@ -18,14 +18,15 @@ import (
 // Key format: modifier+key (e.g. shift+enter, ctrl+c, alt+q).
 // Supported modifiers: ctrl, alt, shift.
 type Keybindings struct {
-	Newline    string `mapstructure:"newline"`
-	Submit     string `mapstructure:"submit"`
-	Quit       string `mapstructure:"quit"`
-	Stop       string `mapstructure:"stop"`
-	Command    string `mapstructure:"command"`
-	Context    string `mapstructure:"context"`
-	Help       string `mapstructure:"help"`
-	Extensions string `mapstructure:"extensions"`
+	Newline     string `mapstructure:"newline"`
+	Submit      string `mapstructure:"submit"`
+	Quit        string `mapstructure:"quit"`
+	Stop        string `mapstructure:"stop"`
+	Command     string `mapstructure:"command"`
+	Context     string `mapstructure:"context"`
+	FileBrowser string `mapstructure:"file_browser"`
+	Help        string `mapstructure:"help"`
+	Extensions  string `mapstructure:"extensions"`
 }
 
 // Theme defines a complete colour palette for a named theme.
@@ -142,17 +143,17 @@ func (c *AppConfig) ActiveTheme() Theme {
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────
-
 func defaultKeybindings() Keybindings {
 	return Keybindings{
-		Newline:    "shift+enter",
-		Submit:     "enter",
-		Quit:       "ctrl+c",
-                Stop:       "ctrl+q",
-		Command:    "ctrl+p",
-		Context:    "ctrl+k",
-		Help:       "ctrl+j",
-		Extensions: "ctrl+e",
+		Newline:     "shift+enter",
+		Submit:      "enter",
+		Quit:        "ctrl+c",
+		Stop:        "ctrl+q",
+		Command:     "ctrl+p",
+		Context:     "ctrl+k",
+		FileBrowser: "ctrl+f",
+		Help:        "ctrl+j",
+		Extensions:  "ctrl+e",
 	}
 }
 
@@ -221,7 +222,6 @@ func LoadConfig() (*AppConfig, error) {
 	}
 
 	cfg := DefaultConfig()
-
 	// Keybindings
 	if kb := v.GetStringMapString("keybindings"); len(kb) > 0 {
 		if v, ok := kb["newline"]; ok && v != "" {
@@ -231,16 +231,19 @@ func LoadConfig() (*AppConfig, error) {
 			cfg.Keybindings.Submit = v
 		}
 		if v, ok := kb["quit"]; ok && v != "" {
-                if v, ok := kb["stop"]; ok && v != "" {
-			cfg.Keybindings.Stop = v
-		}
 			cfg.Keybindings.Quit = v
+		}
+		if v, ok := kb["stop"]; ok && v != "" {
+			cfg.Keybindings.Stop = v
 		}
 		if v, ok := kb["command"]; ok && v != "" {
 			cfg.Keybindings.Command = v
 		}
 		if v, ok := kb["context"]; ok && v != "" {
 			cfg.Keybindings.Context = v
+		}
+		if v, ok := kb["file_browser"]; ok && v != "" {
+			cfg.Keybindings.FileBrowser = v
 		}
 		if v, ok := kb["help"]; ok && v != "" {
 			cfg.Keybindings.Help = v

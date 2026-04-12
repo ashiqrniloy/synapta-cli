@@ -44,6 +44,13 @@ func (m *CodeAgentModel) getContextKey() string {
 	return "ctrl+k"
 }
 
+func (m *CodeAgentModel) getFileBrowserKey() string {
+	if m.cfg != nil && m.cfg.Keybindings.FileBrowser != "" {
+		return normalizeKeyName(m.cfg.Keybindings.FileBrowser)
+	}
+	return "ctrl+f"
+}
+
 func (m *CodeAgentModel) getCommandKey() string {
 	if m.cfg != nil && m.cfg.Keybindings.Command != "" {
 		return normalizeKeyName(m.cfg.Keybindings.Command)

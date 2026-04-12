@@ -19,6 +19,7 @@ var attachmentTokenRE = regexp.MustCompile("`([^`\\n]+)`")
 
 func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quitKey string) (bool, tea.Cmd) {
 	contextKey := m.getContextKey()
+	fileBrowserKey := m.getFileBrowserKey()
 	helpKey := m.getHelpKey()
 	extensionsKey := m.extensionKeybinding()
 
@@ -30,6 +31,10 @@ func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quit
 	}
 	if keyStr == contextKey {
 		m.openContextModal()
+		return true, nil
+	}
+	if keyStr == fileBrowserKey {
+		m.openFileBrowserModal()
 		return true, nil
 	}
 	if keyStr == quitKey {

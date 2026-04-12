@@ -106,6 +106,7 @@ func (m *CodeAgentModel) keybindingRows() []keybindingRow {
 		{Action: "Submit", Binding: m.getSubmitKey(), Description: "Send message / run bash"},
 		{Action: "Newline", Binding: newline, Description: "Insert newline in input"},
 		{Action: "Command palette", Binding: m.getCommandKey(), Description: "Open command picker"},
+		{Action: "File browser", Binding: m.getFileBrowserKey(), Description: "Open file browser modal"},
 		{Action: "Extensions", Binding: m.extensionKeybinding(), Description: "Open extension launcher"},
 		{Action: "Context manager", Binding: m.getContextKey(), Description: "Open context modal"},
 		{Action: "Keybindings help", Binding: m.getHelpKey(), Description: "Open keybindings modal"},
