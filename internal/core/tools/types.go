@@ -63,6 +63,17 @@ type ReadInput struct {
 	Path   string `json:"path"`
 	Offset *int   `json:"offset,omitempty"` // 1-indexed
 	Limit  *int   `json:"limit,omitempty"`
+
+	// Annotate every output line with its 1-indexed line number.
+	// Eliminates the need for `nl` or similar bash commands.
+	IncludeLineNumbers *bool `json:"include_line_numbers,omitempty"`
+
+	// Locate mode: search for a literal string or RE2 regex inside the file.
+	// Returns matching line numbers and optional surrounding context.
+	// When set, offset/limit/include_line_numbers are ignored.
+	Pattern     string `json:"pattern,omitempty"`      // literal string or regex (when pattern_is_regex=true)
+	PatternIsRegex *bool `json:"pattern_is_regex,omitempty"` // default false → literal search
+	ContextLines *int   `json:"context_lines,omitempty"`    // lines of context before/after each match (default 0)
 }
 
 // WriteMode selects the edit strategy for write.
@@ -98,6 +109,10 @@ type WriteInput struct {
 	// behavior flags
 	DryRun                  *bool `json:"dry_run,omitempty"`
 	PreserveTrailingNewline *bool `json:"preserve_trailing_newline,omitempty"`
+
+	// When false (default) the response omits the full file preview, keeping
+	// the result compact. Set to true to include a head-truncated preview.
+	IncludePreview *bool `json:"include_preview,omitempty"`
 }
 
 // BashInput is the input for the bash tool.

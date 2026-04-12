@@ -359,9 +359,74 @@ func toolResultText(v any) string {
 
 func (s *ChatService) toolDefinitions() []llm.ToolDefinition {
 	return []llm.ToolDefinition{
-		{Type: "function", Function: llm.ToolFunctionDefinition{Name: "read", Description: s.tools.Read.Description(), Parameters: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string", "description": "Path to the file to read (relative or absolute)"}, "offset": map[string]any{"type": "number", "description": "Line number to start reading from (1-indexed)"}, "limit": map[string]any{"type": "number", "description": "Maximum number of lines to read"}}, "required": []string{"path"}}}},
-		{Type: "function", Function: llm.ToolFunctionDefinition{Name: "write", Description: s.tools.Write.Description(), Parameters: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string", "description": "Path to the file to edit (relative or absolute)"}, "mode": map[string]any{"type": "string", "enum": []string{"overwrite", "replace", "replace_regex", "line_edit", "patch"}, "description": "Edit mode. overwrite(default)=replace whole file via content; replace=literal find/replace; replace_regex=regex find/replace (RE2); line_edit=replace start_line..end_line with content; patch=apply unified_diff"}, "content": map[string]any{"type": "string", "description": "New file content (overwrite) or replacement text (replace/line_edit)"}, "find": map[string]any{"type": "string", "description": "Text to find (replace mode)"}, "replace": map[string]any{"type": "string", "description": "Replacement text (replace mode)"}, "expected_matches": map[string]any{"type": "number", "description": "Expected number of matches in replace/replace_regex mode; fail if mismatch"}, "max_replacements": map[string]any{"type": "number", "description": "Maximum replacements to apply in replace/replace_regex mode"}, "start_line": map[string]any{"type": "number", "description": "1-indexed start line (line_edit mode)"}, "end_line": map[string]any{"type": "number", "description": "1-indexed end line inclusive (line_edit mode)"}, "unified_diff": map[string]any{"type": "string", "description": "Unified diff patch text (patch mode)"}, "dry_run": map[string]any{"type": "boolean", "description": "Plan and diff without writing changes"}, "preserve_trailing_newline": map[string]any{"type": "boolean", "description": "Preserve original trailing newline in line_edit mode (default true)"}}, "required": []string{"path"}}}},
-		{Type: "function", Function: llm.ToolFunctionDefinition{Name: "bash", Description: s.tools.Bash.Description(), Parameters: map[string]any{"type": "object", "properties": map[string]any{"command": map[string]any{"type": "string", "description": "Bash command to execute"}, "timeout": map[string]any{"type": "number", "description": "Timeout in seconds (optional, no default timeout)"}}, "required": []string{"command"}}}},
+		{Type: "function", Function: llm.ToolFunctionDefinition{
+			Name:        "read",
+			Description: s.tools.Read.Description(),
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path":   map[string]any{"type": "string", "description": "Path to the file to read (relative or absolute)"},
+					"offset": map[string]any{"type": "number", "description": "Line number to start reading from (1-indexed)"},
+					"limit":  map[string]any{"type": "number", "description": "Maximum number of lines to read"},
+					"include_line_numbers": map[string]any{
+						"type":        "boolean",
+						"description": "Prefix each output line with its 1-indexed line number. Use this instead of running nl or cat -n in bash.",
+					},
+					"pattern": map[string]any{
+						"type":        "string",
+						"description": "Search for a literal string (or RE2 regex when pattern_is_regex=true) and return matching lines with line numbers and optional context. Use this instead of grep/nl in bash.",
+					},
+					"pattern_is_regex": map[string]any{
+						"type":        "boolean",
+						"description": "When true, treat pattern as a RE2 regex. Default false (literal string search).",
+					},
+					"context_lines": map[string]any{
+						"type":        "number",
+						"description": "Number of surrounding lines to include around each pattern match. Default 0.",
+					},
+				},
+				"required": []string{"path"},
+			},
+		}},
+		{Type: "function", Function: llm.ToolFunctionDefinition{
+			Name:        "write",
+			Description: s.tools.Write.Description(),
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path": map[string]any{"type": "string", "description": "Path to the file to edit (relative or absolute)"},
+					"mode": map[string]any{
+						"type":        "string",
+						"enum":        []string{"overwrite", "replace", "replace_regex", "line_edit", "patch"},
+						"description": "Edit mode. overwrite(default)=replace whole file via content; replace=literal find/replace; replace_regex=regex find/replace (RE2); line_edit=replace start_line..end_line with content; patch=apply unified_diff",
+					},
+					"content":          map[string]any{"type": "string", "description": "New file content (overwrite) or replacement text (replace/line_edit)"},
+					"find":             map[string]any{"type": "string", "description": "Text to find (replace mode)"},
+					"replace":          map[string]any{"type": "string", "description": "Replacement text (replace mode)"},
+					"expected_matches": map[string]any{"type": "number", "description": "Expected number of matches in replace/replace_regex mode; fail if mismatch"},
+					"max_replacements": map[string]any{"type": "number", "description": "Maximum replacements to apply in replace/replace_regex mode"},
+					"start_line":       map[string]any{"type": "number", "description": "1-indexed start line (line_edit mode)"},
+					"end_line":         map[string]any{"type": "number", "description": "1-indexed end line inclusive (line_edit mode)"},
+					"unified_diff":     map[string]any{"type": "string", "description": "Unified diff patch text (patch mode)"},
+					"dry_run":          map[string]any{"type": "boolean", "description": "Plan and diff without writing changes"},
+					"preserve_trailing_newline": map[string]any{"type": "boolean", "description": "Preserve original trailing newline in line_edit mode (default true)"},
+					"include_preview":  map[string]any{"type": "boolean", "description": "When true, append a head-truncated preview of the resulting file. Default false — keeps responses compact."},
+				},
+				"required": []string{"path"},
+			},
+		}},
+		{Type: "function", Function: llm.ToolFunctionDefinition{
+			Name:        "bash",
+			Description: s.tools.Bash.Description(),
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"command": map[string]any{"type": "string", "description": "Bash command to execute"},
+					"timeout": map[string]any{"type": "number", "description": "Timeout in seconds (optional, no default timeout)"},
+				},
+				"required": []string{"command"},
+			},
+		}},
 	}
 }
 

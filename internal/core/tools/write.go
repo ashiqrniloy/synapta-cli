@@ -1,12 +1,10 @@
 package tools
 
 import (
-	"bytes"
 	"context"
-	"errors"
+	"crypto/sha256"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -34,11 +32,16 @@ MODES:
 
 IMPORTANT: Never use bash with sed/awk/python to edit files. Always use this write tool for all file modifications.
 
+PARAMETERS:
+- include_preview: When true, append a head-truncated preview of the resulting file. Default false — keeps responses compact.
+
 EXAMPLES:
   Replace a function: {"path":"foo.go","mode":"replace","find":"func old()","content":"func new()"}
   Edit lines 5-8:     {"path":"foo.go","mode":"line_edit","start_line":5,"end_line":8,"content":"new line 5\nnew line 6\n"}
   New file:           {"path":"bar.go","mode":"overwrite","content":"package main\n"}`
 }
+
+// ── diff primitives ──────────────────────────────────────────────────────────
 
 type diffOpKind string
 
@@ -60,6 +63,8 @@ type lineRange struct {
 	End   int
 }
 
+// ── write plan ───────────────────────────────────────────────────────────────
+
 type writePlan struct {
 	Mode               WriteMode
 	OldExists          bool
@@ -74,20 +79,36 @@ type writePlan struct {
 	PreserveTrailingNL bool
 }
 
+// ── WriteDetails — structured metadata returned to the agent ─────────────────
+
 type WriteDetails struct {
-	Mode                    WriteMode   `json:"mode"`
-	DryRun                  bool        `json:"dryRun"`
-	Changed                 bool        `json:"changed"`
-	AppliedMatches          int         `json:"appliedMatches,omitempty"`
-	ExpectedMatches         *int        `json:"expectedMatches,omitempty"`
-	MaxReplacements         *int        `json:"maxReplacements,omitempty"`
-	StartLine               *int        `json:"startLine,omitempty"`
-	EndLine                 *int        `json:"endLine,omitempty"`
-	BytesBefore             int         `json:"bytesBefore"`
-	BytesAfter              int         `json:"bytesAfter"`
-	Truncation              *Truncation `json:"truncation,omitempty"`
-	PreserveTrailingNewline bool        `json:"preserveTrailingNewline,omitempty"`
+	// Edit facts
+	Mode           WriteMode `json:"mode"`
+	DryRun         bool      `json:"dry_run"`
+	Changed        bool      `json:"changed"`
+	Insertions     int       `json:"insertions"`
+	Deletions      int       `json:"deletions"`
+	ChangedRanges  []string  `json:"changed_ranges,omitempty"` // e.g. ["12-18","24"]
+	AppliedMatches int       `json:"applied_matches,omitempty"`
+
+	// File size facts
+	LineCountBefore int `json:"line_count_before"`
+	LineCountAfter  int `json:"line_count_after"`
+	BytesBefore     int `json:"bytes_before"`
+	BytesAfter      int `json:"bytes_after"`
+
+	// Compaction helpers
+	SHA256After string `json:"sha256_after,omitempty"`
+
+	// Optional detail fields (preserved for backward compat)
+	ExpectedMatches         *int   `json:"expected_matches,omitempty"`
+	MaxReplacements         *int   `json:"max_replacements,omitempty"`
+	StartLine               *int   `json:"start_line,omitempty"`
+	EndLine                 *int   `json:"end_line,omitempty"`
+	PreserveTrailingNewline bool   `json:"preserve_trailing_newline,omitempty"`
 }
+
+// ── Execute ──────────────────────────────────────────────────────────────────
 
 func (t *WriteTool) Execute(ctx context.Context, in WriteInput) (Result, error) {
 	if strings.TrimSpace(in.Path) == "" {
@@ -116,21 +137,10 @@ func (t *WriteTool) Execute(ctx context.Context, in WriteInput) (Result, error) 
 				return ctx.Err()
 			default:
 			}
-
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return fmt.Errorf("creating parent dirs: %w", err)
 			}
-
-			if plan.OldExists {
-				if err := applyExistingFileWithPatch(ctx, absPath, []byte(plan.OldContent), []byte(plan.NewContent)); err != nil {
-					return err
-				}
-			} else {
-				if err := writeNewFileWithCat(ctx, absPath, []byte(plan.NewContent)); err != nil {
-					return err
-				}
-			}
-			return nil
+			return writeFileDirect(absPath, []byte(plan.NewContent))
 		})
 		if err != nil {
 			return Result{}, err
@@ -138,37 +148,66 @@ func (t *WriteTool) Execute(ctx context.Context, in WriteInput) (Result, error) 
 	}
 
 	changed := plan.OldContent != plan.NewContent
+
+	// ── Diff ────────────────────────────────────────────────────────────────
+	oldLines := splitContentLines(plan.OldContent)
+	newLines := splitContentLines(plan.NewContent)
+	ops := myersDiff(oldLines, newLines)
+
+	insertions, deletions := 0, 0
+	for _, op := range ops {
+		switch op.Kind {
+		case diffAdd:
+			insertions++
+		case diffDel:
+			deletions++
+		}
+	}
+	_, newRanges := collectChangedRanges(ops)
+	changedRangeStrs := formatRangesSlice(newRanges)
+
+	// ── Hash ────────────────────────────────────────────────────────────────
+	hashAfter := fmt.Sprintf("%x", sha256.Sum256([]byte(plan.NewContent)))
+
+	// ── Compact text summary ─────────────────────────────────────────────────
 	verb := "wrote"
 	if plan.DryRun {
 		verb = "planned write"
 	}
-	message := fmt.Sprintf("Successfully %s %d bytes to %s (mode=%s)", verb, len(plan.NewContent), in.Path, string(plan.Mode))
-	if !changed {
-		message = fmt.Sprintf("No changes for %s (mode=%s)", in.Path, string(plan.Mode))
+	var sb strings.Builder
+	if changed {
+		sb.WriteString(fmt.Sprintf("Successfully %s %s (mode=%s, +%d -%d lines)", verb, in.Path, string(plan.Mode), insertions, deletions))
+	} else {
+		sb.WriteString(fmt.Sprintf("No changes for %s (mode=%s)", in.Path, string(plan.Mode)))
 	}
 	if plan.Mode == WriteModeReplace || plan.Mode == WriteModeReplaceRegex {
-		message += fmt.Sprintf("\nApplied matches: %d", plan.AppliedMatches)
-		if plan.ExpectedMatches != nil {
-			message += fmt.Sprintf(" (expected %d)", *plan.ExpectedMatches)
-		}
-		if plan.MaxReplacements != nil {
-			message += fmt.Sprintf(" (max_replacements=%d)", *plan.MaxReplacements)
-		}
+		sb.WriteString(fmt.Sprintf(", matches=%d", plan.AppliedMatches))
 	}
 	if plan.Mode == WriteModeLineEdit && plan.StartLine != nil && plan.EndLine != nil {
-		message += fmt.Sprintf("\nLine range: %d-%d", *plan.StartLine, *plan.EndLine)
+		sb.WriteString(fmt.Sprintf(", lines=%d-%d", *plan.StartLine, *plan.EndLine))
+	}
+	if changed && len(changedRangeStrs) > 0 {
+		sb.WriteString(fmt.Sprintf("\nChanged ranges (new): %s", strings.Join(changedRangeStrs, ", ")))
 	}
 
-	diffSummary := buildWriteDiffSummary(in.Path, plan.OldContent, plan.NewContent)
-	if diffSummary != "" {
-		message += "\n\n" + diffSummary
+	// ── Diff lines (compact, only shown when preview not requested) ──────────
+	const maxDiffLines = 80
+	diffText := buildCompactDiff(ops, maxDiffLines)
+	if diffText != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(diffText)
 	}
 
-	preview, trunc := truncateHead(plan.NewContent, 60, 8*1024)
-	if strings.TrimSpace(preview) != "" {
-		message += "\n\n--- file preview ---\n" + preview
-		if trunc.Truncated {
-			message += fmt.Sprintf("\n\n[Preview truncated to %d lines / %s]", trunc.OutputLines, formatSize(trunc.OutputBytes))
+	// ── Optional file preview ─────────────────────────────────────────────────
+	wantPreview := in.IncludePreview != nil && *in.IncludePreview
+	if wantPreview {
+		preview, trunc := truncateHead(plan.NewContent, 60, 8*1024)
+		if strings.TrimSpace(preview) != "" {
+			sb.WriteString("\n\n--- file preview ---\n")
+			sb.WriteString(preview)
+			if trunc.Truncated {
+				sb.WriteString(fmt.Sprintf("\n\n[Preview truncated to %d lines / %s]", trunc.OutputLines, formatSize(trunc.OutputBytes)))
+			}
 		}
 	}
 
@@ -176,27 +215,32 @@ func (t *WriteTool) Execute(ctx context.Context, in WriteInput) (Result, error) 
 		Mode:                    plan.Mode,
 		DryRun:                  plan.DryRun,
 		Changed:                 changed,
+		Insertions:              insertions,
+		Deletions:               deletions,
+		ChangedRanges:           changedRangeStrs,
 		AppliedMatches:          plan.AppliedMatches,
+		LineCountBefore:         len(oldLines),
+		LineCountAfter:          len(newLines),
+		BytesBefore:             len(plan.OldContent),
+		BytesAfter:              len(plan.NewContent),
+		SHA256After:             hashAfter,
 		ExpectedMatches:         plan.ExpectedMatches,
 		MaxReplacements:         plan.MaxReplacements,
 		StartLine:               plan.StartLine,
 		EndLine:                 plan.EndLine,
-		BytesBefore:             len(plan.OldContent),
-		BytesAfter:              len(plan.NewContent),
 		PreserveTrailingNewline: plan.PreserveTrailingNL,
-	}
-	if trunc.Truncated {
-		details.Truncation = &trunc
 	}
 
 	return Result{
 		Content: []ContentPart{{
 			Type: ContentPartText,
-			Text: message,
+			Text: sb.String(),
 		}},
 		Details: details,
 	}, nil
 }
+
+// ── buildWritePlan ───────────────────────────────────────────────────────────
 
 func buildWritePlan(in WriteInput, oldContent string, oldExists bool) (writePlan, error) {
 	mode := strings.TrimSpace(string(in.Mode))
@@ -275,6 +319,35 @@ func buildWritePlan(in WriteInput, oldContent string, oldExists bool) (writePlan
 	return plan, nil
 }
 
+// ── writeFileDirect — pure-Go atomic write (no external cat/patch) ───────────
+
+// writeFileDirect writes content to absPath via an adjacent temp file, then
+// renames into place. This is atomic on POSIX and removes the dependency on
+// external `cat` and `patch` binaries.
+func writeFileDirect(absPath string, content []byte) error {
+	dir := filepath.Dir(absPath)
+	tmp, err := os.CreateTemp(dir, ".synapta-write-*")
+	if err != nil {
+		return fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op if rename succeeded
+
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, absPath); err != nil {
+		return fmt.Errorf("renaming temp file to destination: %w", err)
+	}
+	return nil
+}
+
+// ── string replace helpers ────────────────────────────────────────────────────
+
 func applyStringReplace(oldContent, find, replace string, expectedMatches, maxReplacements *int) (string, int, error) {
 	if find == "" {
 		return "", 0, fmt.Errorf("find is required for replace mode")
@@ -340,6 +413,8 @@ func applyRegexReplace(oldContent, find, replace string, expectedMatches, maxRep
 	return re.ReplaceAllString(oldContent, replace), count, nil
 }
 
+// ── line edit ────────────────────────────────────────────────────────────────
+
 func applyLineEdit(oldContent string, startLine, endLine int, replacement string, preserveTrailingNL bool) (string, error) {
 	endsWithNL := strings.HasSuffix(oldContent, "\n")
 	oldLines := splitContentLines(oldContent)
@@ -358,16 +433,30 @@ func applyLineEdit(oldContent string, startLine, endLine int, replacement string
 	return result, nil
 }
 
-func applyUnifiedPatchToContent(oldContent, unifiedDiff string) (string, error) {
-	lines := strings.Split(strings.ReplaceAll(unifiedDiff, "\r\n", "\n"), "\n")
-	oldLines := splitContentLines(oldContent)
-	var out []string
-	oldPos := 0
-	i := 0
+// ── patch mode — hardened pure-Go applicator ─────────────────────────────────
+//
+// Applies a standard unified diff entirely in Go. No external `patch` binary.
+// Validates each hunk header and context line; returns a descriptive error on
+// any mismatch so the agent gets actionable feedback rather than a silent
+// wrong-content write.
 
-	for i < len(lines) {
-		line := lines[i]
-		if strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "diff ") || strings.HasPrefix(line, "index ") {
+func applyUnifiedPatchToContent(oldContent, unifiedDiff string) (string, error) {
+	rawLines := strings.Split(strings.ReplaceAll(unifiedDiff, "\r\n", "\n"), "\n")
+	oldLines := splitContentLines(oldContent)
+
+	// Parse into hunks first so we can validate before mutating.
+	type hunk struct {
+		oldStart int
+		lines    []string // raw hunk body lines (including leading ' ', '-', '+')
+	}
+	var hunks []hunk
+
+	i := 0
+	for i < len(rawLines) {
+		line := rawLines[i]
+		// Skip file headers and git metadata.
+		if strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ ") ||
+			strings.HasPrefix(line, "diff ") || strings.HasPrefix(line, "index ") {
 			i++
 			continue
 		}
@@ -375,59 +464,99 @@ func applyUnifiedPatchToContent(oldContent, unifiedDiff string) (string, error) 
 			i++
 			continue
 		}
-
 		oldStart, _, err := parseUnifiedHunkHeader(line)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("hunk %d: %w", len(hunks)+1, err)
 		}
-		target := oldStart - 1
-		if target < oldPos || target > len(oldLines) {
-			return "", fmt.Errorf("invalid hunk target line %d", oldStart)
-		}
-		out = append(out, oldLines[oldPos:target]...)
-		oldPos = target
 		i++
-
-		for i < len(lines) {
-			h := lines[i]
+		var body []string
+		for i < len(rawLines) {
+			h := rawLines[i]
 			if strings.HasPrefix(h, "@@") {
 				break
 			}
-			if len(h) == 0 {
+			if h == `\ No newline at end of file` {
 				i++
 				continue
 			}
-			if h == "\\ No newline at end of file" {
-				i++
+			body = append(body, h)
+			i++
+		}
+		// Strip trailing empty lines that git sometimes appends.
+		for len(body) > 0 && body[len(body)-1] == "" {
+			body = body[:len(body)-1]
+		}
+		hunks = append(hunks, hunk{oldStart: oldStart, lines: body})
+	}
+
+	if len(hunks) == 0 {
+		return "", fmt.Errorf("unified_diff contains no hunks")
+	}
+
+	// Apply hunks sequentially.
+	out := make([]string, 0, len(oldLines)+32)
+	oldPos := 0 // 0-indexed cursor into oldLines
+
+	for hIdx, h := range hunks {
+		target := h.oldStart - 1 // convert to 0-indexed
+		if target < oldPos {
+			return "", fmt.Errorf("hunk %d: overlapping or out-of-order (target line %d, current pos %d)", hIdx+1, h.oldStart, oldPos+1)
+		}
+		if target > len(oldLines) {
+			return "", fmt.Errorf("hunk %d: target line %d beyond end of file (%d lines)", hIdx+1, h.oldStart, len(oldLines))
+		}
+		// Copy unchanged lines before this hunk.
+		out = append(out, oldLines[oldPos:target]...)
+		oldPos = target
+
+		for _, hl := range h.lines {
+			if len(hl) == 0 {
+				// Treat bare empty line as context (some tools emit them).
+				if oldPos >= len(oldLines) {
+					return "", fmt.Errorf("hunk %d: context line at old pos %d beyond file", hIdx+1, oldPos+1)
+				}
+				out = append(out, oldLines[oldPos])
+				oldPos++
 				continue
 			}
-			prefix := h[0]
+			prefix := hl[0]
 			text := ""
-			if len(h) > 1 {
-				text = h[1:]
+			if len(hl) > 1 {
+				text = hl[1:]
 			}
 			switch prefix {
 			case ' ':
-				if oldPos >= len(oldLines) || oldLines[oldPos] != text {
-					return "", fmt.Errorf("patch context mismatch at old line %d", oldPos+1)
+				// Context line — must match.
+				if oldPos >= len(oldLines) {
+					return "", fmt.Errorf("hunk %d: context line at old pos %d beyond file", hIdx+1, oldPos+1)
+				}
+				if oldLines[oldPos] != text {
+					return "", fmt.Errorf("hunk %d: context mismatch at line %d\n  expected: %q\n  got:      %q",
+						hIdx+1, oldPos+1, text, oldLines[oldPos])
 				}
 				out = append(out, text)
 				oldPos++
 			case '-':
-				if oldPos >= len(oldLines) || oldLines[oldPos] != text {
-					return "", fmt.Errorf("patch delete mismatch at old line %d", oldPos+1)
+				// Delete line — must match.
+				if oldPos >= len(oldLines) {
+					return "", fmt.Errorf("hunk %d: delete line at old pos %d beyond file", hIdx+1, oldPos+1)
 				}
-				oldPos++
+				if oldLines[oldPos] != text {
+					return "", fmt.Errorf("hunk %d: delete mismatch at line %d\n  expected: %q\n  got:      %q",
+						hIdx+1, oldPos+1, text, oldLines[oldPos])
+				}
+				oldPos++ // consume, do not emit
 			case '+':
 				out = append(out, text)
 			default:
-				return "", fmt.Errorf("invalid patch hunk line prefix: %q", string(prefix))
+				return "", fmt.Errorf("hunk %d: unrecognised line prefix %q", hIdx+1, string(prefix))
 			}
-			i++
 		}
 	}
 
+	// Copy any trailing unchanged lines.
 	out = append(out, oldLines[oldPos:]...)
+
 	result := strings.Join(out, "\n")
 	if strings.HasSuffix(oldContent, "\n") {
 		result += "\n"
@@ -436,7 +565,6 @@ func applyUnifiedPatchToContent(oldContent, unifiedDiff string) (string, error) 
 }
 
 func parseUnifiedHunkHeader(header string) (oldStart int, newStart int, err error) {
-	// format: @@ -a,b +c,d @@ optional
 	if !strings.HasPrefix(header, "@@") {
 		return 0, 0, fmt.Errorf("invalid hunk header: %s", header)
 	}
@@ -471,236 +599,129 @@ func parseHunkRange(v string) (start int, count int, err error) {
 	return start, count, nil
 }
 
-func writeNewFileWithCat(ctx context.Context, absPath string, newContent []byte) error {
-	if _, err := exec.LookPath("cat"); err != nil {
-		return fmt.Errorf("cat command is required to create new files: %w", err)
-	}
+// ── Myers diff — O(nd) time, O(n+m) space ────────────────────────────────────
+//
+// Classic Myers shortest-edit-script algorithm. Replaces the old O(n*m) LCS
+// DP which would allocate a 4 MB+ matrix for 1 k-line files and fell back to a
+// useless "delete everything, add everything" summary beyond 2 M cells.
+//
+// This implementation uses the linear-space variant: it records the furthest-
+// reaching diagonal at each edit distance and then backtracks.
 
-	tmp, err := os.CreateTemp(filepath.Dir(absPath), ".synapta-new-*")
-	if err != nil {
-		return fmt.Errorf("creating temp file for new content: %w", err)
-	}
-	tmpPath := tmp.Name()
-	_ = tmp.Close()
-	defer os.Remove(tmpPath)
-
-	if err := os.WriteFile(tmpPath, newContent, 0o644); err != nil {
-		return fmt.Errorf("writing temp content: %w", err)
-	}
-
-	dst, err := os.OpenFile(absPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return fmt.Errorf("opening destination file: %w", err)
-	}
-	defer dst.Close()
-
-	catCmd := exec.CommandContext(ctx, "cat", tmpPath)
-	catCmd.Stdout = dst
-	var stderr bytes.Buffer
-	catCmd.Stderr = &stderr
-	if err := catCmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg != "" {
-			return fmt.Errorf("writing new file with cat: %w: %s", err, msg)
-		}
-		return fmt.Errorf("writing new file with cat: %w", err)
-	}
-	return nil
-}
-
-func applyExistingFileWithPatch(ctx context.Context, absPath string, oldContent, newContent []byte) error {
-	if bytes.Equal(oldContent, newContent) {
-		return nil
-	}
-	if _, err := exec.LookPath("patch"); err != nil {
-		return fmt.Errorf("gnu patch is required to edit existing files: %w", err)
-	}
-	if _, err := exec.LookPath("diff"); err != nil {
-		return fmt.Errorf("diff command is required to generate patch: %w", err)
-	}
-
-	dir := filepath.Dir(absPath)
-	oldTmp, err := os.CreateTemp(dir, ".synapta-old-*")
-	if err != nil {
-		return fmt.Errorf("creating temp old file: %w", err)
-	}
-	oldTmpPath := oldTmp.Name()
-	_ = oldTmp.Close()
-	defer os.Remove(oldTmpPath)
-
-	newTmp, err := os.CreateTemp(dir, ".synapta-new-*")
-	if err != nil {
-		return fmt.Errorf("creating temp new file: %w", err)
-	}
-	newTmpPath := newTmp.Name()
-	_ = newTmp.Close()
-	defer os.Remove(newTmpPath)
-
-	if err := os.WriteFile(oldTmpPath, oldContent, 0o644); err != nil {
-		return fmt.Errorf("writing temp old content: %w", err)
-	}
-	if err := os.WriteFile(newTmpPath, newContent, 0o644); err != nil {
-		return fmt.Errorf("writing temp new content: %w", err)
-	}
-
-	var patchBuf bytes.Buffer
-	var diffErr bytes.Buffer
-	diffCmd := exec.CommandContext(ctx, "diff", "-u", oldTmpPath, newTmpPath)
-	diffCmd.Stdout = &patchBuf
-	diffCmd.Stderr = &diffErr
-	err = diffCmd.Run()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
-			msg := strings.TrimSpace(diffErr.String())
-			if msg != "" {
-				return fmt.Errorf("generating patch: %w: %s", err, msg)
-			}
-			return fmt.Errorf("generating patch: %w", err)
-		}
-	}
-
-	if patchBuf.Len() == 0 {
-		return nil
-	}
-
-	var patchErr bytes.Buffer
-	patchCmd := exec.CommandContext(ctx, "patch", "--silent", "--output", absPath, oldTmpPath)
-	patchCmd.Stdin = bytes.NewReader(patchBuf.Bytes())
-	patchCmd.Stderr = &patchErr
-	if err := patchCmd.Run(); err != nil {
-		msg := strings.TrimSpace(patchErr.String())
-		if msg != "" {
-			return fmt.Errorf("applying patch: %w: %s", err, msg)
-		}
-		return fmt.Errorf("applying patch: %w", err)
-	}
-
-	return nil
-}
-
-func buildWriteDiffSummary(path, oldContent, newContent string) string {
-	oldLines := splitContentLines(oldContent)
-	newLines := splitContentLines(newContent)
-	ops := computeLineDiffOps(oldLines, newLines)
-
-	if len(ops) == 0 {
-		return fmt.Sprintf("--- write summary ---\nFile: %s\nNo line changes detected", path)
-	}
-
-	oldRanges, newRanges := collectChangedRanges(ops)
-
-	const maxShownDiffLines = 240
-	diffLines := make([]string, 0, len(ops))
-	for _, op := range ops {
-		switch op.Kind {
-		case diffDel:
-			diffLines = append(diffLines, fmt.Sprintf("- %4d | %s", op.OldLine, op.Text))
-		case diffAdd:
-			diffLines = append(diffLines, fmt.Sprintf("+ %4d | %s", op.NewLine, op.Text))
-		}
-	}
-
-	hidden := 0
-	if len(diffLines) > maxShownDiffLines {
-		hidden = len(diffLines) - maxShownDiffLines
-		diffLines = diffLines[:maxShownDiffLines]
-	}
-
-	var b strings.Builder
-	b.WriteString("--- write summary ---\n")
-	b.WriteString("File: ")
-	b.WriteString(path)
-	b.WriteString("\n")
-	b.WriteString("Changed ranges (old): ")
-	b.WriteString(formatRanges(oldRanges))
-	b.WriteString("\n")
-	b.WriteString("Changed ranges (new): ")
-	b.WriteString(formatRanges(newRanges))
-	b.WriteString("\n\n--- line diff ---\n")
-	b.WriteString(strings.Join(diffLines, "\n"))
-	if hidden > 0 {
-		b.WriteString(fmt.Sprintf("\n... (%d more diff lines)", hidden))
-	}
-
-	return b.String()
-}
-
-func splitContentLines(content string) []string {
-	if content == "" {
-		return []string{}
-	}
-	lines := strings.Split(content, "\n")
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	return lines
-}
-
-func computeLineDiffOps(oldLines, newLines []string) []diffOp {
-	n, m := len(oldLines), len(newLines)
+func myersDiff(a, b []string) []diffOp {
+	n, m := len(a), len(b)
 	if n == 0 && m == 0 {
 		return nil
 	}
-
-	// Guard against huge quadratic matrices; fallback to full replacement summary.
-	if n*m > 2_000_000 {
-		ops := make([]diffOp, 0, n+m)
-		for i, line := range oldLines {
-			ops = append(ops, diffOp{Kind: diffDel, Text: line, OldLine: i + 1})
+	if n == 0 {
+		ops := make([]diffOp, m)
+		for i, line := range b {
+			ops[i] = diffOp{Kind: diffAdd, Text: line, NewLine: i + 1}
 		}
-		for i, line := range newLines {
-			ops = append(ops, diffOp{Kind: diffAdd, Text: line, NewLine: i + 1})
+		return ops
+	}
+	if m == 0 {
+		ops := make([]diffOp, n)
+		for i, line := range a {
+			ops[i] = diffOp{Kind: diffDel, Text: line, OldLine: i + 1}
 		}
 		return ops
 	}
 
-	dp := make([][]int, n+1)
-	for i := range dp {
-		dp[i] = make([]int, m+1)
-	}
+	max := n + m
+	size := 2*max + 1
+	// v[k] = furthest x reached on diagonal k
+	v := make([]int, size)
+	// trace[d] = snapshot of v at edit distance d
+	trace := make([][]int, 0, max+1)
 
-	for i := 1; i <= n; i++ {
-		for j := 1; j <= m; j++ {
-			if oldLines[i-1] == newLines[j-1] {
-				dp[i][j] = dp[i-1][j-1] + 1
-			} else if dp[i-1][j] >= dp[i][j-1] {
-				dp[i][j] = dp[i-1][j]
+	offset := max // index offset: real diagonal k → v[k+offset]
+
+	for d := 0; d <= max; d++ {
+		snap := make([]int, size)
+		copy(snap, v)
+		trace = append(trace, snap)
+
+		for k := -d; k <= d; k += 2 {
+			var x int
+			if k == -d || (k != d && v[k-1+offset] < v[k+1+offset]) {
+				x = v[k+1+offset] // move down
 			} else {
-				dp[i][j] = dp[i][j-1]
+				x = v[k-1+offset] + 1 // move right
+			}
+			y := x - k
+			for x < n && y < m && a[x] == b[y] {
+				x++
+				y++
+			}
+			v[k+offset] = x
+			if x >= n && y >= m {
+				// Found shortest edit — backtrack.
+				return myersBacktrack(a, b, trace, d, offset)
 			}
 		}
 	}
+	// Shouldn't reach here, but fall back gracefully.
+	return myersFallback(a, b)
+}
 
-	rev := make([]diffOp, 0, n+m)
-	i, j := n, m
-	for i > 0 || j > 0 {
-		if i > 0 && j > 0 && oldLines[i-1] == newLines[j-1] {
-			rev = append(rev, diffOp{Kind: diffEqual, Text: oldLines[i-1]})
-			i--
-			j--
-			continue
+func myersBacktrack(a, b []string, trace [][]int, d, offset int) []diffOp {
+	n, m := len(a), len(b)
+	ops := make([]diffOp, 0, d*2+max(n, m))
+
+	x, y := n, m
+	for curD := d; curD > 0; curD-- {
+		v := trace[curD]
+		k := x - y
+
+		var prevK int
+		if k == -curD || (k != curD && v[k-1+offset] < v[k+1+offset]) {
+			prevK = k + 1
+		} else {
+			prevK = k - 1
 		}
-		if j > 0 && (i == 0 || dp[i][j-1] > dp[i-1][j]) {
-			rev = append(rev, diffOp{Kind: diffAdd, Text: newLines[j-1]})
-			j--
-			continue
+
+		prevX := v[prevK+offset]
+		prevY := prevX - prevK
+
+		// Walk diagonal (equal lines) from (prevX,prevY) to start of snake.
+		for x > prevX && y > prevY {
+			x--
+			y--
+			ops = append(ops, diffOp{Kind: diffEqual, Text: a[x]})
 		}
-		if i > 0 {
-			rev = append(rev, diffOp{Kind: diffDel, Text: oldLines[i-1]})
-			i--
+
+		if curD > 0 {
+			if x == prevX {
+				// y moved: insertion
+				y--
+				ops = append(ops, diffOp{Kind: diffAdd, Text: b[y]})
+			} else {
+				// x moved: deletion
+				x--
+				ops = append(ops, diffOp{Kind: diffDel, Text: a[x]})
+			}
 		}
 	}
-
-	ops := make([]diffOp, 0, len(rev))
-	for k := len(rev) - 1; k >= 0; k-- {
-		ops = append(ops, rev[k])
+	// Handle any remaining snake at d=0.
+	for x > 0 && y > 0 {
+		x--
+		y--
+		ops = append(ops, diffOp{Kind: diffEqual, Text: a[x]})
 	}
 
+	// Reverse.
+	for i, j := 0, len(ops)-1; i < j; i, j = i+1, j-1 {
+		ops[i], ops[j] = ops[j], ops[i]
+	}
+
+	// Assign line numbers.
 	oldLine, newLine := 1, 1
 	for idx := range ops {
 		switch ops[idx].Kind {
 		case diffEqual:
+			ops[idx].OldLine = oldLine
+			ops[idx].NewLine = newLine
 			oldLine++
 			newLine++
 		case diffDel:
@@ -711,14 +732,48 @@ func computeLineDiffOps(oldLines, newLines []string) []diffOp {
 			newLine++
 		}
 	}
+	return ops
+}
 
-	filtered := make([]diffOp, 0, len(ops))
+func myersFallback(a, b []string) []diffOp {
+	ops := make([]diffOp, 0, len(a)+len(b))
+	for i, line := range a {
+		ops = append(ops, diffOp{Kind: diffDel, Text: line, OldLine: i + 1})
+	}
+	for i, line := range b {
+		ops = append(ops, diffOp{Kind: diffAdd, Text: line, NewLine: i + 1})
+	}
+	return ops
+}
+
+// ── diff summary helpers ──────────────────────────────────────────────────────
+
+// buildCompactDiff renders only changed lines (no context), capped at maxLines.
+func buildCompactDiff(ops []diffOp, maxLines int) string {
+	var lines []string
 	for _, op := range ops {
-		if op.Kind != diffEqual {
-			filtered = append(filtered, op)
+		switch op.Kind {
+		case diffDel:
+			lines = append(lines, fmt.Sprintf("- %4d | %s", op.OldLine, op.Text))
+		case diffAdd:
+			lines = append(lines, fmt.Sprintf("+ %4d | %s", op.NewLine, op.Text))
 		}
 	}
-	return filtered
+	if len(lines) == 0 {
+		return ""
+	}
+	hidden := 0
+	if len(lines) > maxLines {
+		hidden = len(lines) - maxLines
+		lines = lines[:maxLines]
+	}
+	var sb strings.Builder
+	sb.WriteString("--- diff ---\n")
+	sb.WriteString(strings.Join(lines, "\n"))
+	if hidden > 0 {
+		sb.WriteString(fmt.Sprintf("\n... (%d more diff lines)", hidden))
+	}
+	return sb.String()
 }
 
 func collectChangedRanges(ops []diffOp) (oldRanges []lineRange, newRanges []lineRange) {
@@ -728,7 +783,7 @@ func collectChangedRanges(ops []diffOp) (oldRanges []lineRange, newRanges []line
 }
 
 func collectRangesForKind(ops []diffOp, kind diffOpKind) []lineRange {
-	ranges := make([]lineRange, 0)
+	var ranges []lineRange
 	current := lineRange{Start: -1, End: -1}
 	for _, op := range ops {
 		if op.Kind != kind {
@@ -762,17 +817,30 @@ func collectRangesForKind(ops []diffOp, kind diffOpKind) []lineRange {
 	return ranges
 }
 
-func formatRanges(ranges []lineRange) string {
+func formatRangesSlice(ranges []lineRange) []string {
 	if len(ranges) == 0 {
-		return "none"
+		return nil
 	}
-	parts := make([]string, 0, len(ranges))
+	out := make([]string, 0, len(ranges))
 	for _, r := range ranges {
 		if r.Start == r.End {
-			parts = append(parts, fmt.Sprintf("%d", r.Start))
+			out = append(out, fmt.Sprintf("%d", r.Start))
 		} else {
-			parts = append(parts, fmt.Sprintf("%d-%d", r.Start, r.End))
+			out = append(out, fmt.Sprintf("%d-%d", r.Start, r.End))
 		}
 	}
-	return strings.Join(parts, ", ")
+	return out
+}
+
+// ── shared line utilities ────────────────────────────────────────────────────
+
+func splitContentLines(content string) []string {
+	if content == "" {
+		return []string{}
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
