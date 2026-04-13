@@ -23,13 +23,13 @@ type SearchMatch struct {
 
 // SessionSearchPicker manages the inline session search state.
 type SessionSearchPicker struct {
-	active       bool
-	matches      []SearchMatch
-	filtered     []SearchMatch
-	cursor       int
-	styles       *theme.Styles
-	maxVisible   int
-	searchQuery  string
+	active      bool
+	matches     []SearchMatch
+	filtered    []SearchMatch
+	cursor      int
+	styles      *theme.Styles
+	maxVisible  int
+	searchQuery string
 }
 
 // NewSessionSearchPicker creates a new session search picker.
@@ -131,11 +131,7 @@ func (sp *SessionSearchPicker) Filter(query string) {
 
 	// Reset cursor if out of bounds
 	if sp.cursor >= len(sp.filtered) {
-		if len(sp.filtered) > 0 {
-			sp.cursor = 0
-		} else {
-			sp.cursor = 0
-		}
+		sp.cursor = 0
 	}
 }
 
@@ -200,7 +196,7 @@ func (sp *SessionSearchPicker) VisibleWindow() ([]SearchMatch, int) {
 	return sp.filtered[start:end], start
 }
 
-// View renders the session search picker.
+// View returns only the results panel (not the input - input is handled by textarea).
 func (sp *SessionSearchPicker) View(width int) string {
 	if !sp.active {
 		return ""
@@ -210,30 +206,15 @@ func (sp *SessionSearchPicker) View(width int) string {
 	fgColor := styles.CommandHighlightStyle.GetForeground()
 	highlightBg := lipgloss.Color("238")
 	mutedFg := styles.MutedStyle.GetForeground()
-	searchPromptColor := lipgloss.Color("220") // Yellow/gold for ">" prompt
 
 	lines := []string{}
 
-	// Header with search prompt
-	queryDisplay := sp.searchQuery
-	if queryDisplay == "" {
-		queryDisplay = "type to search…"
-	}
-	promptStyle := lipgloss.NewStyle().Foreground(searchPromptColor).Bold(true)
-	queryStyle := lipgloss.NewStyle().Foreground(fgColor)
-	if sp.searchQuery == "" {
-		queryStyle = lipgloss.NewStyle().Foreground(mutedFg).Italic(true)
-	}
-	lines = append(lines, promptStyle.Render("⟩ ")+queryStyle.Render(queryDisplay))
-
 	if len(sp.filtered) == 0 && sp.searchQuery != "" {
 		lines = append(lines, lipgloss.NewStyle().Foreground(mutedFg).Render("  No matches found"))
-		lines = append(lines, lipgloss.NewStyle().Foreground(mutedFg).Render(""))
-		lines = append(lines, lipgloss.NewStyle().Foreground(mutedFg).Render("  ↑↓ navigate  •  Enter jump to match  •  Esc close"))
+		lines = append(lines, "")
+		lines = append(lines, lipgloss.NewStyle().Foreground(mutedFg).Render("  ↑↓ navigate  •  Enter jump  •  Esc close"))
 		return strings.Join(lines, "\n")
 	}
-
-	lines = append(lines, "")
 
 	// Render matches
 	visible, start := sp.VisibleWindow()
@@ -285,10 +266,12 @@ func (sp *SessionSearchPicker) View(width int) string {
 	}
 
 	// Navigation hint
-	lines = append(lines, "")
-	meta := "↑↓ navigate  •  Enter jump to match  •  Esc close"
+	if len(lines) > 0 {
+		lines = append(lines, "")
+	}
+	meta := "↑↓ navigate  •  Enter jump  •  Esc close"
 	if len(sp.filtered) > sp.maxVisible {
-		meta = fmt.Sprintf("%d-%d of %d matches  •  %s", start+1, start+len(visible), len(sp.filtered), meta)
+		meta = fmt.Sprintf("%d-%d of %d  •  %s", start+1, start+len(visible), len(sp.filtered), meta)
 	} else if len(sp.filtered) > 0 {
 		meta = fmt.Sprintf("%d matches  •  %s", len(sp.filtered), meta)
 	}
@@ -314,7 +297,7 @@ func highlightSearchMatch(text, query string) string {
 	return before + highlightStyle.Render(match) + after
 }
 
-// truncateSearchLine truncates a string to maxLen, accounting for ANSI codes.
+// truncateSearchLine truncates a String to maxLen, accounting for ANSI codes.
 func truncateSearchLine(s string, maxLen int) string {
 	if maxLen <= 0 {
 		return ""

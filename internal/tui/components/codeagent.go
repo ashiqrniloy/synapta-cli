@@ -266,6 +266,7 @@ type CodeAgentModel struct {
 	fileBrowserModalPath    string // Current directory being browsed
 	chatRenderedLines       []string
 	chatMessageStartLines   []int
+	sessionSearchHighlightLine int // The rendered line index to highlight when in search mode
 	lastPromptHash            string
 	lastPromptFingerprint     core.PromptFingerprint
 	likelyPromptCacheHit      bool

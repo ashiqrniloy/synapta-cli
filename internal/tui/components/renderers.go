@@ -41,6 +41,8 @@ func (m *CodeAgentModel) renderInputBox() string {
 			taView += "\n" + divider + "\n" + browserView
 		}
 	} else if m.sessionSearch != nil && m.sessionSearch.IsActive() {
+		// Session search is active - show results below the textarea
+		// The textarea already shows "> query" text
 		taView = lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(taView)
 		searchView := strings.TrimRight(m.sessionSearch.View(innerWidth), "\n")
 		if searchView != "" {
@@ -582,23 +584,84 @@ func (m *CodeAgentModel) renderChatTranscript() string {
 		return ""
 	}
 	lines := make([]string, 0, len(m.chatMessages))
-	for _, msg := range m.chatMessages {
-		switch msg.Role {
-		case "user":
-			lines = append(lines, strings.TrimRight(m.renderUserMessage(msg.Content), "\n"))
-		case "assistant":
-			lines = append(lines, strings.TrimRight(m.renderAssistantMessage(msg.Content), "\n"))
-		case "tool":
-			lines = append(lines, strings.TrimRight(m.renderToolMessage(msg), "\n"))
-		case "system":
-			lines = append(lines, strings.TrimRight(m.renderSystemMessage(msg), "\n"))
-		}
-	}
 	sep := "\n\n"
 	if m.isCompactDensity() {
 		sep = "\n"
 	}
+
+	// Highlight when search is active OR when a match was selected (highlightLine >= 0)
+	shouldHighlight := m.sessionSearch != nil && m.sessionSearch.IsActive()
+	shouldHighlight = shouldHighlight || m.sessionSearchHighlightLine >= 0
+	if shouldHighlight {
+		m.chatRenderedLines = nil
+		m.chatMessageStartLines = nil
+	}
+
+	highlightLine := m.sessionSearchHighlightLine
+	var currentLine int
+
+	for msgIdx, msg := range m.chatMessages {
+		if shouldHighlight {
+			m.chatMessageStartLines = append(m.chatMessageStartLines, currentLine)
+		}
+
+		var rendered string
+		switch msg.Role {
+		case "user":
+			rendered = m.renderUserMessage(msg.Content)
+		case "assistant":
+			rendered = m.renderAssistantMessage(msg.Content)
+		case "tool":
+			rendered = m.renderToolMessage(msg)
+		case "system":
+			rendered = m.renderSystemMessage(msg)
+		default:
+			rendered = msg.Content
+		}
+
+		// Split rendered content into lines
+		msgLines := strings.Split(rendered, "\n")
+		for _, line := range msgLines {
+			if shouldHighlight {
+				// Track rendered lines for search
+				m.chatRenderedLines = append(m.chatRenderedLines, line)
+				// Apply highlight if this is the highlighted line
+				if currentLine == highlightLine {
+					line = applySearchHighlight(line)
+				}
+				currentLine++
+			}
+			lines = append(lines, line)
+		}
+
+		// Add separator between messages (except after last message)
+		if msgIdx < len(m.chatMessages)-1 {
+			sepLines := strings.Split(sep, "\n")
+			for _, sepLine := range sepLines {
+				if shouldHighlight {
+					m.chatRenderedLines = append(m.chatRenderedLines, sepLine)
+					if currentLine == highlightLine {
+						sepLine = applySearchHighlight(sepLine)
+					}
+					currentLine++
+				}
+				lines = append(lines, sepLine)
+			}
+		}
+	}
+
 	return strings.Join(lines, sep)
+}
+
+// applySearchHighlight applies a visual highlight to a line.
+func applySearchHighlight(line string) string {
+	// Use a distinct style to highlight the search result line
+	highlightStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("238")).
+		Foreground(lipgloss.Color("255")).
+		Bold(true)
+	// Render the line with the highlight style
+	return highlightStyle.Render(line)
 }
 
 func (m *CodeAgentModel) renderUserMessage(content string) string {

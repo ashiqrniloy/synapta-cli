@@ -15,18 +15,24 @@ func (m *CodeAgentModel) handleSessionSearchKeyPress(msg tea.KeyPressMsg, keyStr
 
 	if keyStr == "esc" {
 		m.sessionSearch.Deactivate()
+		m.sessionSearchHighlightLine = -1
 		m.ta.SetValue("")
+		m.ta.Placeholder = "Type your message... (Enter=send, Shift+Enter/Ctrl+N=newline)"
 		m.recalculateLayout()
 		return true, nil
 	}
 
 	if keyStr == "up" {
 		m.sessionSearch.MoveUp()
+		m.updateSearchHighlightLine()
+		m.refreshChatViewport()
 		return true, nil
 	}
 
 	if keyStr == "down" {
 		m.sessionSearch.MoveDown()
+		m.updateSearchHighlightLine()
+		m.refreshChatViewport()
 		return true, nil
 	}
 
@@ -35,8 +41,10 @@ func (m *CodeAgentModel) handleSessionSearchKeyPress(msg tea.KeyPressMsg, keyStr
 		if selected != nil {
 			// Jump to the selected match in the chat viewport
 			m.jumpToSearchMatch(selected)
+			m.sessionSearchHighlightLine = selected.RenderedLine
 			m.sessionSearch.Deactivate()
 			m.ta.SetValue("")
+			m.ta.Placeholder = "Type your message... (Enter=send, Shift+Enter/Ctrl+N=newline)"
 			m.recalculateLayout()
 		}
 		return true, nil
@@ -46,6 +54,7 @@ func (m *CodeAgentModel) handleSessionSearchKeyPress(msg tea.KeyPressMsg, keyStr
 		// Delete last character from search query
 		newQuery := m.sessionSearch.Query()[:len(m.sessionSearch.Query())-1]
 		m.sessionSearch.Filter(newQuery)
+		m.updateSearchHighlightLine()
 		m.recalculateLayout()
 		return true, nil
 	}
@@ -62,11 +71,22 @@ func (m *CodeAgentModel) handleSessionSearchKeyPress(msg tea.KeyPressMsg, keyStr
 
 		newQuery := m.sessionSearch.Query() + text
 		m.sessionSearch.Filter(newQuery)
+		m.updateSearchHighlightLine()
 		m.recalculateLayout()
 		return true, nil
 	}
 
 	return true, nil
+}
+
+// updateSearchHighlightLine updates the highlight line based on current cursor position.
+func (m *CodeAgentModel) updateSearchHighlightLine() {
+	selected := m.sessionSearch.Selected()
+	if selected != nil {
+		m.sessionSearchHighlightLine = selected.RenderedLine
+	} else {
+		m.sessionSearchHighlightLine = -1
+	}
 }
 
 // jumpToSearchMatch scrolls the chat viewport to show the matched line.
@@ -106,8 +126,8 @@ func (m *CodeAgentModel) activateSessionSearch() {
 	// Activate the search picker with the current transcript
 	m.sessionSearch.Activate(m.chatMessages, m.chatRenderedLines, m.chatMessageStartLines)
 
-	// Update placeholder to indicate search mode
-	m.ta.SetValue(">")
+	// Update textarea to show search prompt - use "> " prefix
+	m.ta.SetValue("> ")
 	m.ta.Placeholder = "Search session…"
 	m.recalculateLayout()
 }
