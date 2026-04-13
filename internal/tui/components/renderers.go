@@ -40,6 +40,15 @@ func (m *CodeAgentModel) renderInputBox() string {
 			divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(innerWidth, 1)))
 			taView += "\n" + divider + "\n" + browserView
 		}
+	} else if m.sessionSearch != nil && m.sessionSearch.IsActive() {
+		// Session search is active - show results below the textarea
+		// The textarea already shows "> query" text
+		taView = lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(taView)
+		searchView := strings.TrimRight(m.sessionSearch.View(innerWidth), "\n")
+		if searchView != "" {
+			divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(innerWidth, 1)))
+			taView += "\n" + divider + "\n" + searchView
+		}
 	}
 	borderStyle := lipgloss.NewStyle().
 		Width(m.width).
@@ -574,24 +583,98 @@ func (m *CodeAgentModel) renderChatTranscript() string {
 	if len(m.chatMessages) == 0 {
 		return ""
 	}
-	lines := make([]string, 0, len(m.chatMessages))
-	for _, msg := range m.chatMessages {
-		switch msg.Role {
-		case "user":
-			lines = append(lines, strings.TrimRight(m.renderUserMessage(msg.Content), "\n"))
-		case "assistant":
-			lines = append(lines, strings.TrimRight(m.renderAssistantMessage(msg.Content), "\n"))
-		case "tool":
-			lines = append(lines, strings.TrimRight(m.renderToolMessage(msg), "\n"))
-		case "system":
-			lines = append(lines, strings.TrimRight(m.renderSystemMessage(msg), "\n"))
-		}
+
+	// Determine if we need highlight tracking
+	shouldHighlight := m.sessionSearch != nil && m.sessionSearch.IsActive()
+	shouldHighlight = shouldHighlight || m.sessionSearchHighlightLine >= 0
+	highlightLine := m.sessionSearchHighlightLine
+
+	// Reset tracking arrays if needed
+	if shouldHighlight {
+		m.chatRenderedLines = nil
+		m.chatMessageStartLines = nil
 	}
+
+	// Build message blocks - each message becomes a single block with internal newlines
+	blocks := make([]string, 0, len(m.chatMessages))
 	sep := "\n\n"
 	if m.isCompactDensity() {
 		sep = "\n"
 	}
-	return strings.Join(lines, sep)
+
+	var currentLine int
+
+	for msgIdx, msg := range m.chatMessages {
+		// Track the starting line for this message
+		if shouldHighlight {
+			m.chatMessageStartLines = append(m.chatMessageStartLines, currentLine)
+		}
+
+		var rendered string
+		switch msg.Role {
+		case "user":
+			rendered = m.renderUserMessage(msg.Content)
+		case "assistant":
+			rendered = m.renderAssistantMessage(msg.Content)
+		case "tool":
+			rendered = m.renderToolMessage(msg)
+		case "system":
+			rendered = m.renderSystemMessage(msg)
+		default:
+			rendered = msg.Content
+		}
+
+		// Count lines for tracking (before any highlighting modifications)
+		if shouldHighlight {
+			msgLines := strings.Split(rendered, "\n")
+			for _, line := range msgLines {
+				m.chatRenderedLines = append(m.chatRenderedLines, line)
+				currentLine++
+			}
+		}
+
+		// Apply highlight to the entire block if it contains the highlight line
+		if shouldHighlight && highlightLine >= 0 {
+			// Check if this block contains the highlighted line
+			msgLines := strings.Split(rendered, "\n")
+			blockStartLine := currentLine - len(msgLines)
+			blockEndLine := currentLine - 1
+
+			if highlightLine >= blockStartLine && highlightLine <= blockEndLine {
+				// Find the relative line within this block
+				relLine := highlightLine - blockStartLine
+				highlightedLines := make([]string, len(msgLines))
+				copy(highlightedLines, msgLines)
+				highlightedLines[relLine] = applySearchHighlight(msgLines[relLine])
+				rendered = strings.Join(highlightedLines, "\n")
+			}
+		}
+
+		blocks = append(blocks, rendered)
+
+		// Track separator lines for highlighting
+		if shouldHighlight && msgIdx < len(m.chatMessages)-1 {
+			sepLines := strings.Split(sep, "\n")
+			for _, sepLine := range sepLines {
+				m.chatRenderedLines = append(m.chatRenderedLines, sepLine)
+				currentLine++
+			}
+		}
+	}
+
+	// Join blocks with separator
+	return strings.Join(blocks, sep)
+}
+
+// applySearchHighlight applies a visual highlight to a line.
+func applySearchHighlight(line string) string {
+	// Use a distinct style to highlight the search result line
+	highlightStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("238")).
+		Foreground(lipgloss.Color("255")).
+		Bold(true)
+	// Render the line with the highlight style
+	return highlightStyle.Render(line)
 }
 
 func (m *CodeAgentModel) renderUserMessage(content string) string {

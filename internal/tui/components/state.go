@@ -116,6 +116,7 @@ func (m *CodeAgentModel) keybindingRows() []keybindingRow {
 		{Action: "Copy latest block", Binding: "ctrl+shift+c / ctrl+y", Description: "Copy latest message/tool output to clipboard"},
 		{Action: "Thinking level", Binding: "ctrl+t", Description: "Cycle thinking level for selected model"},
 		{Action: "Skill picker", Binding: "@", Description: "Open skills suggestions"},
+		{Action: "Search session", Binding: ">", Description: "Search current session content"},
 		{Action: "Stop agent", Binding: m.getStopKey(), Description: "Stop running agentic task"},
 		{Action: "Quit", Binding: m.getQuitKey(), Description: "Exit Synapta Code"},
 	}

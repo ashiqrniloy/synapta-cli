@@ -197,6 +197,7 @@ type CodeAgentModel struct {
 	picker      *CommandPicker
 	skillPicker *SkillPicker
 	fileBrowser  *FileBrowser
+	sessionSearch *SessionSearchPicker
 
 	availableSkills   []core.Skill
 	skillCatalogCache *core.SkillCatalogCache
@@ -263,6 +264,9 @@ type CodeAgentModel struct {
 	fileBrowserModalEntries []FileEntry
 	fileBrowserModalOffset  int  // For preview scrolling
 	fileBrowserModalPath    string // Current directory being browsed
+	chatRenderedLines       []string
+	chatMessageStartLines   []int
+	sessionSearchHighlightLine int // The rendered line index to highlight when in search mode
 	lastPromptHash            string
 	lastPromptFingerprint     core.PromptFingerprint
 	likelyPromptCacheHit      bool
@@ -310,6 +314,7 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		picker:                NewCommandPicker(styles),
 		skillPicker:           NewSkillPicker(styles),
 		fileBrowser:           NewFileBrowser(styles),
+		sessionSearch:         NewSessionSearchPicker(styles),
 		skillCatalogCache:     skillCatalogCache,
 		authStorage:           authStorage,
 		chatService:           core.NewChatService(authStorage, toolset),
