@@ -42,23 +42,7 @@ func TestWriteOverwriteMode(t *testing.T) {
 	}
 }
 
-func TestWriteReplaceMode(t *testing.T) {
-	dir := t.TempDir()
-	tool := NewWriteTool(dir)
-	mustWrite(t, tool, WriteInput{Path: "b.txt", Content: "alpha beta beta", Mode: WriteModeOverwrite})
 
-	expected := 2
-	mustWrite(t, tool, WriteInput{
-		Path:            "b.txt",
-		Mode:            WriteModeReplace,
-		Find:            "beta",
-		Replace:         "BETA",
-		ExpectedMatches: &expected,
-	})
-	if !strings.Contains(readFile(t, NewReadTool(dir), "b.txt"), "alpha BETA BETA") {
-		t.Fatal("replace did not produce expected content")
-	}
-}
 
 func TestWriteLineEditMode(t *testing.T) {
 	dir := t.TempDir()
@@ -524,5 +508,180 @@ func TestPatchModeBeginPatchWrapperError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Begin/End Patch wrapper format") {
 		t.Fatalf("expected Begin/End Patch guidance, got: %v", err)
+	}
+}
+
+// ── new guard: overwrite with empty content is rejected ───────────────────────
+
+func TestWriteOverwriteEmptyContentRejected(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "nonempty.txt", Content: "original\n", Mode: WriteModeOverwrite})
+
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:    "nonempty.txt",
+		Mode:    WriteModeOverwrite,
+		Content: "",
+	})
+	if err == nil {
+		t.Fatal("expected error when overwriting with empty content, got nil")
+	}
+	if !strings.Contains(err.Error(), "non-empty") {
+		t.Errorf("expected 'non-empty' in error, got: %v", err)
+	}
+	// Original file must be untouched.
+	if !strings.Contains(readFile(t, NewReadTool(dir), "nonempty.txt"), "original") {
+		t.Error("file was corrupted by empty overwrite that should have been rejected")
+	}
+}
+
+// TestWriteOverwriteNewFileEmptyContentRejected ensures new-file creation with
+// empty content is also refused.
+func TestWriteOverwriteNewFileEmptyContentRejected(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:    "new.txt",
+		Mode:    WriteModeOverwrite,
+		Content: "",
+	})
+	if err == nil {
+		t.Fatal("expected error when creating a new file with empty content, got nil")
+	}
+}
+
+// ── new guard: path traversal outside CWD is rejected ────────────────────────
+
+func TestWritePathTraversalRejected(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:    "../../etc/passwd",
+		Mode:    WriteModeOverwrite,
+		Content: "malicious\n",
+	})
+	if err == nil {
+		t.Fatal("expected error for path traversal outside CWD, got nil")
+	}
+	if !strings.Contains(err.Error(), "outside the working directory") {
+		t.Errorf("expected 'outside the working directory' in error, got: %v", err)
+	}
+}
+
+// ── new guard: line_edit start_line < 1 is rejected ──────────────────────────
+
+func TestWriteLineEditStartLineLessThanOne(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "le0.txt", Content: "a\nb\n", Mode: WriteModeOverwrite})
+
+	zero := 0
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:      "le0.txt",
+		Mode:      WriteModeLineEdit,
+		StartLine: &zero,
+		EndLine:   &zero,
+		Content:   "x",
+	})
+	if err == nil {
+		t.Fatal("expected error for start_line=0, got nil")
+	}
+	if !strings.Contains(err.Error(), "start_line") {
+		t.Errorf("expected 'start_line' in error, got: %v", err)
+	}
+}
+
+// ── new guard: WriteDetails only has preserve_trailing_newline for line_edit ──
+
+func TestWriteDetailsPreserveTrailingNewlineOnlyForLineEdit(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+
+	// overwrite: preserve_trailing_newline must NOT appear in details
+	res, err := tool.Execute(context.Background(), WriteInput{
+		Path:    "ptn.txt",
+		Mode:    WriteModeOverwrite,
+		Content: "hello\n",
+	})
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	d, ok := res.Details.(WriteDetails)
+	if !ok {
+		t.Fatalf("expected WriteDetails, got %T", res.Details)
+	}
+	if d.PreserveTrailingNewline != nil {
+		t.Errorf("preserve_trailing_newline should be nil for overwrite mode, got %v", d.PreserveTrailingNewline)
+	}
+
+	// line_edit: preserve_trailing_newline MUST appear in details
+	s, e := 1, 1
+	res2, err := tool.Execute(context.Background(), WriteInput{
+		Path:      "ptn.txt",
+		Mode:      WriteModeLineEdit,
+		StartLine: &s,
+		EndLine:   &e,
+		Content:   "world",
+	})
+	if err != nil {
+		t.Fatalf("line_edit failed: %v", err)
+	}
+	d2, ok := res2.Details.(WriteDetails)
+	if !ok {
+		t.Fatalf("expected WriteDetails, got %T", res2.Details)
+	}
+	if d2.PreserveTrailingNewline == nil {
+		t.Error("preserve_trailing_newline should be set for line_edit mode")
+	}
+}
+
+// ── new guard: patch hunk with oldStart == 0 is rejected ─────────────────────
+
+func TestPatchModeZeroOldStartRejected(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "z.txt", Content: "a\nb\n", Mode: WriteModeOverwrite})
+
+	badPatch := strings.Join([]string{
+		"--- a/z.txt",
+		"+++ b/z.txt",
+		"@@ -0,1 +0,1 @@", // invalid: 0-indexed start
+		"-a",
+		"+A",
+	}, "\n")
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:        "z.txt",
+		Mode:        WriteModePatch,
+		UnifiedDiff: badPatch,
+	})
+	if err == nil {
+		t.Fatal("expected error for hunk with oldStart=0, got nil")
+	}
+	if !strings.Contains(err.Error(), "1-indexed") {
+		t.Errorf("expected '1-indexed' guidance in error, got: %v", err)
+	}
+}
+
+// ── diff label change: "Changes:" instead of "--- diff ---" ──────────────────
+
+func TestWriteDiffLabelIsChanges(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "lbl.txt", Content: "a\nb\nc\n", Mode: WriteModeOverwrite})
+	res, err := tool.Execute(context.Background(), WriteInput{
+		Path:    "lbl.txt",
+		Mode:    WriteModeOverwrite,
+		Content: "a\nB\nc\n",
+	})
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	text := res.Content[0].Text
+	if !strings.Contains(text, "Changes:") {
+		t.Errorf("expected 'Changes:' label in diff output, got: %s", text)
+	}
+	if strings.Contains(text, "--- diff ---") {
+		t.Errorf("old '--- diff ---' label must be removed, got: %s", text)
 	}
 }

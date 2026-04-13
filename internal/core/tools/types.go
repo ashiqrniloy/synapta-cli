@@ -89,29 +89,58 @@ const (
 
 // WriteInput is the input for the write tool.
 type WriteInput struct {
-	Path    string    `json:"path"`
-	Content string    `json:"content,omitempty"`
-	Mode    WriteMode `json:"mode,omitempty"`
+	// Path to the file to create or edit. Required.
+	Path string `json:"path"`
 
-	// replace and replace_regex modes
-	Find            string `json:"find,omitempty"`
-	Replace         string `json:"replace,omitempty"`
-	ExpectedMatches *int   `json:"expected_matches,omitempty"`
-	MaxReplacements *int   `json:"max_replacements,omitempty"`
+	// Content is the canonical field for file content or replacement text:
+	//   - overwrite mode: the full new file content (must not be empty).
+	//   - replace/replace_regex/line_edit modes: the replacement text.
+	Content string `json:"content,omitempty"`
 
-	// line_edit mode (1-indexed, inclusive)
+	// Mode selects the edit strategy. Defaults to "overwrite" when omitted.
+	Mode WriteMode `json:"mode,omitempty"`
+
+	// ── replace / replace_regex ──────────────────────────────────────────────
+
+	// Find is the literal text (replace) or RE2 pattern (replace_regex) to match.
+	Find string `json:"find,omitempty"`
+
+	// Replace is an alias for Content in replace/replace_regex modes.
+	// Provided for backward compatibility; Content takes precedence when both are set.
+	Replace string `json:"replace,omitempty"`
+
+	// ExpectedMatches makes the operation fail if the actual match count differs.
+	// Strongly recommended when targeting a specific number of occurrences (e.g. 1).
+	ExpectedMatches *int `json:"expected_matches,omitempty"`
+
+	// MaxReplacements caps how many matches are replaced. Defaults to all.
+	MaxReplacements *int `json:"max_replacements,omitempty"`
+
+	// ── line_edit ────────────────────────────────────────────────────────────
+
+	// StartLine is the 1-indexed first line to replace (inclusive).
 	StartLine *int `json:"start_line,omitempty"`
-	EndLine   *int `json:"end_line,omitempty"`
 
-	// patch mode
+	// EndLine is the 1-indexed last line to replace (inclusive). Must be >= StartLine.
+	EndLine *int `json:"end_line,omitempty"`
+
+	// ── patch ────────────────────────────────────────────────────────────────
+
+	// UnifiedDiff is a standard unified diff with hunk headers (@@ -old,+new @@).
+	// Required for patch mode. Must NOT use *** Begin Patch wrappers.
 	UnifiedDiff string `json:"unified_diff,omitempty"`
 
-	// behavior flags
-	DryRun                  *bool `json:"dry_run,omitempty"`
+	// ── behavior flags ───────────────────────────────────────────────────────
+
+	// DryRun computes and returns the diff without writing the file.
+	DryRun *bool `json:"dry_run,omitempty"`
+
+	// PreserveTrailingNewline controls whether the original file's trailing
+	// newline is kept after a line_edit. Default true.
 	PreserveTrailingNewline *bool `json:"preserve_trailing_newline,omitempty"`
 
-	// When false (default) the response omits the full file preview, keeping
-	// the result compact. Set to true to include a head-truncated preview.
+	// IncludePreview appends a head-truncated file preview to the response.
+	// Default false — keeps the response compact.
 	IncludePreview *bool `json:"include_preview,omitempty"`
 }
 

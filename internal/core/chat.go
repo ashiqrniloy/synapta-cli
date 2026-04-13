@@ -407,33 +407,7 @@ func (s *ChatService) toolDefinitions() []llm.ToolDefinition {
 				"required": []string{"path"},
 			},
 		}},
-		{Type: "function", Function: llm.ToolFunctionDefinition{
-			Name:        "write",
-			Description: s.tools.Write.Description(),
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"path": map[string]any{"type": "string", "description": "Path to the file to edit (relative or absolute)"},
-					"mode": map[string]any{
-						"type": "string",
-						"enum": []string{"overwrite", "replace", "replace_regex", "line_edit", "patch"},
-						"description": "Edit strategy. overwrite(default)=replace whole file via content. replace=literal find/replace in existing file. replace_regex=RE2 find/replace in existing file. line_edit=replace start_line..end_line (1-indexed, inclusive) in existing file. patch=apply standard unified_diff with file headers (---/+++) and hunk headers (@@ -old,+new @@).",
-					},
-					"content":          map[string]any{"type": "string", "description": "New file content (overwrite) or replacement text (replace/replace_regex/line_edit)"},
-					"find":             map[string]any{"type": "string", "description": "Text to find (replace) or RE2 pattern (replace_regex)"},
-					"replace":          map[string]any{"type": "string", "description": "Replacement text for replace/replace_regex. Note: `content` is also accepted as replacement text for compatibility."},
-					"expected_matches": map[string]any{"type": "number", "description": "Expected number of matches in replace/replace_regex mode; fail if mismatch"},
-					"max_replacements": map[string]any{"type": "number", "description": "Maximum replacements to apply in replace/replace_regex mode"},
-					"start_line":       map[string]any{"type": "number", "description": "1-indexed start line (line_edit mode)"},
-					"end_line":         map[string]any{"type": "number", "description": "1-indexed end line inclusive (line_edit mode)"},
-					"unified_diff":     map[string]any{"type": "string", "description": "Standard unified diff text (patch mode). Required in patch mode; must include hunk headers like @@ -old,+new @@."},
-					"dry_run":          map[string]any{"type": "boolean", "description": "Plan and diff without writing changes"},
-					"preserve_trailing_newline": map[string]any{"type": "boolean", "description": "Preserve original trailing newline in line_edit mode (default true)"},
-					"include_preview":  map[string]any{"type": "boolean", "description": "When true, append a head-truncated preview of the resulting file. Default false — keeps responses compact."},
-				},
-				"required": []string{"path"},
-			},
-		}},
+
 		{Type: "function", Function: llm.ToolFunctionDefinition{
 			Name:        "bash",
 			Description: s.tools.Bash.Description(),
