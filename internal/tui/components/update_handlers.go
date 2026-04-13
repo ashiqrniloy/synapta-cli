@@ -213,6 +213,9 @@ func (m *CodeAgentModel) handleKiloAuthComplete(msg KiloAuthCompleteMsg) (tea.Mo
 	}
 	m.appendSystemMessage("[Kilo] ✓ Authentication successful! "+msg.Email, "done")
 	m.appendSystemMessage("[Kilo] ✓ "+fmt.Sprintf("%d models available", msg.ModelCount), "done")
+	if m.chatService != nil {
+		m.chatService.InvalidateProviderCache()
+	}
 	return m, m.fetchProviderBalanceCmd("kilo")
 }
 
@@ -228,6 +231,9 @@ func (m *CodeAgentModel) handleCopilotAuthComplete(msg CopilotAuthCompleteMsg) (
 	}
 	m.appendSystemMessage("[GitHub Copilot] ✓ Authentication successful!", "done")
 	m.appendSystemMessage("[GitHub Copilot] ✓ "+fmt.Sprintf("%d models available", msg.ModelCount), "done")
+	if m.chatService != nil {
+		m.chatService.InvalidateProviderCache()
+	}
 	return m, m.fetchProviderBalanceCmd("github-copilot")
 }
 

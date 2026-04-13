@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"sync"
 	"strings"
 	"time"
 
@@ -41,17 +42,35 @@ type ToolEvent struct {
 
 // ChatService provides chat + tool-calling runtime behavior.
 type ChatService struct {
-	auth  *llm.AuthStorage
-	tools *tools.ToolSet
+	auth      *llm.AuthStorage
+	tools     *tools.ToolSet
+	mu        sync.RWMutex
+	providers map[string]cachedProvider
+}
+
+type cachedProvider struct {
+	provider llm.Provider
+	token    string
 }
 
 func NewChatService(auth *llm.AuthStorage, toolset *tools.ToolSet) *ChatService {
-	return &ChatService{auth: auth, tools: toolset}
+	return &ChatService{
+		auth:      auth,
+		tools:     toolset,
+		providers: make(map[string]cachedProvider),
+	}
 }
 
 // Tools returns the underlying tool set for direct access.
 func (s *ChatService) Tools() *tools.ToolSet {
 	return s.tools
+}
+
+// InvalidateProviderCache clears all cached provider instances.
+func (s *ChatService) InvalidateProviderCache() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.providers = make(map[string]cachedProvider)
 }
 
 func (s *ChatService) AvailableModels(ctx context.Context) ([]*llm.Model, error) {
@@ -431,27 +450,57 @@ func (s *ChatService) toolDefinitions() []llm.ToolDefinition {
 }
 
 func (s *ChatService) providerFor(providerID string) (llm.Provider, error) {
+	var token string
+
 	switch providerID {
 	case ProviderKilo:
-		token := s.tokenFromAuthOrEnv(ProviderKilo, llm.KiloAPIKeyEnv())
-		provider, err := llm.NewKiloProviderWithAuth(token)
+		token = s.tokenFromAuthOrEnv(ProviderKilo, llm.KiloAPIKeyEnv())
+	case ProviderGitHubCopilot:
+		token = s.tokenFromAuthOrEnv(ProviderGitHubCopilot, "GITHUB_COPILOT_API_KEY")
+		if token == "" {
+			s.invalidateProvider(providerID)
+			return nil, fmt.Errorf("no credentials for provider %q", ProviderGitHubCopilot)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported provider: %s", providerID)
+	}
+
+	s.mu.RLock()
+	cached, ok := s.providers[providerID]
+	s.mu.RUnlock()
+	if ok && cached.provider != nil && cached.token == token {
+		return cached.provider, nil
+	}
+
+	var provider llm.Provider
+	switch providerID {
+	case ProviderKilo:
+		kiloProvider, err := llm.NewKiloProviderWithAuth(token)
 		if err != nil {
 			return nil, fmt.Errorf("creating kilo provider: %w", err)
 		}
-		return provider, nil
+		provider = kiloProvider
 	case ProviderGitHubCopilot:
-		token := s.tokenFromAuthOrEnv(ProviderGitHubCopilot, "GITHUB_COPILOT_API_KEY")
-		if token == "" {
-			return nil, fmt.Errorf("no credentials for provider %q", ProviderGitHubCopilot)
-		}
 		baseURL := oauth.GetBaseUrlFromToken(token)
 		if baseURL == "" {
 			baseURL = "https://api.individual.githubcopilot.com"
 		}
-		return llm.NewGitHubCopilotProvider(baseURL, token, llm.GitHubCopilotDefaultModels()), nil
+		provider = llm.NewGitHubCopilotProvider(baseURL, token, llm.GitHubCopilotDefaultModels())
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", providerID)
 	}
+
+	s.mu.Lock()
+	s.providers[providerID] = cachedProvider{provider: provider, token: token}
+	s.mu.Unlock()
+
+	return provider, nil
+}
+
+func (s *ChatService) invalidateProvider(providerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.providers, providerID)
 }
 
 func (s *ChatService) tokenFromAuthOrEnv(providerID, envVar string) string {
@@ -512,5 +561,9 @@ func (s *ChatService) ensureFreshCopilotToken(creds *llm.OAuthCredentials) strin
 	if s.auth != nil {
 		_ = s.auth.SetOAuthCredentials(ProviderGitHubCopilot, refreshed)
 	}
+
+	// Auth credentials changed; ensure cached provider is rebuilt with fresh token.
+	s.invalidateProvider(ProviderGitHubCopilot)
+
 	return refreshed.Access
 }

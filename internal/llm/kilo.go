@@ -8,19 +8,21 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
 // ─── Constants ──────────────────────────────────────────────────────
 
 const (
-	KiloAPIBase       = "https://api.kilo.ai"
-	KiloGatewayBase   = KiloAPIBase + "/api/gateway"
-	KiloDeviceAuthURL = KiloAPIBase + "/api/device-auth/codes"
-	KiloProfileURL    = KiloAPIBase + "/api/profile"
-	KiloPollInterval  = 3 * time.Second
-	KiloFetchTimeout  = 10 * time.Second
-	KiloTokenExpiry   = 365 * 24 * time.Hour // 1 year
+	KiloAPIBase        = "https://api.kilo.ai"
+	KiloGatewayBase    = KiloAPIBase + "/api/gateway"
+	KiloDeviceAuthURL  = KiloAPIBase + "/api/device-auth/codes"
+	KiloProfileURL     = KiloAPIBase + "/api/profile"
+	KiloPollInterval   = 3 * time.Second
+	KiloFetchTimeout   = 10 * time.Second
+	KiloTokenExpiry    = 365 * 24 * time.Hour // 1 year
+	KiloModelsCacheTTL = 24 * time.Hour
 )
 
 // ─── API Response Types ─────────────────────────────────────────────
@@ -82,12 +84,21 @@ type BalanceResponse struct {
 // KiloGateway handles all Kilo Gateway API interactions.
 type KiloGateway struct {
 	httpClient *http.Client
+
+	cacheMu      sync.RWMutex
+	modelsByToken map[string]cachedModelSet
+}
+
+type cachedModelSet struct {
+	models    []*Model
+	expiresAt time.Time
 }
 
 // NewKiloGateway creates a new Kilo Gateway client.
 func NewKiloGateway() *KiloGateway {
 	return &KiloGateway{
-		httpClient: &http.Client{Timeout: KiloFetchTimeout},
+		httpClient:    &http.Client{Timeout: KiloFetchTimeout},
+		modelsByToken: make(map[string]cachedModelSet),
 	}
 }
 
@@ -96,25 +107,73 @@ func NewKiloGateway() *KiloGateway {
 // FetchModels fetches models from Kilo Gateway.
 // If token is empty, only free models are returned.
 func (g *KiloGateway) FetchModels(token string) ([]*Model, error) {
+	cacheKey := strings.TrimSpace(token)
+	isFreeOnly := cacheKey == ""
+	if cached, ok := g.getCachedModels(cacheKey); ok {
+		return cached, nil
+	}
+
 	headers := map[string]string{
 		"Content-Type": "application/json",
 		"User-Agent":   "synapta-kilo-provider",
 	}
-	if token != "" {
-		headers["Authorization"] = "Bearer " + token
+	if cacheKey != "" {
+		headers["Authorization"] = "Bearer " + cacheKey
 	}
 
-	models, err := g.fetchModelsFromAPI(headers, token == "")
+	models, err := g.fetchModelsFromAPI(headers, isFreeOnly)
 	if err != nil {
 		return nil, err
 	}
 
-	return models, nil
+	g.setCachedModels(cacheKey, models)
+	return cloneModels(models), nil
 }
 
 // FetchFreeModels fetches only free models (no auth required).
 func (g *KiloGateway) FetchFreeModels() ([]*Model, error) {
 	return g.FetchModels("")
+}
+
+func (g *KiloGateway) getCachedModels(cacheKey string) ([]*Model, bool) {
+	g.cacheMu.RLock()
+	cached, ok := g.modelsByToken[cacheKey]
+	g.cacheMu.RUnlock()
+	if !ok || time.Now().After(cached.expiresAt) {
+		return nil, false
+	}
+	return cloneModels(cached.models), true
+}
+
+func (g *KiloGateway) setCachedModels(cacheKey string, models []*Model) {
+	g.cacheMu.Lock()
+	defer g.cacheMu.Unlock()
+	g.modelsByToken[cacheKey] = cachedModelSet{
+		models:    cloneModels(models),
+		expiresAt: time.Now().Add(KiloModelsCacheTTL),
+	}
+}
+
+func cloneModels(models []*Model) []*Model {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]*Model, 0, len(models))
+	for _, m := range models {
+		if m == nil {
+			continue
+		}
+		copyM := *m
+		if len(m.Input) > 0 {
+			copyM.Input = append([]InputModality(nil), m.Input...)
+		}
+		if m.Compat != nil {
+			compatCopy := *m.Compat
+			copyM.Compat = &compatCopy
+		}
+		out = append(out, &copyM)
+	}
+	return out
 }
 
 func (g *KiloGateway) fetchModelsFromAPI(headers map[string]string, freeOnly bool) ([]*Model, error) {
@@ -427,8 +486,10 @@ func FormatBalance(balance float64) string {
 
 // NewKiloProviderWithAuth creates a Kilo provider with the given token.
 // If token is empty, creates a provider with free models only.
+var defaultKiloGateway = NewKiloGateway()
+
 func NewKiloProviderWithAuth(token string) (*KiloProvider, error) {
-	gateway := NewKiloGateway()
+	gateway := defaultKiloGateway
 
 	var models []*Model
 	var err error
