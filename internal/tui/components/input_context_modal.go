@@ -24,7 +24,11 @@ func (m *CodeAgentModel) handleContextModalKeyPress(msg tea.KeyPressMsg, keyStr 
 			if m.contextModalSelection >= 0 && m.contextModalSelection < len(m.contextModalEntries) {
 				entry := m.contextModalEntries[m.contextModalSelection]
 				m.applyContextEntryEdit(entry, strings.TrimSpace(m.contextModalEditor.Value()))
-				m.contextModalEntries = m.buildContextEntries()
+				// applyContextEntryEdit mutates conversationHistory, which
+				// marks the cache dirty. Force a fresh build now so the modal
+				// list reflects the edit immediately.
+				m.markContextEntriesDirty()
+				m.contextModalEntries = m.contextEntries()
 				m.contextModalEditMode = false
 				m.contextModalEditorHint = "Saved"
 			}
@@ -66,7 +70,10 @@ func (m *CodeAgentModel) handleContextModalKeyPress(msg tea.KeyPressMsg, keyStr 
 			entry := m.contextModalEntries[m.contextModalSelection]
 			if entry.Removable {
 				m.removeContextEntry(entry)
-				m.contextModalEntries = m.buildContextEntries()
+				// removeContextEntry mutates conversationHistory, which marks
+				// the cache dirty. Force a fresh build for the modal.
+				m.markContextEntriesDirty()
+				m.contextModalEntries = m.contextEntries()
 				if m.contextModalSelection >= len(m.contextModalEntries) && m.contextModalSelection > 0 {
 					m.contextModalSelection--
 				}

@@ -349,6 +349,7 @@ func (m *CodeAgentModel) chatHistoryAsLLM() ([]llm.Message, error) {
 		}
 		baseHistory = m.sessionStore.ContextMessages()
 		m.conversationHistory = append([]llm.Message(nil), baseHistory...)
+		m.markContextEntriesDirty()
 	}
 	if m.contextManager == nil {
 		return append([]llm.Message(nil), baseHistory...), nil

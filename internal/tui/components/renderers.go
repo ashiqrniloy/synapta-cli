@@ -169,7 +169,8 @@ func (m *CodeAgentModel) renderContextModal() string {
 	height := m.height
 
 	if m.contextModalEntries == nil {
-		m.contextModalEntries = m.buildContextEntries()
+		// Use the cache-aware accessor so we never rebuild on every View() call.
+		m.contextModalEntries = m.contextEntries()
 	}
 
 	var body string

@@ -226,6 +226,7 @@ func (m *CodeAgentModel) handleSubmitKeyPress() (bool, tea.Cmd) {
 		m.recordContextAction("Skills loaded: " + strings.Join(names, ", "))
 	}
 	m.conversationHistory = append(m.conversationHistory, llm.Message{Role: "user", Content: expandedText})
+	m.markContextEntriesDirty()
 	if m.sessionStore != nil {
 		_ = m.sessionStore.AppendMessage(llm.Message{Role: "user", Content: expandedText})
 	}

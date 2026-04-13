@@ -216,6 +216,9 @@ func (m *CodeAgentModel) reloadAvailableSkills() {
 	if m.contextManager != nil {
 		m.contextManager.InvalidateSkills()
 	}
+	// Skills affect the context prompt built by contextManager.Build(), so
+	// the cached context entries must be regenerated on the next access.
+	m.markContextEntriesDirty()
 }
 
 func (m *CodeAgentModel) activateSkillPicker() {

@@ -278,6 +278,11 @@ type CodeAgentModel struct {
 
 	// For stopping agentic tasks
 	stopChan chan struct{}
+
+	// Context entries cache — rebuilt only when dirty (avoids expensive
+	// contextManager.Build + SHA-256 hashing on every View() call).
+	cachedContextEntries []ContextEntry
+	contextEntriesDirty  bool
 }
 
 // NewCodeAgentModel creates the model using the loaded AppConfig.
@@ -347,6 +352,7 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	model.reloadAvailableSkills()
 	model.reloadAvailableExtensions()
 	model.recordContextAction("System prompt loaded")
+	model.contextEntriesDirty = true
 
 	if authStorage != nil {
 		if authStorage.HasAuth("kilo") {

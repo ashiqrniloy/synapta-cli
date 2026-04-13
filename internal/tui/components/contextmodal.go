@@ -8,12 +8,32 @@ import (
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
 
+// markContextEntriesDirty schedules a rebuild of the cached context entries on
+// the next call to contextEntries(). It must be called whenever the data that
+// buildContextEntries() depends on changes: conversationHistory, available
+// skills, or the active session.
+func (m *CodeAgentModel) markContextEntriesDirty() {
+	m.contextEntriesDirty = true
+}
+
+// contextEntries returns the cached slice of context entries, rebuilding it
+// from scratch only when the dirty flag is set. This prevents the expensive
+// contextManager.Build() + SHA-256 hashing from running on every View() call.
+func (m *CodeAgentModel) contextEntries() []ContextEntry {
+	if m.contextEntriesDirty || m.cachedContextEntries == nil {
+		m.cachedContextEntries = m.buildContextEntries()
+		m.contextEntriesDirty = false
+	}
+	return m.cachedContextEntries
+}
+
 func (m *CodeAgentModel) openContextModal() {
 	m.contextModalOpen = true
 	m.contextModalEditMode = false
 	m.contextModalSelection = 0
 	m.contextModalPreviewOffset = 0
-	m.contextModalEntries = m.buildContextEntries()
+	// Populate the modal's working slice from the (possibly cached) entries.
+	m.contextModalEntries = m.contextEntries()
 }
 
 func (m *CodeAgentModel) closeContextModal() {
@@ -288,6 +308,9 @@ func (m *CodeAgentModel) applyContextEntryEdit(entry ContextEntry, content strin
 		if m.contextManager != nil {
 			m.contextManager.SetSessionSystemPromptOverride(content)
 			m.recordContextAction("System prompt override updated (session-local)")
+			// The system prompt is injected by contextManager.Build(), so the
+			// cached context entries are now stale.
+			m.markContextEntriesDirty()
 		}
 		return
 	}
@@ -297,6 +320,7 @@ func (m *CodeAgentModel) applyContextEntryEdit(entry ContextEntry, content strin
 	if m.sessionStore != nil && !m.contextOverrideActive {
 		if err := m.sessionStore.UpdateContextMessageAt(entry.HistoryIndex, content); err == nil {
 			m.conversationHistory = m.sessionStore.ContextMessages()
+			m.markContextEntriesDirty()
 			m.rebuildTranscriptFromHistory()
 			m.recordContextAction(fmt.Sprintf("Context edited: #%d %s", entry.Order, entry.Category))
 			return
@@ -306,6 +330,7 @@ func (m *CodeAgentModel) applyContextEntryEdit(entry ContextEntry, content strin
 		return
 	}
 	m.conversationHistory[entry.RawHistoryIndex].Content = content
+	m.markContextEntriesDirty()
 	m.contextOverrideActive = true
 	m.rebuildTranscriptFromHistory()
 	m.recordContextAction(fmt.Sprintf("Context edited (session-local): #%d %s", entry.Order, entry.Category))
@@ -318,6 +343,7 @@ func (m *CodeAgentModel) removeContextEntry(entry ContextEntry) {
 	if m.sessionStore != nil && !m.contextOverrideActive {
 		if err := m.sessionStore.RemoveContextMessageAt(entry.HistoryIndex); err == nil {
 			m.conversationHistory = m.sessionStore.ContextMessages()
+			m.markContextEntriesDirty()
 			m.rebuildTranscriptFromHistory()
 			m.recordContextAction(fmt.Sprintf("Context removed: #%d %s", entry.Order, entry.Category))
 			return
@@ -327,6 +353,7 @@ func (m *CodeAgentModel) removeContextEntry(entry ContextEntry) {
 		return
 	}
 	m.conversationHistory = append(m.conversationHistory[:entry.RawHistoryIndex], m.conversationHistory[entry.RawHistoryIndex+1:]...)
+	m.markContextEntriesDirty()
 	m.contextOverrideActive = true
 	m.rebuildTranscriptFromHistory()
 	m.recordContextAction(fmt.Sprintf("Context removed (session-local): #%d %s", entry.Order, entry.Category))

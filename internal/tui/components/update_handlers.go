@@ -268,6 +268,7 @@ func (m *CodeAgentModel) handleAssistantToolCalls(msg assistantToolCallsMsg) (te
 		assistantMsg.ToolCalls = append([]llm.ToolCall(nil), assistantMsg.ToolCalls...)
 	}
 	m.conversationHistory = append(m.conversationHistory, assistantMsg)
+	m.markContextEntriesDirty()
 	if m.sessionStore != nil {
 		_ = m.sessionStore.AppendMessage(assistantMsg)
 	}
@@ -316,6 +317,7 @@ func (m *CodeAgentModel) handleToolEvent(msg toolEventMsg) (tea.Model, tea.Cmd) 
 			if toolContent != "" {
 				toolMsg := llm.Message{Role: "tool", ToolCallID: e.CallID, Name: e.ToolName, Content: toolContent}
 				m.conversationHistory = append(m.conversationHistory, toolMsg)
+				m.markContextEntriesDirty()
 				if m.sessionStore != nil {
 					_ = m.sessionStore.AppendMessage(toolMsg)
 				}
@@ -354,6 +356,7 @@ func (m *CodeAgentModel) handleChatStreamDone() (tea.Model, tea.Cmd) {
 		if needAppend {
 			assistantMsg := llm.Message{Role: "assistant", Content: assistantText}
 			m.conversationHistory = append(m.conversationHistory, assistantMsg)
+			m.markContextEntriesDirty()
 			if m.sessionStore != nil {
 				_ = m.sessionStore.AppendMessage(assistantMsg)
 			}
@@ -409,6 +412,7 @@ func (m *CodeAgentModel) handleCompactDone(msg compactDoneMsg) (tea.Model, tea.C
 	}
 	if msg.History != nil {
 		m.conversationHistory = append([]llm.Message(nil), msg.History...)
+		m.markContextEntriesDirty()
 	}
 	if msg.Compacted {
 		methodLabel := "model"
@@ -438,6 +442,7 @@ func (m *CodeAgentModel) handleNewSessionDone(msg newSessionDoneMsg) (tea.Model,
 		m.contextManager.ClearSessionSystemPromptOverride()
 	}
 	m.conversationHistory = m.sessionStore.ContextMessages()
+	m.markContextEntriesDirty()
 	m.currentAssistantText.Reset()
 	m.rebuildTranscriptFromHistory()
 	m.appendSystemMessage("[Session] ✓ New session started ("+msg.SessionID+")", "done")
@@ -464,6 +469,7 @@ func (m *CodeAgentModel) handleResumeSessionDone(msg resumeSessionDoneMsg) (tea.
 	m.reloadAvailableSkills()
 	m.reloadAvailableExtensions()
 	m.conversationHistory = m.sessionStore.ContextMessages()
+	m.markContextEntriesDirty()
 	m.currentAssistantText.Reset()
 	m.rebuildTranscriptFromHistory()
 	m.appendSystemMessage("[Session] ✓ Session resumed ("+m.sessionStore.SessionID()+")", "done")
@@ -484,6 +490,7 @@ func (m *CodeAgentModel) handleBashCommandDone(msg bashCommandDoneMsg) (tea.Mode
 			m.chatService = core.NewChatService(m.authStorage, core.NewToolSet(m.currentCwd))
 			if m.contextManager != nil {
 				m.contextManager.SetCWD(m.currentCwd)
+				m.markContextEntriesDirty()
 			}
 			m.reloadAvailableSkills()
 			m.reloadAvailableExtensions()
@@ -600,6 +607,7 @@ func (m *CodeAgentModel) continueWithPendingMessage(pendingMsg string) tea.Cmd {
 	// Add the pending message as a user message
 	m.appendChatMessage(ChatMessage{Role: "user", Content: pendingMsg})
 	m.conversationHistory = append(m.conversationHistory, llm.Message{Role: "user", Content: pendingMsg})
+	m.markContextEntriesDirty()
 	if m.sessionStore != nil {
 		_ = m.sessionStore.AppendMessage(llm.Message{Role: "user", Content: pendingMsg})
 	}
