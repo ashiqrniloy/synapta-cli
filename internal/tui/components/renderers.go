@@ -583,24 +583,29 @@ func (m *CodeAgentModel) renderChatTranscript() string {
 	if len(m.chatMessages) == 0 {
 		return ""
 	}
-	lines := make([]string, 0, len(m.chatMessages))
-	sep := "\n\n"
-	if m.isCompactDensity() {
-		sep = "\n"
-	}
 
-	// Highlight when search is active OR when a match was selected (highlightLine >= 0)
+	// Determine if we need highlight tracking
 	shouldHighlight := m.sessionSearch != nil && m.sessionSearch.IsActive()
 	shouldHighlight = shouldHighlight || m.sessionSearchHighlightLine >= 0
+	highlightLine := m.sessionSearchHighlightLine
+
+	// Reset tracking arrays if needed
 	if shouldHighlight {
 		m.chatRenderedLines = nil
 		m.chatMessageStartLines = nil
 	}
 
-	highlightLine := m.sessionSearchHighlightLine
+	// Build message blocks - each message becomes a single block with internal newlines
+	blocks := make([]string, 0, len(m.chatMessages))
+	sep := "\n\n"
+	if m.isCompactDensity() {
+		sep = "\n"
+	}
+
 	var currentLine int
 
 	for msgIdx, msg := range m.chatMessages {
+		// Track the starting line for this message
 		if shouldHighlight {
 			m.chatMessageStartLines = append(m.chatMessageStartLines, currentLine)
 		}
@@ -619,38 +624,46 @@ func (m *CodeAgentModel) renderChatTranscript() string {
 			rendered = msg.Content
 		}
 
-		// Split rendered content into lines
-		msgLines := strings.Split(rendered, "\n")
-		for _, line := range msgLines {
-			if shouldHighlight {
-				// Track rendered lines for search
+		// Count lines for tracking (before any highlighting modifications)
+		if shouldHighlight {
+			msgLines := strings.Split(rendered, "\n")
+			for _, line := range msgLines {
 				m.chatRenderedLines = append(m.chatRenderedLines, line)
-				// Apply highlight if this is the highlighted line
-				if currentLine == highlightLine {
-					line = applySearchHighlight(line)
-				}
 				currentLine++
 			}
-			lines = append(lines, line)
 		}
 
-		// Add separator between messages (except after last message)
-		if msgIdx < len(m.chatMessages)-1 {
+		// Apply highlight to the entire block if it contains the highlight line
+		if shouldHighlight && highlightLine >= 0 {
+			// Check if this block contains the highlighted line
+			msgLines := strings.Split(rendered, "\n")
+			blockStartLine := currentLine - len(msgLines)
+			blockEndLine := currentLine - 1
+
+			if highlightLine >= blockStartLine && highlightLine <= blockEndLine {
+				// Find the relative line within this block
+				relLine := highlightLine - blockStartLine
+				highlightedLines := make([]string, len(msgLines))
+				copy(highlightedLines, msgLines)
+				highlightedLines[relLine] = applySearchHighlight(msgLines[relLine])
+				rendered = strings.Join(highlightedLines, "\n")
+			}
+		}
+
+		blocks = append(blocks, rendered)
+
+		// Track separator lines for highlighting
+		if shouldHighlight && msgIdx < len(m.chatMessages)-1 {
 			sepLines := strings.Split(sep, "\n")
 			for _, sepLine := range sepLines {
-				if shouldHighlight {
-					m.chatRenderedLines = append(m.chatRenderedLines, sepLine)
-					if currentLine == highlightLine {
-						sepLine = applySearchHighlight(sepLine)
-					}
-					currentLine++
-				}
-				lines = append(lines, sepLine)
+				m.chatRenderedLines = append(m.chatRenderedLines, sepLine)
+				currentLine++
 			}
 		}
 	}
 
-	return strings.Join(lines, sep)
+	// Join blocks with separator
+	return strings.Join(blocks, sep)
 }
 
 // applySearchHighlight applies a visual highlight to a line.

@@ -54,6 +54,12 @@ func (m *CodeAgentModel) handleSessionSearchKeyPress(msg tea.KeyPressMsg, keyStr
 		// Delete last character from search query
 		newQuery := m.sessionSearch.Query()[:len(m.sessionSearch.Query())-1]
 		m.sessionSearch.Filter(newQuery)
+		// Update textarea to show updated search query
+		if newQuery == "" {
+			m.ta.SetValue("> ")
+		} else {
+			m.ta.SetValue("> " + newQuery)
+		}
 		m.updateSearchHighlightLine()
 		m.recalculateLayout()
 		return true, nil
@@ -71,6 +77,8 @@ func (m *CodeAgentModel) handleSessionSearchKeyPress(msg tea.KeyPressMsg, keyStr
 
 		newQuery := m.sessionSearch.Query() + text
 		m.sessionSearch.Filter(newQuery)
+		// Update textarea to show the search query with "> " prefix
+		m.ta.SetValue("> " + newQuery)
 		m.updateSearchHighlightLine()
 		m.recalculateLayout()
 		return true, nil
@@ -95,9 +103,98 @@ func (m *CodeAgentModel) jumpToSearchMatch(match *SearchMatch) {
 		return
 	}
 
-	// Scroll the viewport to show the matched line
-	// The viewport's YOffset controls which line is at the top
-	m.chatViewport.SetYOffset(match.RenderedLine)
+	// First, build the rendered lines to get accurate line numbers
+	m.chatRenderedLines = nil
+	m.chatMessageStartLines = nil
+
+	// Calculate the actual line offset in the rendered transcript
+	// by simulating what renderChatTranscript does
+	sep := "\n\n"
+	if m.isCompactDensity() {
+		sep = "\n"
+	}
+
+	var currentLine int
+	highlightFound := false
+
+	for msgIdx, msg := range m.chatMessages {
+		m.chatMessageStartLines = append(m.chatMessageStartLines, currentLine)
+
+		var rendered string
+		switch msg.Role {
+		case "user":
+			rendered = m.renderUserMessage(msg.Content)
+		case "assistant":
+			rendered = m.renderAssistantMessage(msg.Content)
+		case "tool":
+			rendered = m.renderToolMessage(msg)
+		case "system":
+			rendered = m.renderSystemMessage(msg)
+		default:
+			rendered = msg.Content
+		}
+
+		// Count lines in this rendered block
+		msgLines := strings.Split(rendered, "\n")
+
+		// Check if the match is in this message by comparing content
+		matchContent := ansi.Strip(match.Content)
+		for lineIdx, line := range msgLines {
+			plainLine := ansi.Strip(line)
+			// Check if this line matches our search match
+			if strings.Contains(matchContent, plainLine) || strings.Contains(plainLine, matchContent) {
+				if !highlightFound && currentLine+lineIdx == match.RenderedLine {
+					// Found the matching line in the rendered output
+					m.chatViewport.SetYOffset(currentLine + lineIdx)
+					highlightFound = true
+					break
+				}
+			}
+		}
+
+		currentLine += len(msgLines)
+
+		// Add separator between messages
+		if msgIdx < len(m.chatMessages)-1 {
+			sepLines := strings.Split(sep, "\n")
+			currentLine += len(sepLines)
+		}
+	}
+
+	// Fallback: if we couldn't find exact match, just use the RenderedLine from search
+	if !highlightFound {
+		// Try to find the line by matching the original search match
+		matchContent := strings.ToLower(ansi.Strip(match.Content))
+		currentLine = 0
+		for _, msg := range m.chatMessages {
+			var rendered string
+			switch msg.Role {
+			case "user":
+				rendered = m.renderUserMessage(msg.Content)
+			case "assistant":
+				rendered = m.renderAssistantMessage(msg.Content)
+			case "tool":
+				rendered = m.renderToolMessage(msg)
+			case "system":
+				rendered = m.renderSystemMessage(msg)
+			default:
+				rendered = msg.Content
+			}
+
+			msgLines := strings.Split(rendered, "\n")
+			for lineIdx, line := range msgLines {
+				plainLine := strings.ToLower(ansi.Strip(line))
+				if strings.Contains(plainLine, matchContent) {
+					m.chatViewport.SetYOffset(currentLine + lineIdx)
+					m.sessionSearchHighlightLine = currentLine + lineIdx
+					m.chatAutoScroll = false
+					return
+				}
+			}
+			currentLine += len(msgLines)
+		}
+	}
+
 	m.chatAutoScroll = false
 
 	// Optionally select the message containing the match
@@ -128,7 +225,7 @@ func (m *CodeAgentModel) activateSessionSearch() {
 
 	// Update textarea to show search prompt - use "> " prefix
 	m.ta.SetValue("> ")
-	m.ta.Placeholder = "Search session…"
+	m.ta.Placeholder = "Search session..."
 	m.recalculateLayout()
 }
 
