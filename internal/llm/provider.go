@@ -724,15 +724,3 @@ func (p *GitHubCopilotProvider) SetInitiatorHeader(req *http.Request, messages [
 type KiloProvider struct {
 	*OpenAIProvider
 }
-
-// NewKiloProvider creates a new Kilo Gateway provider.
-func NewKiloProvider(baseURL, apiKey string, models []*Model) *KiloProvider {
-	headers := map[string]string{
-		"X-KILOCODE-EDITORNAME": "Synapta",
-		"User-Agent":            "synapta-kilo-provider",
-	}
-
-	return &KiloProvider{
-		OpenAIProvider: NewOpenAIProvider("kilo", "Kilo Gateway", baseURL, apiKey, headers, models, &CompatConfig{}),
-	}
-}

@@ -365,21 +365,6 @@ func hashText(text string) string {
 	return hex.EncodeToString(s[:])
 }
 
-// BashExecutionToText formats a shell command execution as a user-context message.
-func BashExecutionToText(command, output string, failed bool) string {
-	text := fmt.Sprintf("Ran `%s`\n", strings.TrimSpace(command))
-	trimmed := strings.TrimSpace(output)
-	if trimmed != "" {
-		text += "```\n" + trimmed + "\n```"
-	} else {
-		text += "(no output)"
-	}
-	if failed {
-		text += "\n\nCommand failed"
-	}
-	return text
-}
-
 func (m *ContextManager) DebugDescribe(history []llm.Message) (string, error) {
 	msgs, err := m.Build(history)
 	if err != nil {

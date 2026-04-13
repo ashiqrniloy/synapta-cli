@@ -151,11 +151,6 @@ func OpenSessionStore(baseDir, agentID, cwd, sessionPath string, settings Compac
 	return s, nil
 }
 
-func ListSessions(baseDir, agentID, cwd string) ([]SessionInfo, error) {
-	dir := sessionDirFor(baseDir, agentID, cwd)
-	return listSessionsFromDir(dir)
-}
-
 func ListAllSessions(baseDir, agentID string) ([]SessionInfo, error) {
 	agentSessionsDir := filepath.Join(baseDir, "sessions", agentID)
 	if _, err := os.Stat(agentSessionsDir); err != nil {

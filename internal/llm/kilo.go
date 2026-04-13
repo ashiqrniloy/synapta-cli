@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
 )
-
 // ─── Constants ──────────────────────────────────────────────────────
 
 const (
@@ -526,9 +524,4 @@ func NewKiloProviderWithAuth(token string) (*KiloProvider, error) {
 // KiloAPIKeyEnv returns the environment variable name for Kilo API key.
 func KiloAPIKeyEnv() string {
 	return "KILO_API_KEY"
-}
-
-// GetKiloTokenFromEnv gets the Kilo token from environment variable.
-func GetKiloTokenFromEnv() string {
-	return os.Getenv(KiloAPIKeyEnv())
 }

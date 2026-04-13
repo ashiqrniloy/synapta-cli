@@ -95,12 +95,6 @@ func (m *CodeAgentModel) extensionKeybinding() string {
 	return "ctrl+e"
 }
 
-func sanitizeCommandForLog(ext core.Extension) string {
-	parts := []string{ext.Command}
-	parts = append(parts, ext.Args...)
-	return strings.TrimSpace(strings.Join(parts, " "))
-}
-
 func touchExtensionLastLaunched(path string) {
 	now := time.Now()
 	_ = os.Chtimes(path, now, now)

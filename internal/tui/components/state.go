@@ -82,20 +82,6 @@ func (m *CodeAgentModel) densityMode() string {
 
 func (m *CodeAgentModel) isCompactDensity() bool { return m.densityMode() == "compact" }
 
-func (m *CodeAgentModel) isStackedLayout() bool {
-	return strings.TrimSpace(m.layoutMode) == layoutModeStacked
-}
-
-func (m *CodeAgentModel) toggleLayoutMode() {
-	if m.isStackedLayout() {
-		m.layoutMode = layoutModeSplit
-		m.recordContextAction("Layout switched to split panes")
-		return
-	}
-	m.layoutMode = layoutModeStacked
-	m.recordContextAction("Layout switched to stacked panes")
-}
-
 func (m *CodeAgentModel) keybindingRows() []keybindingRow {
 	newline := "shift+enter"
 	if m.cfg != nil && m.cfg.Keybindings.Newline != "" {
@@ -406,10 +392,6 @@ func (m *CodeAgentModel) hasRunningTool() bool {
 		}
 	}
 	return false
-}
-
-func (m *CodeAgentModel) lastToolCallID() (string, bool) {
-	return m.selectedOrLastToolCallID()
 }
 
 func (m *CodeAgentModel) copyLatestMessageToClipboard() error {

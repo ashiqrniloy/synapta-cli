@@ -24,13 +24,3 @@ func GetAgentDir() string {
 
 	return filepath.Join(home, "."+AppName)
 }
-
-// GetAuthPath returns the path to the auth.json file.
-func GetAuthPath() string {
-	return filepath.Join(GetAgentDir(), "auth.json")
-}
-
-// GetModelsPath returns the path to the models.json file.
-func GetModelsPath() string {
-	return filepath.Join(GetAgentDir(), "models.json")
-}

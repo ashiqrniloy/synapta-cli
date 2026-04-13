@@ -50,14 +50,6 @@ func NewGitHubCopilotOAuth(enterpriseDomain string) *GitHubCopilotOAuth {
 	}
 }
 
-func (g *GitHubCopilotOAuth) ID() string {
-	return "github-copilot"
-}
-
-func (g *GitHubCopilotOAuth) Name() string {
-	return "GitHub Copilot"
-}
-
 type deviceCodeResponse struct {
 	DeviceCode      string `json:"device_code"`
 	UserCode        string `json:"user_code"`
@@ -465,10 +457,6 @@ func (g *GitHubCopilotOAuth) RefreshToken(credentials *llm.OAuthCredentials) (*l
 	return g.refreshCopilotToken(credentials.Refresh, domain)
 }
 
-func (g *GitHubCopilotOAuth) GetAPIKey(credentials *llm.OAuthCredentials) string {
-	return credentials.Access
-}
-
 type CopilotPremiumUsage struct {
 	Used  int
 	Total int
@@ -585,30 +573,6 @@ func findIntByKey(v any, target string) (int, bool) {
 		}
 	}
 	return 0, false
-}
-
-func (g *GitHubCopilotOAuth) ModifyModels(models []*llm.Model, credentials *llm.OAuthCredentials) []*llm.Model {
-	baseURL := GetBaseUrlFromToken(credentials.Access)
-	if baseURL == "" {
-		domain := g.getDomain()
-		if domain != "github.com" {
-			baseURL = fmt.Sprintf("https://copilot-api.%s", domain)
-		} else {
-			baseURL = "https://api.individual.githubcopilot.com"
-		}
-	}
-
-	result := make([]*llm.Model, len(models))
-	for i, m := range models {
-		if m.Provider == "github-copilot" {
-			modified := *m
-			modified.BaseURL = baseURL
-			result[i] = &modified
-		} else {
-			result[i] = m
-		}
-	}
-	return result
 }
 
 // GetBaseUrlFromToken extracts the API base URL from a Copilot token.
