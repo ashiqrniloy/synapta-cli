@@ -131,6 +131,14 @@ func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quit
 		m.recalculateLayout()
 		return true, cmd
 	}
+	// Activate session search when ">" is typed at the start
+	if keyStr == ">" && m.inputMode == inputModeChat && m.sessionSearch != nil && m.ta.Value() == "" {
+		var cmd tea.Cmd
+		m.ta, cmd = m.ta.Update(msg)
+		m.activateSessionSearch()
+		m.recalculateLayout()
+		return true, cmd
+	}
 	if keyStr == m.getSubmitKey() {
 		return m.handleSubmitKeyPress()
 	}

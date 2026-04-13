@@ -40,6 +40,13 @@ func (m *CodeAgentModel) renderInputBox() string {
 			divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(innerWidth, 1)))
 			taView += "\n" + divider + "\n" + browserView
 		}
+	} else if m.sessionSearch != nil && m.sessionSearch.IsActive() {
+		taView = lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(taView)
+		searchView := strings.TrimRight(m.sessionSearch.View(innerWidth), "\n")
+		if searchView != "" {
+			divider := lipgloss.NewStyle().Foreground(m.styles.MutedStyle.GetForeground()).Render(strings.Repeat("─", max(innerWidth, 1)))
+			taView += "\n" + divider + "\n" + searchView
+		}
 	}
 	borderStyle := lipgloss.NewStyle().
 		Width(m.width).
