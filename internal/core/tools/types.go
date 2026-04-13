@@ -71,20 +71,22 @@ type ReadInput struct {
 	// Locate mode: search for a literal string or RE2 regex inside the file.
 	// Returns matching line numbers and optional surrounding context.
 	// When set, offset/limit/include_line_numbers are ignored.
-	Pattern     string `json:"pattern,omitempty"`      // literal string or regex (when pattern_is_regex=true)
-	PatternIsRegex *bool `json:"pattern_is_regex,omitempty"` // default false → literal search
-	ContextLines *int   `json:"context_lines,omitempty"`    // lines of context before/after each match (default 0)
+	Pattern        string `json:"pattern,omitempty"`         // literal string or regex (when pattern_is_regex=true)
+	PatternIsRegex *bool  `json:"pattern_is_regex,omitempty"` // default false → literal search
+	ContextLines   *int   `json:"context_lines,omitempty"`    // lines of context before/after each match (default 0)
 }
 
 // WriteMode selects the edit strategy for write.
 type WriteMode string
 
 const (
-	WriteModeOverwrite    WriteMode = "overwrite"     // default; write full content
-	WriteModeReplace      WriteMode = "replace"       // literal find/replace in existing content
-	WriteModeReplaceRegex WriteMode = "replace_regex" // regex find/replace in existing content
-	WriteModeLineEdit     WriteMode = "line_edit"     // replace [start_line,end_line] inclusive
-	WriteModePatch        WriteMode = "patch"         // apply unified diff
+	WriteModeOverwrite      WriteMode = "overwrite"       // default; write full content
+	WriteModeAppend         WriteMode = "append"          // append content to end of file (or create)
+	WriteModeReplace        WriteMode = "replace"         // literal find/replace in existing content
+	WriteModeReplaceRegex   WriteMode = "replace_regex"   // regex find/replace in existing content
+	WriteModeLineEdit       WriteMode = "line_edit"       // replace [start_line,end_line] inclusive
+	WriteModeInsertAfterLine WriteMode = "insert_after_line" // insert lines after a given line number
+	WriteModePatch          WriteMode = "patch"           // apply unified diff
 )
 
 // WriteInput is the input for the write tool.
@@ -92,13 +94,24 @@ type WriteInput struct {
 	// Path to the file to create or edit. Required.
 	Path string `json:"path"`
 
-	// Content is the canonical field for file content or replacement text:
+	// Content is the canonical field for file content or text to write:
 	//   - overwrite mode: the full new file content (must not be empty).
-	//   - replace/replace_regex/line_edit modes: the replacement text.
+	//   - append mode: the text to append to the end of the file.
+	//   - replace/replace_regex/line_edit/insert_after_line modes: the replacement/inserted text.
 	Content string `json:"content,omitempty"`
 
 	// Mode selects the edit strategy. Defaults to "overwrite" when omitted.
 	Mode WriteMode `json:"mode,omitempty"`
+
+	// ── stale-write protection ────────────────────────────────────────────────
+
+	// SHA256Before is the hex SHA-256 of the file content the agent last read.
+	// When set, the tool checks the current file hash before writing and fails
+	// with a clear error if it has changed (i.e. another write happened in
+	// between). This prevents silent overwrite of concurrent edits.
+	// Obtain the value from read tool's details.sha256 field.
+	// Not applicable to overwrite or append modes that create new files.
+	SHA256Before string `json:"sha256_before,omitempty"`
 
 	// ── replace / replace_regex ──────────────────────────────────────────────
 
@@ -124,6 +137,12 @@ type WriteInput struct {
 	// EndLine is the 1-indexed last line to replace (inclusive). Must be >= StartLine.
 	EndLine *int `json:"end_line,omitempty"`
 
+	// ── insert_after_line ────────────────────────────────────────────────────
+
+	// AfterLine is the 1-indexed line after which content is inserted.
+	// Use 0 to insert at the very beginning of the file (before line 1).
+	AfterLine *int `json:"after_line,omitempty"`
+
 	// ── patch ────────────────────────────────────────────────────────────────
 
 	// UnifiedDiff is a standard unified diff with hunk headers (@@ -old,+new @@).
@@ -136,7 +155,7 @@ type WriteInput struct {
 	DryRun *bool `json:"dry_run,omitempty"`
 
 	// PreserveTrailingNewline controls whether the original file's trailing
-	// newline is kept after a line_edit. Default true.
+	// newline is kept after a line_edit or insert_after_line. Default true.
 	PreserveTrailingNewline *bool `json:"preserve_trailing_newline,omitempty"`
 
 	// IncludePreview appends a head-truncated file preview to the response.

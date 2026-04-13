@@ -24,9 +24,14 @@ func (t *WriteTool) Description() string {
 	return `Edit files using one of these modes (mode field is required for edits):
 
 MODES:
-- overwrite (default): Replace the entire file with new content.
-  Requires: path, content.
+- overwrite (default): Replace the entire file with new content. Creates the file if it does not exist.
+  Requires: path, content (must not be empty).
   Example: {"path":"internal/core/chat.go","mode":"overwrite","content":"package core\n"}
+
+- append: Append content to the end of an existing file, or create the file if it does not exist.
+  Requires: path, content.
+  Appended text is added exactly as given — include a leading newline if needed.
+  Example: {"path":"log.txt","mode":"append","content":"\n// added import\nimport \"fmt\"\n"}
 
 - replace: Find and replace an exact literal string in an existing file.
   Requires: path, find, content (replacement text).
@@ -42,6 +47,10 @@ MODES:
   Requires: path, start_line, end_line, content.
   Example: {"path":"internal/core/chat.go","mode":"line_edit","start_line":42,"end_line":48,"content":"new line 42\nnew line 43\n"}
 
+- insert_after_line: Insert new lines after a specific line in an existing file without replacing anything.
+  Requires: path, after_line (1-indexed; use 0 to insert before line 1), content.
+  Example: {"path":"internal/core/chat.go","mode":"insert_after_line","after_line":10,"content":"// new comment\nfunc helper() {}\n"}
+
 - patch: Apply a standard unified diff to an existing file.
   Requires: path, unified_diff.
   unified_diff is mandatory for patch mode.
@@ -50,21 +59,24 @@ MODES:
 
 IMPORTANT:
 - Never use bash with sed/awk/python to edit files. Always use this write tool for file modifications.
-- For patch mode, custom wrappers like "*** Begin Patch" / "*** End Patch" are not accepted unless converted to unified diff.
+- For patch mode, custom wrappers like "*** Begin Patch" / "*** End Patch" are not accepted.
 - For replace/replace_regex: always set expected_matches=1 when you intend to change exactly one occurrence. This prevents silent partial edits.
-- overwrite with empty content will be rejected. Use mode="overwrite" only when you have the complete new file content ready.
+- overwrite and append with empty content will be rejected.
+- Use sha256_before to guard against writing over a file that changed since you last read it.
 
 PARAMETERS:
 - path: File to edit (relative or absolute). Required.
 - mode: Edit strategy (default: overwrite). See MODES above.
-- content: New file content (overwrite) or replacement text (replace/replace_regex/line_edit).
+- content: New file content (overwrite), text to append (append), or replacement/inserted text (replace/replace_regex/line_edit/insert_after_line).
+- sha256_before: Optional. Hex SHA-256 of the file as last read. If the file has changed since, the write is rejected. Obtain from read tool's details.sha256 field.
 - find: Exact text to match (replace) or RE2 regex pattern (replace_regex). Required for those modes.
 - expected_matches: Expected number of matches (replace/replace_regex); tool errors if actual count differs. Recommended for safety.
 - max_replacements: Limit how many replacements to apply (replace/replace_regex).
 - start_line: 1-indexed start line, inclusive (line_edit).
 - end_line: 1-indexed end line, inclusive (line_edit).
+- after_line: 1-indexed line after which to insert content (insert_after_line). Use 0 to insert at the top.
 - unified_diff: Standard unified diff with hunk headers (patch mode). Required for patch.
-- preserve_trailing_newline: Keep the original file's trailing newline in line_edit (default true).
+- preserve_trailing_newline: Keep the original file's trailing newline in line_edit/insert_after_line (default true).
 - dry_run: Plan and diff without writing changes. Returns what would change.
 - include_preview: When true, append a head-truncated preview of the result. Default false.`
 }
@@ -103,6 +115,7 @@ type writePlan struct {
 	MaxReplacements    *int
 	StartLine          *int
 	EndLine            *int
+	AfterLine          *int
 	DryRun             bool
 	PreserveTrailingNL bool
 }
@@ -125,15 +138,17 @@ type WriteDetails struct {
 	BytesBefore     int `json:"bytes_before"`
 	BytesAfter      int `json:"bytes_after"`
 
-	// Compaction helpers
+	// Integrity hashes — sha256_after can be fed back as sha256_before on the
+	// next write to ensure no concurrent modification occurred between calls.
 	SHA256After string `json:"sha256_after,omitempty"`
 
-	// Optional mode-specific fields
-	ExpectedMatches         *int `json:"expected_matches,omitempty"`
-	MaxReplacements         *int `json:"max_replacements,omitempty"`
-	StartLine               *int `json:"start_line,omitempty"`
-	EndLine                 *int `json:"end_line,omitempty"`
-	// PreserveTrailingNewline is only emitted for line_edit mode.
+	// Optional mode-specific fields (only emitted when relevant)
+	ExpectedMatches *int `json:"expected_matches,omitempty"`
+	MaxReplacements *int `json:"max_replacements,omitempty"`
+	StartLine       *int `json:"start_line,omitempty"`
+	EndLine         *int `json:"end_line,omitempty"`
+	AfterLine       *int `json:"after_line,omitempty"`
+	// PreserveTrailingNewline is only emitted for line_edit / insert_after_line.
 	PreserveTrailingNewline *bool `json:"preserve_trailing_newline,omitempty"`
 }
 
@@ -163,6 +178,20 @@ func (t *WriteTool) Execute(ctx context.Context, in WriteInput) (Result, error) 
 		return Result{}, fmt.Errorf("reading existing file: %w", readErr)
 	}
 	oldContent := string(oldContentBytes)
+
+	// ── Stale-write guard ────────────────────────────────────────────────────
+	// Check sha256_before before building the plan so we never compute the new
+	// content only to discard it — and fail cleanly before any mutation.
+	if in.SHA256Before != "" && oldExists {
+		actual := fmt.Sprintf("%x", sha256.Sum256(oldContentBytes))
+		if actual != in.SHA256Before {
+			return Result{}, fmt.Errorf(
+				"stale write rejected: file %q has changed since it was last read "+
+					"(expected sha256 %s, got %s). "+
+					"Read the file again to get the latest content, then retry.",
+				in.Path, in.SHA256Before, actual)
+		}
+	}
 
 	plan, err := buildWritePlan(in, oldContent, oldExists)
 	if err != nil {
@@ -225,11 +254,14 @@ func (t *WriteTool) Execute(ctx context.Context, in WriteInput) (Result, error) 
 	if plan.Mode == WriteModeLineEdit && plan.StartLine != nil && plan.EndLine != nil {
 		sb.WriteString(fmt.Sprintf(", lines=%d-%d", *plan.StartLine, *plan.EndLine))
 	}
+	if plan.Mode == WriteModeInsertAfterLine && plan.AfterLine != nil {
+		sb.WriteString(fmt.Sprintf(", after_line=%d", *plan.AfterLine))
+	}
 	if changed && len(changedRangeStrs) > 0 {
 		sb.WriteString(fmt.Sprintf("\nChanged ranges (new): %s", strings.Join(changedRangeStrs, ", ")))
 	}
 
-	// ── Diff lines (compact, only shown when preview not requested) ──────────
+	// ── Diff lines (compact) ─────────────────────────────────────────────────
 	const maxDiffLines = 80
 	diffText := buildCompactDiff(ops, maxDiffLines)
 	if diffText != "" {
@@ -265,14 +297,17 @@ func (t *WriteTool) Execute(ctx context.Context, in WriteInput) (Result, error) 
 		BytesAfter:      len(plan.NewContent),
 		SHA256After:     hashAfter,
 	}
-	// Emit mode-specific optional fields only when relevant.
-	if plan.Mode == WriteModeReplace || plan.Mode == WriteModeReplaceRegex {
+	switch plan.Mode {
+	case WriteModeReplace, WriteModeReplaceRegex:
 		details.ExpectedMatches = plan.ExpectedMatches
 		details.MaxReplacements = plan.MaxReplacements
-	}
-	if plan.Mode == WriteModeLineEdit {
+	case WriteModeLineEdit:
 		details.StartLine = plan.StartLine
 		details.EndLine = plan.EndLine
+		ptNL := plan.PreserveTrailingNL
+		details.PreserveTrailingNewline = &ptNL
+	case WriteModeInsertAfterLine:
+		details.AfterLine = plan.AfterLine
 		ptNL := plan.PreserveTrailingNL
 		details.PreserveTrailingNewline = &ptNL
 	}
@@ -316,11 +351,20 @@ func buildWritePlan(in WriteInput, oldContent string, oldExists bool) (writePlan
 					"To delete a file, use the bash tool.")
 		}
 		plan.NewContent = in.Content
+
+	case WriteModeAppend:
+		if in.Content == "" {
+			return writePlan{}, fmt.Errorf(
+				"append mode requires non-empty `content`. " +
+					"Provide the text to append. " +
+					"Include a leading newline in content if you want a blank line before the appended text.")
+		}
+		plan.NewContent = oldContent + in.Content
+
 	case WriteModeReplace:
 		if !oldExists {
 			return writePlan{}, fmt.Errorf("replace mode requires an existing file. The target path does not exist. Use mode=\"overwrite\" to create a new file, or provide an existing file for mode=\"replace\".")
 		}
-		// Resolve replacement: prefer `content`, fall back to `replace` for compatibility.
 		replacement := resolveReplacement(in)
 		newContent, count, err := applyStringReplace(oldContent, in.Find, replacement, in.ExpectedMatches, in.MaxReplacements)
 		if err != nil {
@@ -330,11 +374,11 @@ func buildWritePlan(in WriteInput, oldContent string, oldExists bool) (writePlan
 		plan.MaxReplacements = in.MaxReplacements
 		plan.AppliedMatches = count
 		plan.NewContent = newContent
+
 	case WriteModeReplaceRegex:
 		if !oldExists {
 			return writePlan{}, fmt.Errorf("replace_regex mode requires an existing file. The target path does not exist. Use mode=\"overwrite\" to create a new file, or provide an existing file for mode=\"replace_regex\".")
 		}
-		// Resolve replacement: prefer `content`, fall back to `replace` for compatibility.
 		replacement := resolveReplacement(in)
 		newContent, count, err := applyRegexReplace(oldContent, in.Find, replacement, in.ExpectedMatches, in.MaxReplacements)
 		if err != nil {
@@ -344,6 +388,7 @@ func buildWritePlan(in WriteInput, oldContent string, oldExists bool) (writePlan
 		plan.MaxReplacements = in.MaxReplacements
 		plan.AppliedMatches = count
 		plan.NewContent = newContent
+
 	case WriteModeLineEdit:
 		if !oldExists {
 			return writePlan{}, fmt.Errorf("line_edit mode requires an existing file. The target path does not exist. Use mode=\"overwrite\" to create a new file, or provide an existing file for mode=\"line_edit\".")
@@ -364,6 +409,27 @@ func buildWritePlan(in WriteInput, oldContent string, oldExists bool) (writePlan
 		plan.StartLine = in.StartLine
 		plan.EndLine = in.EndLine
 		plan.NewContent = newContent
+
+	case WriteModeInsertAfterLine:
+		if !oldExists {
+			return writePlan{}, fmt.Errorf("insert_after_line mode requires an existing file. The target path does not exist. Use mode=\"overwrite\" to create a new file, or use mode=\"append\" to add to the end of a new file.")
+		}
+		if in.AfterLine == nil {
+			return writePlan{}, fmt.Errorf("insert_after_line mode requires `after_line` (1-indexed line after which to insert; use 0 to insert before line 1). Example: {\"mode\":\"insert_after_line\",\"path\":\"file.txt\",\"after_line\":10,\"content\":\"new line\\n\"}")
+		}
+		if *in.AfterLine < 0 {
+			return writePlan{}, fmt.Errorf("invalid after_line %d for insert_after_line mode: must be >= 0 (0 = insert before line 1, 1 = insert after line 1, etc.)", *in.AfterLine)
+		}
+		if in.Content == "" {
+			return writePlan{}, fmt.Errorf("insert_after_line mode requires non-empty `content` (the lines to insert)")
+		}
+		newContent, err := applyInsertAfterLine(oldContent, *in.AfterLine, in.Content, preserveNL)
+		if err != nil {
+			return writePlan{}, err
+		}
+		plan.AfterLine = in.AfterLine
+		plan.NewContent = newContent
+
 	case WriteModePatch:
 		if strings.TrimSpace(in.UnifiedDiff) == "" {
 			return writePlan{}, fmt.Errorf("patch mode requires `unified_diff`. Provide a standard unified diff with hunk headers like @@ -old,+new @@. Example: {\"mode\":\"patch\",\"path\":\"internal/core/chat.go\",\"unified_diff\":\"--- a/internal/core/chat.go\\n+++ b/internal/core/chat.go\\n@@ -42,7 +42,8 @@\\n old line\\n+new line\\n\"}")
@@ -373,8 +439,9 @@ func buildWritePlan(in WriteInput, oldContent string, oldExists bool) (writePlan
 			return writePlan{}, err
 		}
 		plan.NewContent = newContent
+
 	default:
-		return writePlan{}, fmt.Errorf("unsupported write mode %q. Supported modes: overwrite, replace, replace_regex, line_edit, patch", mode)
+		return writePlan{}, fmt.Errorf("unsupported write mode %q. Supported modes: overwrite, append, replace, replace_regex, line_edit, insert_after_line, patch", mode)
 	}
 
 	return plan, nil
@@ -382,25 +449,22 @@ func buildWritePlan(in WriteInput, oldContent string, oldExists bool) (writePlan
 
 // resolveReplacement returns the replacement text for replace/replace_regex modes.
 // `content` is the canonical field; `replace` is accepted as an alias for compatibility.
-// If both are set and differ, `content` wins and a warning is embedded in the error.
+// If both are set and differ, `content` wins.
 func resolveReplacement(in WriteInput) string {
 	if in.Content != "" && in.Replace != "" && in.Content != in.Replace {
-		// Both set and differ — `content` takes precedence; this is a likely LLM mistake.
-		// We still proceed with `content` rather than erroring to be forgiving.
+		// Both set and differ — `content` takes precedence.
 		return in.Content
 	}
 	if in.Content != "" {
 		return in.Content
 	}
-	// `replace` field provided without `content` — honour it for backward compat.
 	return in.Replace
 }
 
 // ── writeFileDirect — pure-Go atomic write (no external cat/patch) ───────────
 
 // writeFileDirect writes content to absPath via an adjacent temp file, then
-// renames into place. This is atomic on POSIX and removes the dependency on
-// external `cat` and `patch` binaries.
+// renames into place. This is atomic on POSIX.
 func writeFileDirect(absPath string, content []byte) error {
 	dir := filepath.Dir(absPath)
 	tmp, err := os.CreateTemp(dir, ".synapta-write-*")
@@ -512,6 +576,39 @@ func applyLineEdit(oldContent string, startLine, endLine int, replacement string
 		result += "\n"
 	}
 	return result, nil
+}
+
+// ── insert after line ────────────────────────────────────────────────────────
+
+// applyInsertAfterLine inserts `insertion` after line `afterLine` (1-indexed).
+// afterLine == 0 inserts before the first line.
+// afterLine == N (where N == total lines) inserts at the end — identical to
+// appending but without the raw string concatenation edge cases.
+func applyInsertAfterLine(oldContent string, afterLine int, insertion string, preserveTrailingNL bool) (string, error) {
+	endsWithNL := strings.HasSuffix(oldContent, "\n")
+	oldLines := splitContentLines(oldContent)
+	totalLines := len(oldLines)
+
+	if afterLine > totalLines {
+		return "", fmt.Errorf(
+			"insert_after_line: after_line=%d is out of bounds (file has %d lines). "+
+				"Use after_line=%d to insert at the end, or use mode=\"append\".",
+			afterLine, totalLines, totalLines)
+	}
+
+	newLines := splitContentLines(insertion)
+
+	// Build: lines[0..afterLine] + newLines + lines[afterLine..]
+	result := make([]string, 0, totalLines+len(newLines))
+	result = append(result, oldLines[:afterLine]...)
+	result = append(result, newLines...)
+	result = append(result, oldLines[afterLine:]...)
+
+	out := strings.Join(result, "\n")
+	if preserveTrailingNL && endsWithNL {
+		out += "\n"
+	}
+	return out, nil
 }
 
 // ── patch mode — hardened pure-Go applicator ─────────────────────────────────
@@ -721,16 +818,14 @@ func myersDiff(a, b []string) []diffOp {
 		return ops
 	}
 
-	max := n + m
-	size := 2*max + 1
-	// v[k] = furthest x reached on diagonal k
+	maxD := n + m
+	size := 2*maxD + 1
 	v := make([]int, size)
-	// trace[d] = snapshot of v at edit distance d
-	trace := make([][]int, 0, max+1)
+	trace := make([][]int, 0, maxD+1)
 
-	offset := max // index offset: real diagonal k → v[k+offset]
+	offset := maxD
 
-	for d := 0; d <= max; d++ {
+	for d := 0; d <= maxD; d++ {
 		snap := make([]int, size)
 		copy(snap, v)
 		trace = append(trace, snap)
@@ -738,9 +833,9 @@ func myersDiff(a, b []string) []diffOp {
 		for k := -d; k <= d; k += 2 {
 			var x int
 			if k == -d || (k != d && v[k-1+offset] < v[k+1+offset]) {
-				x = v[k+1+offset] // move down
+				x = v[k+1+offset]
 			} else {
-				x = v[k-1+offset] + 1 // move right
+				x = v[k-1+offset] + 1
 			}
 			y := x - k
 			for x < n && y < m && a[x] == b[y] {
@@ -749,12 +844,10 @@ func myersDiff(a, b []string) []diffOp {
 			}
 			v[k+offset] = x
 			if x >= n && y >= m {
-				// Found shortest edit — backtrack.
 				return myersBacktrack(a, b, trace, d, offset)
 			}
 		}
 	}
-	// Shouldn't reach here, but fall back gracefully.
 	return myersFallback(a, b)
 }
 
@@ -777,7 +870,6 @@ func myersBacktrack(a, b []string, trace [][]int, d, offset int) []diffOp {
 		prevX := v[prevK+offset]
 		prevY := prevX - prevK
 
-		// Walk diagonal (equal lines) from (prevX,prevY) to start of snake.
 		for x > prevX && y > prevY {
 			x--
 			y--
@@ -786,29 +878,24 @@ func myersBacktrack(a, b []string, trace [][]int, d, offset int) []diffOp {
 
 		if curD > 0 {
 			if x == prevX {
-				// y moved: insertion
 				y--
 				ops = append(ops, diffOp{Kind: diffAdd, Text: b[y]})
 			} else {
-				// x moved: deletion
 				x--
 				ops = append(ops, diffOp{Kind: diffDel, Text: a[x]})
 			}
 		}
 	}
-	// Handle any remaining snake at d=0.
 	for x > 0 && y > 0 {
 		x--
 		y--
 		ops = append(ops, diffOp{Kind: diffEqual, Text: a[x]})
 	}
 
-	// Reverse.
 	for i, j := 0, len(ops)-1; i < j; i, j = i+1, j-1 {
 		ops[i], ops[j] = ops[j], ops[i]
 	}
 
-	// Assign line numbers.
 	oldLine, newLine := 1, 1
 	for idx := range ops {
 		switch ops[idx].Kind {

@@ -685,3 +685,505 @@ func TestWriteDiffLabelIsChanges(t *testing.T) {
 		t.Errorf("old '--- diff ---' label must be removed, got: %s", text)
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature: append mode
+// ═══════════════════════════════════════════════════════════════════════════
+
+// TestAppendModeToExistingFile verifies basic append to an existing file.
+func TestAppendModeToExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "app_ex.txt", Content: "line1\nline2\n", Mode: WriteModeOverwrite})
+
+	mustWrite(t, tool, WriteInput{
+		Path:    "app_ex.txt",
+		Mode:    WriteModeAppend,
+		Content: "line3\n",
+	})
+
+	got := readFile(t, NewReadTool(dir), "app_ex.txt")
+	if got != "line1\nline2\nline3\n" {
+		t.Fatalf("append produced wrong result: %q", got)
+	}
+}
+
+// TestAppendModeCreatesNewFile verifies append creates the file when it does not exist.
+func TestAppendModeCreatesNewFile(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+
+	mustWrite(t, tool, WriteInput{
+		Path:    "app_new.txt",
+		Mode:    WriteModeAppend,
+		Content: "hello\n",
+	})
+
+	got := readFile(t, NewReadTool(dir), "app_new.txt")
+	if got != "hello\n" {
+		t.Fatalf("append to new file produced wrong result: %q", got)
+	}
+}
+
+// TestAppendModeEmptyContentRejected verifies empty content is refused.
+func TestAppendModeEmptyContentRejected(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "app_mt.txt", Content: "x\n", Mode: WriteModeOverwrite})
+
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:    "app_mt.txt",
+		Mode:    WriteModeAppend,
+		Content: "",
+	})
+	if err == nil {
+		t.Fatal("expected error for empty append content, got nil")
+	}
+	if !strings.Contains(err.Error(), "non-empty") {
+		t.Errorf("expected 'non-empty' in error, got: %v", err)
+	}
+	if readFile(t, NewReadTool(dir), "app_mt.txt") != "x\n" {
+		t.Error("file was modified by rejected append")
+	}
+}
+
+// TestAppendModeDryRun verifies dry_run does not write.
+func TestAppendModeDryRun(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "app_dr.txt", Content: "orig\n", Mode: WriteModeOverwrite})
+
+	dry := true
+	res, err := tool.Execute(context.Background(), WriteInput{
+		Path:    "app_dr.txt",
+		Mode:    WriteModeAppend,
+		Content: "added\n",
+		DryRun:  &dry,
+	})
+	if err != nil {
+		t.Fatalf("dry-run append failed: %v", err)
+	}
+	if readFile(t, NewReadTool(dir), "app_dr.txt") != "orig\n" {
+		t.Error("dry-run must not write the file")
+	}
+	d := res.Details.(WriteDetails)
+	if !d.DryRun {
+		t.Error("expected DryRun=true in details")
+	}
+	if d.Insertions == 0 {
+		t.Error("expected insertions > 0 in dry-run diff")
+	}
+}
+
+// TestAppendModeDetailsMode verifies WriteDetails.Mode is "append".
+func TestAppendModeDetailsMode(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	res, err := tool.Execute(context.Background(), WriteInput{
+		Path:    "app_dm.txt",
+		Mode:    WriteModeAppend,
+		Content: "line\n",
+	})
+	if err != nil {
+		t.Fatalf("append failed: %v", err)
+	}
+	d := res.Details.(WriteDetails)
+	if d.Mode != WriteModeAppend {
+		t.Errorf("expected mode=append in details, got %q", d.Mode)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature: insert_after_line mode
+// ═══════════════════════════════════════════════════════════════════════════
+
+// TestInsertAfterLineMiddle inserts lines in the middle of a file.
+func TestInsertAfterLineMiddle(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "ial_mid.txt", Content: "a\nb\nc\n", Mode: WriteModeOverwrite})
+
+	one := 1
+	mustWrite(t, tool, WriteInput{
+		Path:      "ial_mid.txt",
+		Mode:      WriteModeInsertAfterLine,
+		AfterLine: &one,
+		Content:   "X\nY",
+	})
+
+	got := readFile(t, NewReadTool(dir), "ial_mid.txt")
+	if got != "a\nX\nY\nb\nc\n" {
+		t.Fatalf("insert_after_line(1) produced wrong result: %q", got)
+	}
+}
+
+// TestInsertAfterLineZeroInsertsAtTop inserts before the first line.
+func TestInsertAfterLineZeroInsertsAtTop(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "ial_top.txt", Content: "b\nc\n", Mode: WriteModeOverwrite})
+
+	zero := 0
+	mustWrite(t, tool, WriteInput{
+		Path:      "ial_top.txt",
+		Mode:      WriteModeInsertAfterLine,
+		AfterLine: &zero,
+		Content:   "a",
+	})
+
+	got := readFile(t, NewReadTool(dir), "ial_top.txt")
+	if got != "a\nb\nc\n" {
+		t.Fatalf("insert_after_line(0) produced wrong result: %q", got)
+	}
+}
+
+// TestInsertAfterLineAtEnd inserts after the last line.
+func TestInsertAfterLineAtEnd(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "ial_end.txt", Content: "a\nb\n", Mode: WriteModeOverwrite})
+
+	two := 2
+	mustWrite(t, tool, WriteInput{
+		Path:      "ial_end.txt",
+		Mode:      WriteModeInsertAfterLine,
+		AfterLine: &two,
+		Content:   "c",
+	})
+
+	got := readFile(t, NewReadTool(dir), "ial_end.txt")
+	if got != "a\nb\nc\n" {
+		t.Fatalf("insert_after_line(end) produced wrong result: %q", got)
+	}
+}
+
+// TestInsertAfterLineOutOfBoundsError verifies an out-of-range after_line is rejected.
+func TestInsertAfterLineOutOfBoundsError(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "ial_oob.txt", Content: "a\nb\n", Mode: WriteModeOverwrite})
+
+	big := 99
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:      "ial_oob.txt",
+		Mode:      WriteModeInsertAfterLine,
+		AfterLine: &big,
+		Content:   "x",
+	})
+	if err == nil {
+		t.Fatal("expected out-of-bounds error, got nil")
+	}
+	if !strings.Contains(err.Error(), "out of bounds") {
+		t.Errorf("expected 'out of bounds' in error, got: %v", err)
+	}
+}
+
+// TestInsertAfterLineNegativeAfterLineError verifies negative after_line is rejected.
+func TestInsertAfterLineNegativeAfterLineError(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "ial_neg.txt", Content: "a\n", Mode: WriteModeOverwrite})
+
+	neg := -1
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:      "ial_neg.txt",
+		Mode:      WriteModeInsertAfterLine,
+		AfterLine: &neg,
+		Content:   "x",
+	})
+	if err == nil {
+		t.Fatal("expected error for after_line=-1, got nil")
+	}
+	if !strings.Contains(err.Error(), ">= 0") {
+		t.Errorf("expected '>= 0' guidance in error, got: %v", err)
+	}
+}
+
+// TestInsertAfterLineMissingAfterLineError verifies missing after_line field is caught.
+func TestInsertAfterLineMissingAfterLineError(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "ial_miss.txt", Content: "a\n", Mode: WriteModeOverwrite})
+
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:    "ial_miss.txt",
+		Mode:    WriteModeInsertAfterLine,
+		Content: "x",
+		// AfterLine intentionally omitted
+	})
+	if err == nil {
+		t.Fatal("expected error for missing after_line, got nil")
+	}
+	if !strings.Contains(err.Error(), "after_line") {
+		t.Errorf("expected 'after_line' in error, got: %v", err)
+	}
+}
+
+// TestInsertAfterLineEmptyContentError verifies empty content is rejected.
+func TestInsertAfterLineEmptyContentError(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "ial_ec.txt", Content: "a\n", Mode: WriteModeOverwrite})
+
+	one := 1
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:      "ial_ec.txt",
+		Mode:      WriteModeInsertAfterLine,
+		AfterLine: &one,
+		Content:   "",
+	})
+	if err == nil {
+		t.Fatal("expected error for empty insert content, got nil")
+	}
+}
+
+// TestInsertAfterLineRequiresExistingFile verifies mode fails on missing files.
+func TestInsertAfterLineRequiresExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+
+	zero := 0
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:      "ial_missing.txt",
+		Mode:      WriteModeInsertAfterLine,
+		AfterLine: &zero,
+		Content:   "x",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing file, got nil")
+	}
+	if !strings.Contains(err.Error(), "requires an existing file") {
+		t.Errorf("expected 'requires an existing file' in error, got: %v", err)
+	}
+}
+
+// TestInsertAfterLineDetailsFields verifies WriteDetails contains after_line and
+// preserve_trailing_newline, but NOT start_line / end_line.
+func TestInsertAfterLineDetailsFields(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "ial_det.txt", Content: "a\nb\n", Mode: WriteModeOverwrite})
+
+	one := 1
+	res, err := tool.Execute(context.Background(), WriteInput{
+		Path:      "ial_det.txt",
+		Mode:      WriteModeInsertAfterLine,
+		AfterLine: &one,
+		Content:   "x",
+	})
+	if err != nil {
+		t.Fatalf("insert_after_line failed: %v", err)
+	}
+	d, ok := res.Details.(WriteDetails)
+	if !ok {
+		t.Fatalf("expected WriteDetails, got %T", res.Details)
+	}
+	if d.AfterLine == nil || *d.AfterLine != 1 {
+		t.Errorf("expected after_line=1 in details, got %v", d.AfterLine)
+	}
+	if d.PreserveTrailingNewline == nil {
+		t.Error("expected preserve_trailing_newline to be set for insert_after_line")
+	}
+	if d.StartLine != nil || d.EndLine != nil {
+		t.Error("start_line/end_line must not appear in insert_after_line details")
+	}
+	if d.Mode != WriteModeInsertAfterLine {
+		t.Errorf("expected mode=insert_after_line in details, got %q", d.Mode)
+	}
+}
+
+// TestInsertAfterLineDryRun verifies dry_run does not write.
+func TestInsertAfterLineDryRun(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "ial_dr.txt", Content: "a\nb\n", Mode: WriteModeOverwrite})
+
+	one := 1
+	dry := true
+	res, err := tool.Execute(context.Background(), WriteInput{
+		Path:      "ial_dr.txt",
+		Mode:      WriteModeInsertAfterLine,
+		AfterLine: &one,
+		Content:   "X",
+		DryRun:    &dry,
+	})
+	if err != nil {
+		t.Fatalf("dry-run insert_after_line failed: %v", err)
+	}
+	if readFile(t, NewReadTool(dir), "ial_dr.txt") != "a\nb\n" {
+		t.Error("dry-run must not write the file")
+	}
+	d := res.Details.(WriteDetails)
+	if !d.DryRun {
+		t.Error("expected DryRun=true in details")
+	}
+	if d.Insertions == 0 {
+		t.Error("expected insertions > 0 in dry-run diff")
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature: sha256_before stale-write protection
+// ═══════════════════════════════════════════════════════════════════════════
+
+// TestSHA256BeforePassesWhenMatchingHash verifies the write succeeds when
+// sha256_before matches the current file hash.
+func TestSHA256BeforePassesWhenMatchingHash(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "sha_ok.txt", Content: "hello\n", Mode: WriteModeOverwrite})
+
+	out, err := NewReadTool(dir).Execute(context.Background(), ReadInput{Path: "sha_ok.txt"})
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	rd := out.Details.(ReadDetails)
+
+	one := 1
+	_, err = tool.Execute(context.Background(), WriteInput{
+		Path:            "sha_ok.txt",
+		Mode:            WriteModeReplace,
+		Find:            "hello",
+		Content:         "world",
+		ExpectedMatches: &one,
+		SHA256Before:    rd.SHA256,
+	})
+	if err != nil {
+		t.Fatalf("expected success with correct sha256_before, got: %v", err)
+	}
+	if readFile(t, NewReadTool(dir), "sha_ok.txt") != "world\n" {
+		t.Error("file content not updated")
+	}
+}
+
+// TestSHA256BeforeRejectsStaleWrite verifies the write fails when sha256_before
+// does not match the current file.
+func TestSHA256BeforeRejectsStaleWrite(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "stale.txt", Content: "v1\n", Mode: WriteModeOverwrite})
+
+	// Concurrent modification: another write changes the file.
+	mustWrite(t, tool, WriteInput{Path: "stale.txt", Content: "v2\n", Mode: WriteModeOverwrite})
+
+	staleHash := "0000000000000000000000000000000000000000000000000000000000000000"
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:         "stale.txt",
+		Mode:         WriteModeOverwrite,
+		Content:      "agent-content\n",
+		SHA256Before: staleHash,
+	})
+	if err == nil {
+		t.Fatal("expected stale-write error, got nil")
+	}
+	if !strings.Contains(err.Error(), "stale write rejected") {
+		t.Errorf("expected 'stale write rejected' in error, got: %v", err)
+	}
+	// File must be untouched (still v2).
+	if readFile(t, NewReadTool(dir), "stale.txt") != "v2\n" {
+		t.Error("stale write must not have mutated the file")
+	}
+}
+
+// TestSHA256BeforeIgnoredForNewFile verifies that sha256_before is a no-op when
+// the file does not exist yet (overwrite creating a new file).
+func TestSHA256BeforeIgnoredForNewFile(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:         "sha_new.txt",
+		Mode:         WriteModeOverwrite,
+		Content:      "fresh\n",
+		SHA256Before: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+	})
+	if err != nil {
+		t.Fatalf("expected success for new file regardless of sha256_before, got: %v", err)
+	}
+}
+
+// TestSHA256AfterCanBeUsedAsSHA256Before verifies the round-trip:
+// sha256_after from one write can be fed back as sha256_before for the next.
+func TestSHA256AfterCanBeUsedAsSHA256Before(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "sha_rt.txt", Content: "line1\n", Mode: WriteModeOverwrite})
+
+	one := 1
+	res1, err := tool.Execute(context.Background(), WriteInput{
+		Path:            "sha_rt.txt",
+		Mode:            WriteModeReplace,
+		Find:            "line1",
+		Content:         "line2",
+		ExpectedMatches: &one,
+	})
+	if err != nil {
+		t.Fatalf("first write failed: %v", err)
+	}
+	d1 := res1.Details.(WriteDetails)
+
+	res2, err := tool.Execute(context.Background(), WriteInput{
+		Path:            "sha_rt.txt",
+		Mode:            WriteModeReplace,
+		Find:            "line2",
+		Content:         "line3",
+		ExpectedMatches: &one,
+		SHA256Before:    d1.SHA256After,
+	})
+	if err != nil {
+		t.Fatalf("second write with sha256_before round-trip failed: %v", err)
+	}
+	d2 := res2.Details.(WriteDetails)
+	if !d2.Changed {
+		t.Error("expected second write to produce a change")
+	}
+	if readFile(t, NewReadTool(dir), "sha_rt.txt") != "line3\n" {
+		t.Error("file content does not reflect second write")
+	}
+}
+
+// TestSHA256BeforeWithAppendMode verifies stale detection works with append mode.
+func TestSHA256BeforeWithAppendMode(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "sha_ap.txt", Content: "base\n", Mode: WriteModeOverwrite})
+
+	// Mutate so the hash no longer matches.
+	mustWrite(t, tool, WriteInput{Path: "sha_ap.txt", Content: "changed\n", Mode: WriteModeOverwrite})
+
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:         "sha_ap.txt",
+		Mode:         WriteModeAppend,
+		Content:      "extra\n",
+		SHA256Before: "0000000000000000000000000000000000000000000000000000000000000000",
+	})
+	if err == nil {
+		t.Fatal("expected stale-write error for append, got nil")
+	}
+	if !strings.Contains(err.Error(), "stale write rejected") {
+		t.Errorf("expected 'stale write rejected', got: %v", err)
+	}
+}
+
+// TestUnsupportedModeErrorMentionsNewModes verifies the error message lists
+// the two new modes so agents know they exist.
+func TestUnsupportedModeErrorMentionsNewModes(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:    "un.txt",
+		Mode:    WriteMode("nonsense"),
+		Content: "x",
+	})
+	if err == nil {
+		t.Fatal("expected unsupported-mode error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "append") {
+		t.Errorf("expected 'append' in unsupported-mode error, got: %s", msg)
+	}
+	if !strings.Contains(msg, "insert_after_line") {
+		t.Errorf("expected 'insert_after_line' in unsupported-mode error, got: %s", msg)
+	}
+}
