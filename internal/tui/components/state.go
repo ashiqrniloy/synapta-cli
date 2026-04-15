@@ -525,20 +525,6 @@ func toolResultPlainText(result tools.Result) string {
 	return strings.TrimSpace(b.String())
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 type toolInvocationMeta struct {
 	Name    string
 	Path    string

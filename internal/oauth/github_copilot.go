@@ -260,7 +260,7 @@ func sleepWithCancellation(d time.Duration, signal context.Context) error {
 
 func (g *GitHubCopilotOAuth) pollForAccessToken(tokenURL, deviceCode string, interval, expiresIn int, callbacks llm.OAuthLoginCallbacks) (string, error) {
 	deadline := time.Now().Add(time.Duration(expiresIn) * time.Second)
-	pollInterval := time.Duration(maxInt(interval, 1)) * time.Second
+	pollInterval := time.Duration(max(interval, 1)) * time.Second
 	intervalMultiplier := 1.2
 	slowDownResponses := 0
 
@@ -397,13 +397,6 @@ func (g *GitHubCopilotOAuth) refreshCopilotToken(githubToken, domain string) (*l
 		Access:  result.Token,
 		Expires: expiresMs,
 	}, nil
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func (g *GitHubCopilotOAuth) enableModel(copilotToken, modelID, domain string) bool {

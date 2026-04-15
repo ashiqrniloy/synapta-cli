@@ -175,10 +175,3 @@ func truncateStringToBytesFromEnd(s string, maxBytes int) string {
 	}
 	return string(b[start:])
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
