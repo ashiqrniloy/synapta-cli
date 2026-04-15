@@ -24,30 +24,25 @@ func (m *CodeAgentModel) startChatStream(history []llm.Message) tea.Cmd {
 		return func() tea.Msg { return chatStreamErrMsg{Err: fmt.Errorf("chat service not available")} }
 	}
 
+	// Cancel any previously running stream.
+	if m.cancelStream != nil {
+		m.cancelStream()
+		m.cancelStream = nil
+	}
+
 	providerID := m.selectedProvider
 	modelID := m.selectedModelID
 	streamCh := make(chan tea.Msg, 256)
 	m.streamCh = streamCh
-	// Reset stop flag and channel when starting a new stream
-	m.stopRequested = false
-	m.stopChan = make(chan struct{})
-	stopCh := m.stopChan
+
+	// Create a cancellable context and store the cancel func on the model so
+	// that Ctrl+C (or a steering interrupt) can cancel the in-flight request.
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelStream = cancel
 
 	go func() {
 		defer close(streamCh)
-		// Create a cancellable context
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		// Goroutine to watch for stop requests via channel
-		go func() {
-			select {
-			case <-stopCh:
-				cancel()
-			case <-ctx.Done():
-				// Context cancelled for another reason
-			}
-		}()
+		defer cancel() // ensure ctx is always released
 
 		err := m.chatService.Stream(
 			ctx,
@@ -87,9 +82,9 @@ func (m *CodeAgentModel) startChatStream(history []llm.Message) tea.Cmd {
 			},
 		)
 		if err != nil {
-			// Check if it's a context cancellation (our stop)
 			if ctx.Err() == context.Canceled {
-				streamCh <- chatStreamErrMsg{Err: fmt.Errorf("agent stopped by user")}
+				// Cancelled by user (Ctrl+C) or by a steering interrupt.
+				streamCh <- chatStreamCancelledMsg{}
 			} else {
 				streamCh <- chatStreamErrMsg{Err: err}
 			}

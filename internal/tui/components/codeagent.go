@@ -1,6 +1,7 @@
 package components
 
 import (
+	"context"
 	"os"
 	"strings"
 	"time"
@@ -126,13 +127,13 @@ type FileAddedMsg struct {
 
 type chatStreamDoneMsg struct{}
 
+// chatStreamCancelledMsg is sent when the stream is cancelled by the user
+// (Ctrl+C) or interrupted by a mid-stream steering message.
+type chatStreamCancelledMsg struct{}
+
 type chatStreamErrMsg struct {
 	Err error
 }
-
-type agentStopRequestedMsg struct{}
-
-type streamStopMsg struct{}
 
 type compactDoneMsg struct {
 	Compacted bool
@@ -272,12 +273,9 @@ type CodeAgentModel struct {
 	likelyPromptCacheHit      bool
 	promptBuildCount          int
 	stablePrefixChangeCount   int
-        stopRequested        bool
-        pendingUserMessage  string
-	availableExtensions       []core.Extension
-
-	// For stopping agentic tasks
-	stopChan chan struct{}
+	cancelStream        context.CancelFunc // cancels the current in-flight LLM stream
+	pendingUserMessage  string             // steering message queued while stream is running
+	availableExtensions []core.Extension
 
 	// Context entries cache — rebuilt only when dirty (avoids expensive
 	// contextManager.Build + SHA-256 hashing on every View() call).
@@ -466,6 +464,8 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleToolTick()
 	case chatStreamDoneMsg:
 		return m.handleChatStreamDone()
+	case chatStreamCancelledMsg:
+		return m.handleChatStreamCancelled()
 	case chatStreamErrMsg:
 		return m.handleChatStreamErr(msg)
 	case compactDoneMsg:
@@ -478,8 +478,6 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleBashCommandDone(msg)
 	case workingTickMsg:
 		return m.handleWorkingTick()
-	case agentStopRequestedMsg:
-		return m.handleAgentStopRequested()
 	case FileAddedMsg:
 		return m.handleFileAdded(msg)
 	case tea.MouseWheelMsg:

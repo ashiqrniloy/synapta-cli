@@ -337,48 +337,50 @@ func (m *CodeAgentModel) handleToolTick() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *CodeAgentModel) handleChatStreamDone() (tea.Model, tea.Cmd) {
-	elapsed := time.Duration(0)
-	if !m.streamStartedAt.IsZero() {
-		elapsed = time.Since(m.streamStartedAt)
-	}
-	m.isWorking = false
-	m.workingFrame = 0
-	assistantText := strings.TrimSpace(m.currentAssistantText.String())
-	if assistantText != "" {
-		needAppend := true
-		if n := len(m.conversationHistory); n > 0 {
-			last := m.conversationHistory[n-1]
-			if last.Role == "assistant" && strings.TrimSpace(last.Content) == assistantText {
-				needAppend = false
+// flushStreamState resets all stream-related fields after a stream ends for
+// any reason (done, cancelled, error).  It also saves any partial assistant
+// text that was already streamed to the conversation history so context is
+// preserved across a cancel/restart.
+func (m *CodeAgentModel) flushStreamState(savePartialText bool) {
+	if savePartialText {
+		assistantText := strings.TrimSpace(m.currentAssistantText.String())
+		if assistantText != "" {
+			needAppend := true
+			if n := len(m.conversationHistory); n > 0 {
+				last := m.conversationHistory[n-1]
+				if last.Role == "assistant" && strings.TrimSpace(last.Content) == assistantText {
+					needAppend = false
+				}
 			}
-		}
-		if needAppend {
-			assistantMsg := llm.Message{Role: "assistant", Content: assistantText}
-			m.conversationHistory = append(m.conversationHistory, assistantMsg)
-			m.markContextEntriesDirty()
-			if m.sessionStore != nil {
-				_ = m.sessionStore.AppendMessage(assistantMsg)
+			if needAppend {
+				assistantMsg := llm.Message{Role: "assistant", Content: assistantText}
+				m.conversationHistory = append(m.conversationHistory, assistantMsg)
+				m.markContextEntriesDirty()
+				if m.sessionStore != nil {
+					_ = m.sessionStore.AppendMessage(assistantMsg)
+				}
 			}
 		}
 	}
 	m.currentAssistantText.Reset()
 	m.activeAssistantIdx = -1
 	m.streamCh = nil
+	m.cancelStream = nil
 	m.streamStartedAt = time.Time{}
 	m.firstChunkAt = time.Time{}
 	m.streamChunkCount = 0
 	m.streamCharCount = 0
 	m.activeToolIndices = map[string]int{}
+	m.isWorking = false
+	m.workingFrame = 0
+}
 
-	// Check for pending user messages to continue the task
-	if m.pendingUserMessage != "" {
-		pendingMsg := m.pendingUserMessage
-		m.pendingUserMessage = ""
-		m.appendSystemMessage("[Steer] Processing queued message...", "working")
-		// Continue with the pending message
-		return m, m.continueWithPendingMessage(pendingMsg)
+func (m *CodeAgentModel) handleChatStreamDone() (tea.Model, tea.Cmd) {
+	elapsed := time.Duration(0)
+	if !m.streamStartedAt.IsZero() {
+		elapsed = time.Since(m.streamStartedAt)
 	}
+	m.flushStreamState(true)
 
 	if elapsed > 0 {
 		m.finalizeWorkingSystemMessage(fmt.Sprintf("✓ Done in %s", elapsed.Round(time.Millisecond)), "done")
@@ -389,17 +391,29 @@ func (m *CodeAgentModel) handleChatStreamDone() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleChatStreamCancelled is called when the in-flight stream was cancelled
+// (via Ctrl+C or a steering interrupt).  If a pending steering message exists
+// it is injected into the conversation and a new stream is started immediately.
+func (m *CodeAgentModel) handleChatStreamCancelled() (tea.Model, tea.Cmd) {
+	// Save whatever the assistant had streamed so far — it becomes part of the
+	// conversation context for the new (or resumed) request.
+	m.flushStreamState(true)
+
+	if m.pendingUserMessage != "" {
+		pendingMsg := m.pendingUserMessage
+		m.pendingUserMessage = ""
+		m.appendSystemMessage("[Steer] Steering: injecting your message now…", "info")
+		return m, m.continueWithPendingMessage(pendingMsg)
+	}
+
+	// Plain Ctrl+C cancel — just show a cancelled notice.
+	m.finalizeWorkingSystemMessage("⊘ Cancelled", "info")
+	m.refreshChatViewport()
+	return m, nil
+}
+
 func (m *CodeAgentModel) handleChatStreamErr(msg chatStreamErrMsg) (tea.Model, tea.Cmd) {
-	m.isWorking = false
-	m.workingFrame = 0
-	m.currentAssistantText.Reset()
-	m.activeAssistantIdx = -1
-	m.streamCh = nil
-	m.streamStartedAt = time.Time{}
-	m.firstChunkAt = time.Time{}
-	m.streamChunkCount = 0
-	m.streamCharCount = 0
-	m.activeToolIndices = map[string]int{}
+	m.flushStreamState(false)
 	m.finalizeWorkingSystemMessage("✗ "+msg.Err.Error(), "error")
 	m.refreshChatViewport()
 	return m, nil
@@ -525,14 +539,6 @@ func (m *CodeAgentModel) handleWorkingTick() (tea.Model, tea.Cmd) {
 		m.refreshChatViewport()
 		return m, workingTickCmd()
 	}
-	return m, nil
-}
-
-
-func (m *CodeAgentModel) handleAgentStopRequested() (tea.Model, tea.Cmd) {
-	// Set the stop flag so the stream will be stopped when appropriate
-	m.stopRequested = true
-	m.appendSystemMessage("[Agent] Stopping after current operation completes...", "working")
 	return m, nil
 }
 

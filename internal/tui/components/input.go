@@ -29,14 +29,6 @@ func (m *CodeAgentModel) getQuitKey() string {
 	return "ctrl+c"
 }
 
-func (m *CodeAgentModel) getStopKey() string {
-	if m.cfg != nil && m.cfg.Keybindings.Stop != "" {
-		return normalizeKeyName(m.cfg.Keybindings.Stop)
-	}
-	return "ctrl+q"
-}
-
-
 func (m *CodeAgentModel) getContextKey() string {
 	if m.cfg != nil && m.cfg.Keybindings.Context != "" {
 		return normalizeKeyName(m.cfg.Keybindings.Context)
@@ -316,12 +308,13 @@ func (m *CodeAgentModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 	keyStr := msg.String()
 	quitKey := m.getQuitKey()
 	helpKey := m.getHelpKey()
-	stopKey := m.getStopKey()
 
-	// Handle stop key - only works when agentic task is running
-	if keyStr == stopKey && m.isWorking {
-		m.stopRequested = true
-		m.appendSystemMessage("[Agent] Stopping after current operation completes...", "working")
+	// Ctrl+C while the LLM is running: cancel the stream instead of quitting.
+	if keyStr == quitKey && m.isWorking {
+		if m.cancelStream != nil {
+			m.cancelStream()
+			m.cancelStream = nil
+		}
 		return m, nil
 	}
 

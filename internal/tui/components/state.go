@@ -103,8 +103,7 @@ func (m *CodeAgentModel) keybindingRows() []keybindingRow {
 		{Action: "Thinking level", Binding: "ctrl+t", Description: "Cycle thinking level for selected model"},
 		{Action: "Skill picker", Binding: "@", Description: "Open skills suggestions"},
 		{Action: "Search session", Binding: ">", Description: "Search current session content"},
-		{Action: "Stop agent", Binding: m.getStopKey(), Description: "Stop running agentic task"},
-		{Action: "Quit", Binding: m.getQuitKey(), Description: "Exit Synapta Code"},
+		{Action: "Cancel / Quit", Binding: m.getQuitKey(), Description: "Cancel running LLM request (Ctrl+C while working) or quit the app"},
 	}
 
 	rows = append(rows, m.commandShortcutRows()...)

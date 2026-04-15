@@ -42,14 +42,6 @@ func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quit
 		return true, tea.Sequence(tea.Raw(ansi.ResetModeMouseButtonEvent+ansi.ResetModeMouseAnyEvent+ansi.ResetModeMouseExtSgr), tea.Quit)
 	}
 
-	// Handle stop key - only works when agentic task is running
-	stopKey := m.getStopKey()
-	if keyStr == stopKey && m.isWorking {
-		m.stopRequested = true
-		m.appendSystemMessage("[Agent] Stop requested. Finishing current operation...", "info")
-		return true, nil
-	}
-
 	if keyStr == "esc" && m.inputMode == inputModeBash && strings.TrimSpace(m.ta.Value()) == "" {
 		m.applyInputMode(inputModeChat)
 		m.appendSystemMessage("[Bash] Mode disabled", "info")
@@ -154,17 +146,23 @@ func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quit
 }
 
 func (m *CodeAgentModel) handleSubmitKeyPress() (bool, tea.Cmd) {
-	// Check if there's a pending message to incorporate into current task
+	// Steering: if the LLM is working, capture the message and immediately
+	// cancel the current stream.  The cancelled stream handler will inject
+	// the steering message and restart the request right away.
 	if m.isWorking {
 		text := strings.TrimSpace(m.ta.Value())
 		if text != "" && !strings.HasPrefix(text, ":") {
-			// Store the message to be incorporated after current task completes
-			if m.pendingUserMessage != "" {
-				m.pendingUserMessage += "\n"
-			}
-			m.pendingUserMessage += text
+			// Replace (don't append) any previously queued steer message so
+			// the most recent instruction is always what gets injected.
+			m.pendingUserMessage = text
 			m.ta.SetValue("")
-			m.appendSystemMessage("[Steer] Message queued. Will be processed after current task completes.", "info")
+			m.appendSystemMessage("[Steer] Message received — interrupting current task to steer…", "info")
+			// Cancel the running stream; handleChatStreamCancelled will pick
+			// up pendingUserMessage and restart with it in context.
+			if m.cancelStream != nil {
+				m.cancelStream()
+				m.cancelStream = nil
+			}
 			return true, nil
 		}
 		return true, nil

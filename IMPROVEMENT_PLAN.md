@@ -48,149 +48,14 @@ The codebase is a well-structured agentic coding assistant with a Bubbletea TUI,
 
 Addressing all items removes ~650+ lines of dead/duplicate code, eliminates redundant network calls on every chat interaction, and makes the codebase significantly easier to maintain and extend.
 
-
 ---
 
 
 ---
 
-### 3. Deduplicate `llm/kilo.go` and `oauth/kilo.go`
 
-**Locations:**
-- `internal/llm/kilo.go` (~500 lines) — `KiloGateway` struct
-- `internal/oauth/kilo.go` (~380 lines) — `KiloOAuth` struct
-
-**Problem:**
-Both files implement nearly identical Kilo Gateway functionality:
-
-| Capability | `llm/kilo.go` | `oauth/kilo.go` |
-|---|---|---|
-| Device auth flow | `initiateDeviceAuth` + `pollDeviceAuth` | `startDeviceAuth` + `pollDeviceAuth` |
-| Model fetching | `FetchModels` + `mapModel` | `FetchModels` + `mapModel` |
-| Balance fetching | `FetchBalance` | `FetchBalance` |
-| Free-model detection | `isFreeModel` | `isFreeModel` |
-| Price parsing | `parsePriceStr` | `parsePrice` |
-| Response types | `DeviceAuthResponse`, `ModelsResponse`, etc. | `kiloDeviceAuthResponse`, `kiloModelsResponse`, etc. |
-
-The `oauth/kilo.go` types use `*string` for pricing while `llm/kilo.go` uses `string`. The model mapping logic is slightly different. This is **~880 lines of near-duplicate code**.
-
-**What To Do:**
-1. Make `internal/llm/kilo.go` (`KiloGateway`) the **single source of truth** for all Kilo API interactions.
-2. Rewrite `internal/oauth/kilo.go` (`KiloOAuth`) to **delegate** to `KiloGateway` for device auth, model fetching, and balance checking.
-3. Remove all duplicate types, duplicate helper functions, and duplicate API call logic from `oauth/kilo.go`.
-4. `KiloOAuth` should only contain the thin adapter logic needed to satisfy the `OAuthProvider` interface.
-
-**Why:**
-- ~400 lines of duplicate code removed.
-- Single place to fix bugs or update API interactions.
-- No risk of the two implementations drifting apart (they likely already have subtle differences in error handling).
-
-**Effort:** ~2 hours
-
----
-
-## P1 — High: Dead Code & Unused Abstractions
-
-### 4. Remove Unused `Manager`/`Registry` Abstraction
-
-**Location:** `internal/llm/types.go`
-
-**Problem:**
-The following types and functions are defined but **never called anywhere** outside their own file:
-
-- `Manager` struct
-- `Registry` struct
-- `NewManager()`
-- `NewRegistry()`
-- `RegisterProvider()`
-- `GetProvider()`
-- `GetAllModels()`
-- `GetAvailableModels()`
-- `FindModel()`
-- `GetModelProvider()`
-- `RefreshModels()`
-- `RegisterOAuthProvider()`
-- `GetOAuthProvider()`
-- `ListOAuthProviders()`
-- `LoginOAuth()`
-- `LogoutOAuth()`
-- `SetAPIKey()`
-- `RemoveAPIKey()`
-- `GetAPIKeyForModel()`
-- `getEnvVarName()`
-- `IsUsingOAuth()`
-- `refreshProviderModels()`
-
-The codebase uses `ChatService` with direct provider construction instead. This is **~180 lines of dead code** that adds confusion about the intended architecture.
-
-**What To Do:**
-Remove the `Manager` struct, `Registry` struct, and all their methods from `llm/types.go`. If the abstraction is needed in the future, it can be reintroduced with a proper design.
-
-**Why:**
-- ~180 lines of dead code removed.
-- Eliminates architectural ambiguity about how providers are supposed to be managed.
-- New contributors won't be confused by an elaborate system that nothing uses.
-
-**Effort:** ~30 minutes
-
----
-
-### 5. Remove Additional Dead Functions and Types
-
-**Problem:**
-Scattered across the codebase are functions and types that are declared but never referenced:
-
-| Function/Type | Location | Issue |
-|---|---|---|
-| `strPtr()` | `internal/llm/defaults.go:112` | Never called anywhere |
-| `FormatCredits()` | `internal/llm/types.go:530` | Never called; `FormatBalance()` in `kilo.go` is used instead |
-| `Time()` | `internal/llm/types.go:539` | Never called |
-| `APIOpenAIResponses` | `internal/llm/types.go:18` | Declared as a constant but never referenced |
-| `NewInMemoryAuthStorage()` | `internal/llm/types.go:227` | Never called |
-| `GetAuthPath()` | `internal/llm/config.go:29` | Never called |
-| `GetModelsPath()` | `internal/llm/config.go:34` | Never called |
-| `SetInitiatorHeader()` | `internal/llm/provider.go:231` | Method exists but is never called |
-| `SetAPIKey()` on `OpenAIProvider` | `internal/llm/provider.go:43` | Never called |
-| `SetBaseURL()` on `OpenAIProvider` | `internal/llm/provider.go:47` | Never called |
-| `BashExecutionToText()` | `internal/core/context_manager.go:339` | Never called |
-| `DebugDescribe()` | `internal/core/context_manager.go:354` | Never called |
-| `ReadExecutor`, `WriteExecutor`, `BashExecutor` type aliases | `internal/core/tools/types.go:93-95` | Declared as "compile-time guards" but never used for enforcement |
-| `buildRuntimeMetadata()` | `internal/core/context_manager.go:193` | Always returns `""` — placeholder with no implementation |
-| `ExpandSkillReferences()` | `internal/core/skills.go` | Only `ExpandSkillReferencesWithCache()` is called |
-
-**What To Do:**
-Remove all of the above. For `buildRuntimeMetadata()`, either implement it or remove the call and the method entirely.
-
-**Why:**
-- ~250+ lines of dead code removed.
-- Reduced cognitive load when reading the codebase.
-- Clearer picture of what the system actually does vs. what was planned but never wired up.
-
-**Effort:** ~1 hour
-
----
 
 ## P2 — Medium: Performance Issues
-
-### 6. Cache `buildContextEntries()` Results
-
-**Location:** `internal/tui/components/codeagent.go` — `renderContextPane()`
-
-**Problem:**
-`renderContextPane()` calls `m.buildContextEntries()` which calls `m.contextManager.Build()`. This reconstructs the entire prompt including **reading project context files from disk**, loading skills, and computing **SHA-256 hashes**. This happens on every `View()` call, which in Bubbletea means **every keypress, every scroll, every mouse move, every tick timer**.
-
-**What To Do:**
-1. Add a `cachedContextEntries []contextEntry` field and a `contextEntriesDirty bool` flag to `CodeAgentModel`.
-2. Set `contextEntriesDirty = true` when `conversationHistory` changes, skills change, or the session changes.
-3. In `renderContextPane()`, rebuild entries only when the dirty flag is set; otherwise use the cached slice.
-
-**Why:**
-- Eliminates disk I/O and crypto operations from the render hot path.
-- Smoother TUI experience, especially over SSH or slow disks.
-- Context pane content only actually changes when conversation or context changes — not on every render.
-
-**Effort:** ~1 hour
-
 ---
 
 ### 7. Shared HTTP Client with Proper Configuration
@@ -219,27 +84,6 @@ Remove all of the above. For `buildRuntimeMetadata()`, either implement it or re
 
 ---
 
-### 8. Replace O(n*m) LCS Diff Algorithm
-
-**Location:** `internal/core/tools/write.go` — `computeLineDiffOps()`
-
-**Problem:**
-The function computes line diffs using a classic DP LCS algorithm with **O(n*m) memory**. While there's a guard at 2M cells, for files of 1000 lines being diffed against 1000 lines, it allocates a **4MB+ matrix** on every write operation. Larger files hit the guard and fall back to a full-replacement diff, losing useful context.
-
-**What To Do:**
-- Replace with **Myers' diff algorithm** (O(n+m) space in practice) or use a well-tested library like `github.com/sergi/go-diff`.
-- Alternative: Use patience diff which produces more readable output for code changes.
-
-**Why:**
-- Better memory efficiency for large file diffs.
-- Faster execution — Myers is O(nd) where d is the number of differences.
-- More readable diff output for code changes.
-- Removes the arbitrary 2M cell cutoff and its lossy fallback.
-
-**Effort:** ~2 hours
-
----
-
 ### 9. Deduplicate `estimateTextTokens()`
 
 **Locations:**
@@ -258,59 +102,9 @@ Move to a shared utility (e.g., `internal/core/tokenutil.go` or `internal/llm/to
 
 **Effort:** ~15 minutes
 
----
-
-### 10. Use Built-in `min()`/`max()`
-
-**Locations:**
-- `min()` defined in `codeagent.go:3100` and `truncate.go:179`
-- `max()` defined in `codeagent.go:3107` and `read.go:138`
-- `maxInt()` defined in `github_copilot.go:411`
-
-**Problem:**
-Custom `min`/`max`/`maxInt` helper functions are defined in multiple files. The `go.mod` declares `go 1.26`, which has built-in generic `min()` and `max()` functions since Go 1.21.
-
-**What To Do:**
-Delete all custom `min()`, `max()`, and `maxInt()` definitions. Use the Go builtins directly.
-
-**Why:**
-- Less code.
-- No risk of shadowing or conflicting definitions.
-- Standard Go idiom that every Go developer recognizes.
-
-**Effort:** ~15 minutes
 
 ---
 
-## P3 — Low: Code Quality & Modularity
-
-### 11. Split `llm/types.go` into Focused Files
-
-**Location:** `internal/llm/types.go` (541 lines)
-
-**Problem:**
-This single file contains: message types, API type constants, tool types, credential types, auth storage interfaces and implementations, provider interfaces, OAuth types, the unused Registry, and the unused Manager. It's the most imported file in the project and mixes data types with business logic.
-
-**What To Do:**
-
-| New File | Contents |
-|---|---|
-| `llm/messages.go` | `Message`, `ChatRequest`, `ChatResponse`, `StreamChunk`, `StopReason`, `Usage` |
-| `llm/auth.go` | `AuthStorage`, `AuthEntry`, `Credentials`, `OAuthCredentials`, `InMemoryAuthStorage`, `FileAuthStorage` |
-| `llm/model.go` | `Model`, `Cost`, `CompatConfig`, `InputModality` |
-| `llm/interfaces.go` | `Provider` interface, `OAuthProvider` interface |
-| `llm/tools.go` | `ToolDefinition`, `ToolCall`, `ToolResult` |
-
-Keep `llm/types.go` only for truly shared constants (`APIType` enum).
-
-**Why:**
-- Each file has a clear, single concern.
-- Finding types becomes intuitive by filename.
-- Merge conflicts reduced — changes to auth types don't touch message types.
-
-**Effort:** ~1 hour
-
----
 
 ### 12. Simplify Config Loading with `viper.UnmarshalKey`
 
@@ -382,27 +176,7 @@ Remove `core/toolset.go`. Have callers import and call `tools.NewToolSet()` dire
 
 ---
 
-### 15. Add LLM Streaming Cancellation Support
 
-**Location:** `internal/tui/components/codeagent.go` — `startChatStream()`
-
-**Problem:**
-`startChatStream()` uses `context.Background()`. There is **no way for a user to cancel an in-flight LLM request**. If the model takes 60 seconds to respond or hangs, the user must wait or quit the entire application.
-
-**What To Do:**
-1. Add a `cancelStream context.CancelFunc` field to `CodeAgentModel`.
-2. When `startChatStream()` is called, create a cancellable context: `ctx, cancel := context.WithCancel(context.Background())`.
-3. Store `cancel` in `m.cancelStream`.
-4. On `Ctrl+C` when `isWorking == true`, call `m.cancelStream()` instead of quitting the app.
-5. Pass the cancellable context to `chatService.Stream()`.
-6. Handle the `context.Canceled` error gracefully in the response handler.
-
-**Why:**
-- Users can cancel long-running requests without killing the app.
-- Essential for large-context queries that may take a long time.
-- Standard UX expectation for any streaming interface.
-
-**Effort:** ~2 hours
 
 ---
 
