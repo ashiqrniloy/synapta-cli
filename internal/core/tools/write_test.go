@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -333,72 +334,355 @@ func TestReadDetailsContainsFileFacts(t *testing.T) {
 	}
 }
 
-// ── Myers diff correctness ────────────────────────────────────────────────────
+// ── Display diff correctness (go-udiff backed) ───────────────────────────────
 
-func TestMyersDiffBasic(t *testing.T) {
-	a := []string{"a", "b", "c"}
-	b := []string{"a", "X", "c"}
-	ops := myersDiff(a, b)
+func TestDisplayDiffBasic(t *testing.T) {
+	ins, del, ranges, text := computeDisplayDiff("a\nb\nc\n", "a\nX\nc\n")
+	if ins != 1 || del != 1 {
+		t.Errorf("expected 1 ins + 1 del, got ins=%d del=%d", ins, del)
+	}
+	if len(ranges) == 0 {
+		t.Error("expected non-empty changed ranges")
+	}
+	if !strings.Contains(text, "Changes:") {
+		t.Errorf("expected 'Changes:' in diff text, got: %s", text)
+	}
+}
 
-	dels, adds := 0, 0
-	for _, op := range ops {
-		switch op.Kind {
-		case diffDel:
-			dels++
-		case diffAdd:
-			adds++
+func TestDisplayDiffNoChange(t *testing.T) {
+	ins, del, ranges, text := computeDisplayDiff("same\n", "same\n")
+	if ins != 0 || del != 0 || len(ranges) != 0 || text != "" {
+		t.Errorf("expected no diff for identical content, got ins=%d del=%d ranges=%v text=%q", ins, del, ranges, text)
+	}
+}
+
+func TestDisplayDiffAllAdd(t *testing.T) {
+	ins, del, _, _ := computeDisplayDiff("", "x\ny\n")
+	if ins != 2 || del != 0 {
+		t.Errorf("expected 2 ins + 0 del, got ins=%d del=%d", ins, del)
+	}
+}
+
+func TestDisplayDiffAllDel(t *testing.T) {
+	ins, del, _, _ := computeDisplayDiff("x\ny\n", "")
+	if ins != 0 || del != 2 {
+		t.Errorf("expected 0 ins + 2 del, got ins=%d del=%d", ins, del)
+	}
+}
+
+func TestDisplayDiffLargeFileNoOOM(t *testing.T) {
+	// Build two 5000-line files with ~2% differences.
+	// The old Myers trace would allocate ~1.5 GB; go-udiff must handle it safely.
+	var sb1, sb2 strings.Builder
+	for i := 0; i < 5000; i++ {
+		sb1.WriteString(fmt.Sprintf("line %d with content\n", i))
+		if i%50 == 25 {
+			sb2.WriteString(fmt.Sprintf("MODIFIED line %d\n", i))
+		} else {
+			sb2.WriteString(fmt.Sprintf("line %d with content\n", i))
 		}
 	}
-	if dels != 1 || adds != 1 {
-		t.Errorf("expected 1 del + 1 add, got %d del + %d add", dels, adds)
+	ins, del, _, _ := computeDisplayDiff(sb1.String(), sb2.String())
+	if ins == 0 || del == 0 {
+		t.Errorf("expected non-zero insertions/deletions for modified large file, got ins=%d del=%d", ins, del)
 	}
 }
 
-func TestMyersDiffEmpty(t *testing.T) {
-	ops := myersDiff(nil, nil)
-	if len(ops) != 0 {
-		t.Errorf("expected no ops for empty inputs, got %d", len(ops))
+// ── patch mode: correctness ───────────────────────────────────────────────────
+
+// TestPatchModeBasic verifies a well-formed unified diff is applied correctly.
+func TestPatchModeBasic(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "d.txt", Content: "a\nb\nc\n", Mode: WriteModeOverwrite})
+
+	patch := strings.Join([]string{
+		"--- a/d.txt",
+		"+++ b/d.txt",
+		"@@ -1,3 +1,3 @@",
+		" a",
+		"-b",
+		"+B",
+		" c",
+	}, "\n")
+	mustWrite(t, tool, WriteInput{Path: "d.txt", Mode: WriteModePatch, UnifiedDiff: patch})
+	if got := readFile(t, NewReadTool(dir), "d.txt"); got != "a\nB\nc\n" {
+		t.Fatalf("basic patch: got %q", got)
 	}
 }
 
-func TestMyersDiffAllAdd(t *testing.T) {
-	ops := myersDiff(nil, []string{"x", "y"})
-	if len(ops) != 2 {
-		t.Errorf("expected 2 add ops, got %d", len(ops))
-	}
-	for _, op := range ops {
-		if op.Kind != diffAdd {
-			t.Errorf("expected all adds, got %s", op.Kind)
-		}
+// TestPatchModeMultiHunk verifies a diff with two separate hunks is applied in order.
+func TestPatchModeMultiHunk(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	content := "a\nb\nc\nd\ne\nf\ng\nh\n"
+	mustWrite(t, tool, WriteInput{Path: "mh.txt", Content: content, Mode: WriteModeOverwrite})
+
+	patch := strings.Join([]string{
+		"--- a/mh.txt",
+		"+++ b/mh.txt",
+		"@@ -2,3 +2,3 @@",
+		" b",
+		"-c",
+		"+C",
+		" d",
+		"@@ -6,3 +6,3 @@",
+		" f",
+		"-g",
+		"+G",
+		" h",
+	}, "\n")
+	mustWrite(t, tool, WriteInput{Path: "mh.txt", Mode: WriteModePatch, UnifiedDiff: patch})
+	got := readFile(t, NewReadTool(dir), "mh.txt")
+	if !strings.Contains(got, "C") || !strings.Contains(got, "G") {
+		t.Fatalf("multi-hunk patch: got %q", got)
 	}
 }
 
-func TestMyersDiffAllDel(t *testing.T) {
-	ops := myersDiff([]string{"x", "y"}, nil)
-	if len(ops) != 2 {
-		t.Errorf("expected 2 del ops, got %d", len(ops))
-	}
-	for _, op := range ops {
-		if op.Kind != diffDel {
-			t.Errorf("expected all dels, got %s", op.Kind)
-		}
+// TestPatchModePureInsertion verifies a hunk that only adds lines (no context).
+func TestPatchModePureInsertion(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "ins.txt", Content: "a\nb\n", Mode: WriteModeOverwrite})
+
+	patch := strings.Join([]string{
+		"--- a/ins.txt",
+		"+++ b/ins.txt",
+		"@@ -1,0 +2,1 @@",
+		"+between",
+	}, "\n")
+	mustWrite(t, tool, WriteInput{Path: "ins.txt", Mode: WriteModePatch, UnifiedDiff: patch})
+	got := readFile(t, NewReadTool(dir), "ins.txt")
+	if !strings.Contains(got, "between") {
+		t.Fatalf("pure-insertion patch: got %q", got)
 	}
 }
 
-// ── patch mode edge cases ─────────────────────────────────────────────────────
+// TestPatchModeNoTrailingNewline verifies files without trailing newlines are handled.
+func TestPatchModeNoTrailingNewline(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "nonl.txt", Content: "a\nb\nc", Mode: WriteModeOverwrite})
 
+	patch := strings.Join([]string{
+		"--- a/nonl.txt",
+		"+++ b/nonl.txt",
+		"@@ -2 +2 @@",
+		"-b",
+		"+B",
+	}, "\n")
+	mustWrite(t, tool, WriteInput{Path: "nonl.txt", Mode: WriteModePatch, UnifiedDiff: patch})
+	got := readFile(t, NewReadTool(dir), "nonl.txt")
+	if !strings.Contains(got, "B") {
+		t.Fatalf("no-trailing-newline patch: got %q", got)
+	}
+}
+
+// ── patch mode: LLM tolerance ─────────────────────────────────────────────────
+//
+// These tests cover the exact failure modes that previously caused agents to
+// abandon patch mode in favour of overwrite.
+
+// TestPatchModeToleratesOffByOneHeader verifies that a hunk header with the
+// start line off by one (the most common LLM mistake) is still applied by the
+// ±patchFuzz search window.
+func TestPatchModeToleratesOffByOneHeader(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "obo.txt", Content: "a\nb\nc\nd\ne\n", Mode: WriteModeOverwrite})
+
+	// File: change line 3 (c→C). LLM wrote "@@ -4 …" instead of "@@ -3 …".
+	patch := strings.Join([]string{
+		"--- a/obo.txt",
+		"+++ b/obo.txt",
+		"@@ -4,3 +4,3 @@", // off by one — real position is line 2
+		" b",
+		"-c",
+		"+C",
+		" d",
+	}, "\n")
+	mustWrite(t, tool, WriteInput{Path: "obo.txt", Mode: WriteModePatch, UnifiedDiff: patch})
+	got := readFile(t, NewReadTool(dir), "obo.txt")
+	if got != "a\nb\nC\nd\ne\n" {
+		t.Fatalf("off-by-one header not tolerated: got %q", got)
+	}
+}
+
+// TestPatchModeToleratesWrongCount verifies that a hunk header with incorrect
+// line counts is applied correctly (counts are ignored, only start matters).
+func TestPatchModeToleratesWrongCount(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "wc.txt", Content: "a\nb\nc\nd\n", Mode: WriteModeOverwrite})
+
+	// LLM wrote ",6" but there are only 3 context lines.
+	patch := strings.Join([]string{
+		"--- a/wc.txt",
+		"+++ b/wc.txt",
+		"@@ -1,6 +1,6 @@", // wrong count, correct start
+		" a",
+		"-b",
+		"+B",
+		" c",
+	}, "\n")
+	mustWrite(t, tool, WriteInput{Path: "wc.txt", Mode: WriteModePatch, UnifiedDiff: patch})
+	got := readFile(t, NewReadTool(dir), "wc.txt")
+	if got != "a\nB\nc\nd\n" {
+		t.Fatalf("wrong-count header not tolerated: got %q", got)
+	}
+}
+
+// TestPatchModeToleratesCRLFInDiff verifies that a diff with Windows-style
+// CRLF line endings is normalised and applied correctly.
+func TestPatchModeToleratesCRLFInDiff(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "crlf.txt", Content: "a\nb\nc\n", Mode: WriteModeOverwrite})
+
+	// Build the patch with CRLF endings (common from Windows clipboard paste).
+	patchLines := []string{
+		"--- a/crlf.txt",
+		"+++ b/crlf.txt",
+		"@@ -1,3 +1,3 @@",
+		" a",
+		"-b",
+		"+B",
+		" c",
+	}
+	patch := strings.Join(patchLines, "\r\n")
+	mustWrite(t, tool, WriteInput{Path: "crlf.txt", Mode: WriteModePatch, UnifiedDiff: patch})
+	got := readFile(t, NewReadTool(dir), "crlf.txt")
+	if got != "a\nB\nc\n" {
+		t.Fatalf("CRLF diff not tolerated: got %q", got)
+	}
+}
+
+// TestPatchModeToleratesTrailingWhitespaceInContext verifies that context lines
+// with minor trailing-whitespace differences are still matched.
+func TestPatchModeToleratesTrailingWhitespaceInContext(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	// File has trailing spaces on the context line.
+	mustWrite(t, tool, WriteInput{Path: "twspc.txt", Content: "a\nb   \nc\n", Mode: WriteModeOverwrite})
+
+	// Diff context line omits the trailing spaces (what most LLMs produce).
+	patch := strings.Join([]string{
+		"--- a/twspc.txt",
+		"+++ b/twspc.txt",
+		"@@ -1,3 +1,3 @@",
+		" a",
+		" b",   // no trailing spaces — must still match "b   "
+		"-c",
+		"+C",
+	}, "\n")
+	mustWrite(t, tool, WriteInput{Path: "twspc.txt", Mode: WriteModePatch, UnifiedDiff: patch})
+	got := readFile(t, NewReadTool(dir), "twspc.txt")
+	if !strings.Contains(got, "C") {
+		t.Fatalf("trailing-whitespace context not tolerated: got %q", got)
+	}
+}
+
+// TestPatchModeToleratesNoNewlineAtEOFMarker verifies the
+// "\ No newline at end of file" marker is silently consumed.
+func TestPatchModeToleratesNoNewlineMarker(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "nnl.txt", Content: "a\nb\nc\n", Mode: WriteModeOverwrite})
+
+	patch := strings.Join([]string{
+		"--- a/nnl.txt",
+		"+++ b/nnl.txt",
+		"@@ -1,3 +1,3 @@",
+		" a",
+		"-b",
+		"+B",
+		`\ No newline at end of file`,
+		" c",
+	}, "\n")
+	mustWrite(t, tool, WriteInput{Path: "nnl.txt", Mode: WriteModePatch, UnifiedDiff: patch})
+	got := readFile(t, NewReadTool(dir), "nnl.txt")
+	if got != "a\nB\nc\n" {
+		t.Fatalf("no-newline marker not tolerated: got %q", got)
+	}
+}
+
+// TestPatchModeToleratesMissingTrailingContext verifies that a hunk with fewer
+// context lines than stated in the header is still applied (truncated context
+// is very common when LLMs generate diffs near the end of a file).
+func TestPatchModeToleratesMissingTrailingContext(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	mustWrite(t, tool, WriteInput{Path: "mtc.txt", Content: "a\nb\nc\nd\n", Mode: WriteModeOverwrite})
+
+	// Header says 3 context lines but only 1 is actually present after the edit.
+	patch := strings.Join([]string{
+		"--- a/mtc.txt",
+		"+++ b/mtc.txt",
+		"@@ -1,4 +1,4 @@",
+		" a",
+		"-b",
+		"+B",
+		// trailing context "c" and "d" intentionally omitted
+	}, "\n")
+	mustWrite(t, tool, WriteInput{Path: "mtc.txt", Mode: WriteModePatch, UnifiedDiff: patch})
+	got := readFile(t, NewReadTool(dir), "mtc.txt")
+	if got != "a\nB\nc\nd\n" {
+		t.Fatalf("missing trailing context not tolerated: got %q", got)
+	}
+}
+
+// TestPatchModeFuzzWindowExceededReturnsError verifies that when a hunk's
+// context is completely wrong (beyond the fuzz window), a descriptive error
+// is returned rather than silently applying to the wrong location.
+func TestPatchModeFuzzWindowExceededReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewWriteTool(dir)
+	// 20-line file; hunk starts at line 1 but context refers to lines far away.
+	var sb strings.Builder
+	for i := 1; i <= 20; i++ {
+		sb.WriteString(fmt.Sprintf("line%d\n", i))
+	}
+	mustWrite(t, tool, WriteInput{Path: "fuzz.txt", Content: sb.String(), Mode: WriteModeOverwrite})
+
+	// Context that does not exist anywhere in the file.
+	patch := strings.Join([]string{
+		"--- a/fuzz.txt",
+		"+++ b/fuzz.txt",
+		"@@ -1,3 +1,3 @@",
+		" NOSUCHLINE",
+		"-NOSUCHDELETE",
+		"+REPLACEMENT",
+		" NOSUCHCONTEXT",
+	}, "\n")
+	_, err := tool.Execute(context.Background(), WriteInput{
+		Path:        "fuzz.txt",
+		Mode:        WriteModePatch,
+		UnifiedDiff: patch,
+	})
+	if err == nil {
+		t.Fatal("expected error when fuzz window exceeded, got nil")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' in error, got: %v", err)
+	}
+}
+
+// ── patch mode: error cases ───────────────────────────────────────────────────
+
+// TestPatchModeContextMismatchError verifies that a context line that is wrong
+// beyond the fuzz window produces a clear error (not a silent wrong edit).
+// The file is 3 lines; "X" does not appear anywhere, so even ±3 fuzz fails.
 func TestPatchModeContextMismatchError(t *testing.T) {
 	dir := t.TempDir()
 	tool := NewWriteTool(dir)
 	mustWrite(t, tool, WriteInput{Path: "pm.txt", Content: "a\nb\nc\n", Mode: WriteModeOverwrite})
 
-	// Context line says "X" but file has "b" — should return a clear error.
 	patch := strings.Join([]string{
 		"--- a/pm.txt",
 		"+++ b/pm.txt",
 		"@@ -1,3 +1,3 @@",
 		" a",
-		" X", // wrong context
+		" X", // "X" does not exist in the file at any position
 		"+B",
 		" c",
 	}, "\n")
@@ -410,8 +694,9 @@ func TestPatchModeContextMismatchError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for context mismatch, got nil")
 	}
-	if !strings.Contains(err.Error(), "mismatch") {
-		t.Errorf("expected 'mismatch' in error, got: %v", err)
+	// Error must be actionable — contains either "not found" or "mismatch".
+	if !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("expected actionable error ('not found' or 'mismatch'), got: %v", err)
 	}
 }
 
