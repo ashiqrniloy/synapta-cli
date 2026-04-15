@@ -70,18 +70,29 @@ import (
 // ─── Timeout constants ────────────────────────────────────────────────────────
 
 const (
-	// defaultTimeout is the overall deadline for non-LLM requests.
+	// defaultTimeout is the overall deadline for non-LLM requests (OAuth,
+	// update checks, etc.).
 	defaultTimeout = 120 * time.Second
+
+	// defaultHeaderTimeout is how long we wait for response headers on the
+	// Default client.  Short-lived admin calls should respond quickly; 120 s
+	// is a generous ceiling while still surfacing hung servers promptly.
+	defaultHeaderTimeout = 120 * time.Second
 
 	// llmTimeout is the overall deadline for non-streaming LLM calls.
 	llmTimeout = 300 * time.Second
 
-	// llmHeaderTimeout is how long we wait for response headers on both the
-	// non-streaming LLM client and the streaming LLM client.  120 s is
-	// intentionally generous: slow models (o-series, Codex) require
-	// significant server-side processing before they can write the first
-	// response byte.
-	llmHeaderTimeout = 120 * time.Second
+	// llmHeaderTimeout is how long we wait for the *first* response header byte
+	// on a non-streaming LLM call.  Slow reasoning models (o-series, Codex on
+	// /responses) spend significant server-side time before they can write any
+	// output; 300 s matches the overall llmTimeout so the header wait never
+	// fires before the overall deadline does.
+	llmHeaderTimeout = 300 * time.Second
+
+	// llmStreamHeaderTimeout is how long we wait for response headers on a
+	// streaming / SSE call.  Same reasoning as llmHeaderTimeout — the model may
+	// think for a long time before emitting the first token.
+	llmStreamHeaderTimeout = 300 * time.Second
 
 	// Common transport knobs.
 	maxIdleConns        = 100
@@ -101,7 +112,9 @@ var (
 	// update checks, etc.).  Do NOT use it for LLM API calls.
 	Default *http.Client
 
-	// LLM is used for non-streaming LLM API calls.
+	// LLM is used for non-streaming LLM API calls.  It has its own transport
+	// with a 300 s ResponseHeaderTimeout to accommodate slow reasoning models
+	// (o-series, Codex) that take a long time to start responding.
 	LLM *http.Client
 
 	// LLMStream is used for streaming / SSE LLM API calls.  It has its own
@@ -121,8 +134,32 @@ func init() {
 		KeepAlive: keepAliveInterval,
 	}
 
-	// ── transport shared by Default and LLM ──────────────────────────────
-	sharedTransport := &http.Transport{
+	// ── transport for Default (OAuth, update checks, short admin calls) ───
+	//
+	// Kept separate from LLM so its tight ResponseHeaderTimeout does not
+	// interfere with slow-to-respond LLM endpoints.
+	defaultTransport := &http.Transport{
+		DialContext:           dialer.DialContext,
+		MaxIdleConns:          maxIdleConns,
+		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
+		IdleConnTimeout:       idleConnTimeout,
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
+		ResponseHeaderTimeout: defaultHeaderTimeout,
+		ForceAttemptHTTP2:     true,
+	}
+
+	Default = &http.Client{
+		Transport: traceRoundTripper("default", defaultTransport),
+		Timeout:   defaultTimeout,
+	}
+
+	// ── dedicated transport for LLM (non-streaming) ───────────────────────
+	//
+	// ResponseHeaderTimeout = 300 s matches the overall client Timeout so the
+	// header wait never fires before the overall deadline.  Slow reasoning
+	// models routinely need >120 s of server-side processing before the first
+	// response byte is written.
+	llmTransport := &http.Transport{
 		DialContext:           dialer.DialContext,
 		MaxIdleConns:          maxIdleConns,
 		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
@@ -132,40 +169,31 @@ func init() {
 		ForceAttemptHTTP2:     true,
 	}
 
-	Default = &http.Client{
-		Transport: traceRoundTripper("default", sharedTransport),
-		Timeout:   defaultTimeout,
-	}
-
 	LLM = &http.Client{
-		Transport: traceRoundTripper("llm", sharedTransport),
+		Transport: traceRoundTripper("llm", llmTransport),
 		Timeout:   llmTimeout,
 	}
 
 	// ── dedicated transport for LLMStream ────────────────────────────────
 	//
-	// This transport is intentionally separate from sharedTransport.  The
-	// only behavioural difference is that there is no client-level Timeout
-	// on LLMStream (the stream stays open for the duration of model output),
-	// but both transports carry the same generous ResponseHeaderTimeout so
-	// neither will hang indefinitely waiting for a server that never responds.
+	// No client-level Timeout: the stream stays open for as long as the model
+	// keeps emitting tokens.  ResponseHeaderTimeout on the transport still
+	// protects against servers that never send the first byte.
 	streamTransport := &http.Transport{
 		DialContext:           dialer.DialContext,
 		MaxIdleConns:          maxIdleConns,
 		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
 		IdleConnTimeout:       idleConnTimeout,
 		TLSHandshakeTimeout:   tlsHandshakeTimeout,
-		ResponseHeaderTimeout: llmHeaderTimeout,
+		ResponseHeaderTimeout: llmStreamHeaderTimeout,
 		ForceAttemptHTTP2:     true,
 	}
 
-	// No client-level Timeout: the stream is open for as long as the model
-	// keeps emitting tokens.  ResponseHeaderTimeout on the transport still
-	// protects against servers that never send the first byte.
 	LLMStream = &http.Client{
 		Transport: traceRoundTripper("llm-stream", streamTransport),
 	}
 }
+
 
 type tracingTransport struct {
 	name string
