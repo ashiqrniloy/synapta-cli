@@ -18,38 +18,38 @@ import (
 // Key format: modifier+key (e.g. shift+enter, ctrl+c, alt+q).
 // Supported modifiers: ctrl, alt, shift.
 type Keybindings struct {
-	Newline     string `mapstructure:"newline"`
-	Submit      string `mapstructure:"submit"`
-	Quit        string `mapstructure:"quit"`
-	Stop        string `mapstructure:"stop"`
-	Command     string `mapstructure:"command"`
-	Context     string `mapstructure:"context"`
-	FileBrowser string `mapstructure:"file_browser"`
-	Help        string `mapstructure:"help"`
-	Extensions  string `mapstructure:"extensions"`
+	Newline     string `mapstructure:"newline"      yaml:"newline"`
+	Submit      string `mapstructure:"submit"       yaml:"submit"`
+	Quit        string `mapstructure:"quit"         yaml:"quit"`
+	Stop        string `mapstructure:"stop"         yaml:"stop"`
+	Command     string `mapstructure:"command"      yaml:"command"`
+	Context     string `mapstructure:"context"      yaml:"context"`
+	FileBrowser string `mapstructure:"file_browser" yaml:"file_browser"`
+	Help        string `mapstructure:"help"         yaml:"help"`
+	Extensions  string `mapstructure:"extensions"   yaml:"extensions"`
 }
 
 // Theme defines a complete colour palette for a named theme.
 type Theme struct {
-	Name                        string  `mapstructure:"name"`
-	Background                  string  `mapstructure:"background"`
-	Foreground                  string  `mapstructure:"foreground"`
-	Primary                     string  `mapstructure:"primary"`
-	Secondary                   string  `mapstructure:"secondary"`
-	Accent                      string  `mapstructure:"accent"`
-	Muted                       string  `mapstructure:"muted"`
-	Border                      string  `mapstructure:"border"`
-	Selection                   string  `mapstructure:"selection"`
-	Error                       string  `mapstructure:"error"`
-	Success                     string  `mapstructure:"success"`
-	CursorFG                    string  `mapstructure:"cursor_fg"`
-	CursorBG                    string  `mapstructure:"cursor_bg"`
-	HighlightColor              string  `mapstructure:"highlight_color"`
-	HighlightOpacity            float64 `mapstructure:"highlight_opacity"`
-	InteractionHighlightColor   string  `mapstructure:"interaction_highlight_color"`
-	InteractionHighlightOpacity float64 `mapstructure:"interaction_highlight_opacity"`
-	SystemMessageColor          string  `mapstructure:"system_message_color"`
-	SystemMessageOpacity        float64 `mapstructure:"system_message_opacity"`
+	Name                        string  `mapstructure:"name"                          yaml:"name"`
+	Background                  string  `mapstructure:"background"                    yaml:"background"`
+	Foreground                  string  `mapstructure:"foreground"                    yaml:"foreground"`
+	Primary                     string  `mapstructure:"primary"                       yaml:"primary"`
+	Secondary                   string  `mapstructure:"secondary"                     yaml:"secondary"`
+	Accent                      string  `mapstructure:"accent"                        yaml:"accent"`
+	Muted                       string  `mapstructure:"muted"                         yaml:"muted"`
+	Border                      string  `mapstructure:"border"                        yaml:"border"`
+	Selection                   string  `mapstructure:"selection"                     yaml:"selection"`
+	Error                       string  `mapstructure:"error"                         yaml:"error"`
+	Success                     string  `mapstructure:"success"                       yaml:"success"`
+	CursorFG                    string  `mapstructure:"cursor_fg"                     yaml:"cursor_fg"`
+	CursorBG                    string  `mapstructure:"cursor_bg"                     yaml:"cursor_bg"`
+	HighlightColor              string  `mapstructure:"highlight_color"               yaml:"highlight_color"`
+	HighlightOpacity            float64 `mapstructure:"highlight_opacity"             yaml:"highlight_opacity"`
+	InteractionHighlightColor   string  `mapstructure:"interaction_highlight_color"   yaml:"interaction_highlight_color"`
+	InteractionHighlightOpacity float64 `mapstructure:"interaction_highlight_opacity" yaml:"interaction_highlight_opacity"`
+	SystemMessageColor          string  `mapstructure:"system_message_color"          yaml:"system_message_color"`
+	SystemMessageOpacity        float64 `mapstructure:"system_message_opacity"        yaml:"system_message_opacity"`
 }
 
 func defaultTheme() Theme {
@@ -102,27 +102,27 @@ func gruvboxMaterialTheme() Theme {
 
 // RawThemes is the intermediate structure for YAML unmarshalling.
 type RawThemes struct {
-	Default string           `mapstructure:"default"`
-	Map     map[string]Theme `mapstructure:",remain"`
+	Default string           `mapstructure:"default" yaml:"default"`
+	Map     map[string]Theme `mapstructure:",remain" yaml:",inline"`
 }
 
 // ProviderConfig stores the active provider and model selection.
 type ProviderConfig struct {
-	Default string `mapstructure:"default"` // Provider ID (e.g., "github-copilot", "kilo")
-	Model   string `mapstructure:"model"`   // Model ID (e.g., "gpt-4o", "claude-sonnet-4-20250514")
+	Default string `mapstructure:"default" yaml:"default"` // Provider ID (e.g., "github-copilot", "kilo")
+	Model   string `mapstructure:"model"   yaml:"model"`   // Model ID (e.g., "gpt-4o", "claude-sonnet-4-20250514")
 }
 
 type UIConfig struct {
-	Density string `mapstructure:"density"` // compact | comfortable
+	Density string `mapstructure:"density" yaml:"density"` // compact | comfortable
 }
 
 // AppConfig is the top-level configuration structure.
 type AppConfig struct {
-	Keybindings      Keybindings       `mapstructure:"keybindings"`
-	CommandShortcuts map[string]string `mapstructure:"command_shortcuts"`
-	Themes           RawThemes         `mapstructure:"themes"`
-	Provider         ProviderConfig    `mapstructure:"provider"`
-	UI               UIConfig          `mapstructure:"ui"`
+	Keybindings      Keybindings       `mapstructure:"keybindings"       yaml:"keybindings"`
+	CommandShortcuts map[string]string `mapstructure:"command_shortcuts" yaml:"command_shortcuts"`
+	Themes           RawThemes         `mapstructure:"themes"            yaml:"themes"`
+	Provider         ProviderConfig    `mapstructure:"provider"          yaml:"provider"`
+	UI               UIConfig          `mapstructure:"ui"                yaml:"ui"`
 }
 
 // ActiveTheme returns the currently selected Theme, falling back to the
@@ -199,6 +199,84 @@ func normalizeShortcutKey(key string) string {
 	return strings.TrimSpace(k)
 }
 
+// mergeKeybindings unmarshals the "keybindings" viper key into a temporary
+// struct and copies only non-empty values onto dst, preserving defaults for
+// any field the user left unset.
+func mergeKeybindings(v *viper.Viper, dst *Keybindings) error {
+	if !v.IsSet("keybindings") {
+		return nil
+	}
+	var from Keybindings
+	if err := v.UnmarshalKey("keybindings", &from); err != nil {
+		return fmt.Errorf("unmarshaling keybindings: %w", err)
+	}
+	if from.Newline != "" {
+		dst.Newline = from.Newline
+	}
+	if from.Submit != "" {
+		dst.Submit = from.Submit
+	}
+	if from.Quit != "" {
+		dst.Quit = from.Quit
+	}
+	if from.Stop != "" {
+		dst.Stop = from.Stop
+	}
+	if from.Command != "" {
+		dst.Command = from.Command
+	}
+	if from.Context != "" {
+		dst.Context = from.Context
+	}
+	if from.FileBrowser != "" {
+		dst.FileBrowser = from.FileBrowser
+	}
+	if from.Help != "" {
+		dst.Help = from.Help
+	}
+	if from.Extensions != "" {
+		dst.Extensions = from.Extensions
+	}
+	return nil
+}
+
+// mergeThemes collects all theme palette sub-keys under "themes.*" (excluding
+// "themes.default") using UnmarshalKey and merges them into dst.
+func mergeThemes(v *viper.Viper, dst *RawThemes) error {
+	if dk := v.GetString("themes.default"); dk != "" {
+		dst.Default = dk
+	}
+
+	// Collect unique top-level theme names from the flat key list viper
+	// exposes (e.g. "themes.nord-aurora-dark.background" → "nord-aurora-dark").
+	seen := make(map[string]struct{})
+	for _, k := range v.AllKeys() {
+		const prefix = "themes."
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(k, prefix)
+		// rest is either "default" or "<name>.<field>"
+		if rest == "default" {
+			continue
+		}
+		name := strings.SplitN(rest, ".", 2)[0]
+		seen[name] = struct{}{}
+	}
+
+	for name := range seen {
+		var t Theme
+		if err := v.UnmarshalKey("themes."+name, &t); err != nil {
+			return fmt.Errorf("unmarshaling theme %q: %w", name, err)
+		}
+		if dst.Map == nil {
+			dst.Map = make(map[string]Theme)
+		}
+		dst.Map[name] = t
+	}
+	return nil
+}
+
 // LoadConfig reads YAML config from the user directory (~/.synapta/config.yaml),
 // falling through to the local config/ directory, then to hard-coded defaults.
 func LoadConfig() (*AppConfig, error) {
@@ -213,7 +291,7 @@ func LoadConfig() (*AppConfig, error) {
 	v.AddConfigPath("./config")
 	v.AddConfigPath("../config")
 
-	// Attempt to read — if not found, return defaults
+	// Attempt to read — if not found, return defaults.
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
 			return DefaultConfig(), nil
@@ -222,37 +300,13 @@ func LoadConfig() (*AppConfig, error) {
 	}
 
 	cfg := DefaultConfig()
-	// Keybindings
-	if kb := v.GetStringMapString("keybindings"); len(kb) > 0 {
-		if v, ok := kb["newline"]; ok && v != "" {
-			cfg.Keybindings.Newline = v
-		}
-		if v, ok := kb["submit"]; ok && v != "" {
-			cfg.Keybindings.Submit = v
-		}
-		if v, ok := kb["quit"]; ok && v != "" {
-			cfg.Keybindings.Quit = v
-		}
-		if v, ok := kb["stop"]; ok && v != "" {
-			cfg.Keybindings.Stop = v
-		}
-		if v, ok := kb["command"]; ok && v != "" {
-			cfg.Keybindings.Command = v
-		}
-		if v, ok := kb["context"]; ok && v != "" {
-			cfg.Keybindings.Context = v
-		}
-		if v, ok := kb["file_browser"]; ok && v != "" {
-			cfg.Keybindings.FileBrowser = v
-		}
-		if v, ok := kb["help"]; ok && v != "" {
-			cfg.Keybindings.Help = v
-		}
-		if v, ok := kb["extensions"]; ok && v != "" {
-			cfg.Keybindings.Extensions = v
-		}
+
+	// Keybindings — unmarshal via struct tags; keep defaults for empty fields.
+	if err := mergeKeybindings(v, &cfg.Keybindings); err != nil {
+		return nil, err
 	}
 
+	// Command shortcuts — merge over defaults; normalise keys.
 	if shortcuts := v.GetStringMapString("command_shortcuts"); len(shortcuts) > 0 {
 		for rawKey, commandID := range shortcuts {
 			key := normalizeShortcutKey(rawKey)
@@ -264,7 +318,7 @@ func LoadConfig() (*AppConfig, error) {
 		}
 	}
 
-	// Provider config
+	// Provider config.
 	if p := v.GetString("provider.default"); p != "" {
 		cfg.Provider.Default = p
 	}
@@ -272,31 +326,16 @@ func LoadConfig() (*AppConfig, error) {
 		cfg.Provider.Model = m
 	}
 
-	// UI config
+	// UI config.
 	if d := strings.ToLower(strings.TrimSpace(v.GetString("ui.density"))); d != "" {
 		if d == "compact" || d == "comfortable" {
 			cfg.UI.Density = d
 		}
 	}
 
-	// Active theme key
-	if dk := v.GetString("themes.default"); dk != "" {
-		cfg.Themes.Default = dk
-	}
-
-	// Theme palettes (walk viper keys that look like themes.<name>)
-	for _, k := range v.AllKeys() {
-		const prefix = "themes."
-		if strings.HasPrefix(k, prefix) && k != "themes.default" {
-			name := strings.TrimPrefix(k, prefix)
-			var t Theme
-			if err := v.UnmarshalKey("themes."+name, &t); err == nil {
-				if cfg.Themes.Map == nil {
-					cfg.Themes.Map = make(map[string]Theme)
-				}
-				cfg.Themes.Map[name] = t
-			}
-		}
+	// Themes — unmarshal each palette via struct tags; preserve built-in defaults.
+	if err := mergeThemes(v, &cfg.Themes); err != nil {
+		return nil, err
 	}
 
 	return cfg, nil
@@ -334,7 +373,57 @@ func parseBinding(s string) (key string, shift bool) {
 	}
 }
 
-// SaveConfig writes the current config to ~/.synapta/config.yaml.
+// ── Saving ────────────────────────────────────────────────────────────
+
+// configToMap converts an AppConfig to a plain map[string]any suitable for
+// YAML marshalling and merging.  RawThemes.Map is inlined under "themes" so
+// the on-disk shape matches what LoadConfig expects.
+func configToMap(cfg *AppConfig) (map[string]any, error) {
+	// Marshal then unmarshal via YAML to get a generic map; this honours the
+	// yaml struct tags and avoids maintaining a parallel hand-written map.
+	raw, err := go_yaml.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling config to intermediate YAML: %w", err)
+	}
+	var m map[string]any
+	if err := go_yaml.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("unmarshaling config to map: %w", err)
+	}
+
+	// RawThemes.Map is tagged ",inline" so the theme palette entries are
+	// siblings of "default" under the "themes" key — exactly what LoadConfig
+	// expects.  No further fixup needed.
+	return m, nil
+}
+
+// deepMerge copies all keys from src into dst recursively.  src wins for
+// scalar values; nested maps are merged rather than replaced so that user
+// values not present in src are retained.
+func deepMerge(dst, src map[string]any) {
+	for k, sv := range src {
+		dv, exists := dst[k]
+		if !exists {
+			dst[k] = sv
+			continue
+		}
+		// If both sides are maps, recurse.
+		srcMap, srcIsMap := sv.(map[string]any)
+		dstMap, dstIsMap := dv.(map[string]any)
+		if srcIsMap && dstIsMap {
+			deepMerge(dstMap, srcMap)
+		} else {
+			// Scalar or type mismatch — src (the new value) wins.
+			dst[k] = sv
+		}
+	}
+}
+
+// SaveConfig writes the complete AppConfig to ~/.synapta/config.yaml.
+//
+// When a file already exists it is read, the new config is deep-merged over
+// it (new values win for scalars; nested maps are merged), and the result is
+// written back.  This preserves any user comments or keys that AppConfig does
+// not know about, while guaranteeing every section of the config is up-to-date.
 func SaveConfig(cfg *AppConfig) error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -348,38 +437,35 @@ func SaveConfig(cfg *AppConfig) error {
 
 	configPath := filepath.Join(configDir, "config.yaml")
 
-	// Read existing config if it exists
+	// Build the new config map from the full AppConfig.
+	newMap, err := configToMap(cfg)
+	if err != nil {
+		return err
+	}
+
+	// Read the existing file (if any) and deep-merge the new values over it.
 	data, err := os.ReadFile(configPath)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("reading existing config: %w", err)
 	}
 
-	// If config exists, update provider section only
 	if len(data) > 0 {
 		var existing map[string]any
 		if err := go_yaml.Unmarshal(data, &existing); err != nil {
+			// Corrupted file — start fresh.
 			existing = make(map[string]any)
 		}
-
-		// Update provider section
-		existing["provider"] = map[string]any{
-			"default": cfg.Provider.Default,
-			"model":   cfg.Provider.Model,
-		}
-
-		data, err = go_yaml.Marshal(existing)
-		if err != nil {
-			return fmt.Errorf("marshaling config: %w", err)
-		}
-	} else {
-		// Create new config
-		data, err = go_yaml.Marshal(cfg)
-		if err != nil {
-			return fmt.Errorf("marshaling config: %w", err)
-		}
+		// Merge: new config values overwrite existing; unknown user keys survive.
+		deepMerge(existing, newMap)
+		newMap = existing
 	}
 
-	return os.WriteFile(configPath, data, 0644)
+	out, err := go_yaml.Marshal(newMap)
+	if err != nil {
+		return fmt.Errorf("marshaling config: %w", err)
+	}
+
+	return os.WriteFile(configPath, out, 0644)
 }
 
 // SetProvider updates the active provider and model, then saves to disk.
