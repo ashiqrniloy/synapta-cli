@@ -37,6 +37,9 @@ func (m *CodeAgentModel) handleCommandAction(msg CommandActionMsg) (tea.Model, t
 	switch commandID {
 	case "quit":
 		m.clearCommandMode()
+		if m.sessionStore != nil {
+			_ = m.sessionStore.Close()
+		}
 		m.quit = true
 		return m, tea.Sequence(tea.Raw(ansi.ResetModeMouseButtonEvent+ansi.ResetModeMouseAnyEvent+ansi.ResetModeMouseExtSgr), tea.Quit)
 	case "bash":
@@ -451,6 +454,9 @@ func (m *CodeAgentModel) handleNewSessionDone(msg newSessionDoneMsg) (tea.Model,
 		m.appendSystemMessage("[Session] ✗ "+msg.Err.Error(), "error")
 		return m, nil
 	}
+	if m.sessionStore != nil {
+		_ = m.sessionStore.Close()
+	}
 	m.sessionStore = msg.Store
 	if m.contextManager != nil {
 		m.contextManager.ClearSessionSystemPromptOverride()
@@ -468,6 +474,9 @@ func (m *CodeAgentModel) handleResumeSessionDone(msg resumeSessionDoneMsg) (tea.
 	if msg.Err != nil {
 		m.appendSystemMessage("[Session] ✗ "+msg.Err.Error(), "error")
 		return m, nil
+	}
+	if m.sessionStore != nil {
+		_ = m.sessionStore.Close()
 	}
 	m.sessionStore = msg.Store
 	sessionCWD := m.sessionStore.CWD()

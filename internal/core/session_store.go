@@ -97,6 +97,7 @@ type SessionStore struct {
 	sessionID  string
 	entries    []sessionEntry
 	settings   CompactionSettings
+	appendFile *os.File
 }
 
 func NewSessionStore(baseDir, agentID, cwd string, settings CompactionSettings) (*SessionStore, error) {
@@ -359,6 +360,9 @@ func (s *SessionStore) StartNewSession() error {
 }
 
 func (s *SessionStore) startNewLocked() error {
+	if err := s.closeAppendFileLocked(); err != nil {
+		return err
+	}
 	timestamp := time.Now().UTC()
 	s.sessionID = fmt.Sprintf("%d", timestamp.UnixNano())
 	fileTime := strings.NewReplacer(":", "-", ".", "-").Replace(timestamp.Format(time.RFC3339Nano))
@@ -386,7 +390,17 @@ func (s *SessionStore) OpenSession(sessionPath string) error {
 	return s.loadFromFileLocked()
 }
 
+func (s *SessionStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeAppendFileLocked()
+}
+
 func (s *SessionStore) loadFromFileLocked() error {
+	if err := s.closeAppendFileLocked(); err != nil {
+		return err
+	}
+
 	f, err := os.Open(s.filePath)
 	if err != nil {
 		return fmt.Errorf("open session file: %w", err)
@@ -781,22 +795,49 @@ func (s *SessionStore) compactionEntriesLocked() []sessionEntry {
 }
 
 func (s *SessionStore) appendEntryLocked(e sessionEntry) error {
-	f, err := os.OpenFile(s.filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("open session file append: %w", err)
+	if err := s.ensureAppendFileLocked(); err != nil {
+		return err
 	}
-	defer f.Close()
 	data, err := json.Marshal(e)
 	if err != nil {
 		return fmt.Errorf("marshal session entry: %w", err)
 	}
-	if _, err := f.WriteString(string(data) + "\n"); err != nil {
+	if _, err := s.appendFile.WriteString(string(data) + "\n"); err != nil {
+		_ = s.closeAppendFileLocked()
 		return fmt.Errorf("append session entry: %w", err)
 	}
 	return nil
 }
 
+func (s *SessionStore) ensureAppendFileLocked() error {
+	if s.appendFile != nil {
+		return nil
+	}
+	f, err := os.OpenFile(s.filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("open session file append: %w", err)
+	}
+	s.appendFile = f
+	return nil
+}
+
+func (s *SessionStore) closeAppendFileLocked() error {
+	if s.appendFile == nil {
+		return nil
+	}
+	if err := s.appendFile.Close(); err != nil {
+		s.appendFile = nil
+		return fmt.Errorf("close session append file: %w", err)
+	}
+	s.appendFile = nil
+	return nil
+}
+
 func (s *SessionStore) rewriteAllLocked() error {
+	if err := s.closeAppendFileLocked(); err != nil {
+		return err
+	}
+
 	f, err := os.Create(s.filePath)
 	if err != nil {
 		return fmt.Errorf("create session file: %w", err)

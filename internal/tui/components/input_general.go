@@ -39,6 +39,9 @@ func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quit
 	}
 	if keyStr == quitKey {
 		m.quit = true
+		if m.sessionStore != nil {
+			_ = m.sessionStore.Close()
+		}
 		return true, tea.Sequence(tea.Raw(ansi.ResetModeMouseButtonEvent+ansi.ResetModeMouseAnyEvent+ansi.ResetModeMouseExtSgr), tea.Quit)
 	}
 
