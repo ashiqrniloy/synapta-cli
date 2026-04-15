@@ -421,13 +421,14 @@ func resolveSkillPath(cwd, p string) string {
 	return filepath.Clean(filepath.Join(cwd, trimmed))
 }
 
+var xmlReplacer = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	`"`, "&quot;",
+	"'", "&apos;",
+)
+
 func escapeXML(s string) string {
-	r := strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-		`"`, "&quot;",
-		"'", "&apos;",
-	)
-	return r.Replace(s)
+	return xmlReplacer.Replace(s)
 }

@@ -483,7 +483,7 @@ func (m *CodeAgentModel) handleResumeSessionDone(msg resumeSessionDoneMsg) (tea.
 	if strings.TrimSpace(sessionCWD) != "" {
 		m.currentCwd = sessionCWD
 		m.currentGitBranch = detectGitBranch(m.currentCwd)
-		m.chatService = core.NewChatService(m.authStorage, core.NewToolSet(m.currentCwd))
+		m.chatService = core.NewChatService(m.authStorage, tools.NewToolSet(m.currentCwd))
 	}
 	if m.contextManager != nil {
 		m.contextManager.SetCWD(m.currentCwd)
@@ -510,7 +510,7 @@ func (m *CodeAgentModel) handleBashCommandDone(msg bashCommandDoneMsg) (tea.Mode
 		} else {
 			m.currentCwd = msg.NewCwd
 			m.currentGitBranch = detectGitBranch(m.currentCwd)
-			m.chatService = core.NewChatService(m.authStorage, core.NewToolSet(m.currentCwd))
+			m.chatService = core.NewChatService(m.authStorage, tools.NewToolSet(m.currentCwd))
 			if m.contextManager != nil {
 				m.contextManager.SetCWD(m.currentCwd)
 				m.markContextEntriesDirty()

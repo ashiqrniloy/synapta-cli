@@ -14,6 +14,7 @@ import (
 
 	"github.com/ashiqrniloy/synapta-cli/internal/config"
 	"github.com/ashiqrniloy/synapta-cli/internal/core"
+	"github.com/ashiqrniloy/synapta-cli/internal/core/tools"
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 	"github.com/ashiqrniloy/synapta-cli/internal/tui/theme"
 )
@@ -299,7 +300,7 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	vp.FillHeight = true
 
 	cwd, _ := os.Getwd()
-	toolset := core.NewToolSet(cwd)
+	toolset := tools.NewToolSet(cwd)
 
 	sessionStore, _ := core.NewSessionStore(agentDir, core.AgentCode, cwd, core.DefaultCompactionSettings())
 	conversationHistory := make([]llm.Message, 0)
