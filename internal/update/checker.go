@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ashiqrniloy/synapta-cli/internal/httpclient"
 )
 
 const (
@@ -87,7 +89,7 @@ func fetchLatestReleaseTag() (string, error) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "synapta-update-checker")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpclient.Default.Do(req)
 	if err != nil {
 		return "", err
 	}

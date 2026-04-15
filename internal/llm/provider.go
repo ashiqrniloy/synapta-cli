@@ -9,59 +9,22 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
+
+	"github.com/ashiqrniloy/synapta-cli/internal/httpclient"
 )
 
-// ─── HTTP Client Constants ────────────────────────────────────────────
-
-const (
-	// Default timeout for API requests - generous for streaming responses
-	defaultHTTPTimeout = 300 * time.Second
-	// Timeout for reading response headers
-	headerTimeout = 30 * time.Second
-	// Buffer size for reading response bodies
-	bodyBufferSize = 32 * 1024 // 32KB
-)
-
-// defaultHTTPClient is a shared HTTP client with appropriate timeouts
-// for LLM API requests. It uses a Transport with connection pooling
-// for better performance.
-var defaultHTTPClient *http.Client
-var streamingHTTPClient *http.Client
-
-func init() {
-	// Initialize the default HTTP client with timeouts
-	transport := &http.Transport{
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: headerTimeout,
-	}
-
-	defaultHTTPClient = &http.Client{
-		Transport: transport,
-		Timeout:   defaultHTTPTimeout,
-	}
-
-	// Streaming responses can remain open for long periods while tokens
-	// are emitted, so avoid client-level timeouts for SSE streams.
-	streamingHTTPClient = &http.Client{
-		Transport: transport,
-	}
-}
-
-// HTTPClient returns the default HTTP client for LLM requests.
-// It is configured with reasonable timeouts for API interactions.
+// HTTPClient returns the shared HTTP client for non-streaming LLM requests.
 func HTTPClient() *http.Client {
-	return defaultHTTPClient
+	return httpclient.LLM
 }
 
-// HTTPStreamClient returns an HTTP client intended for SSE/streaming calls.
+// HTTPStreamClient returns the shared HTTP client for SSE/streaming LLM calls.
+// It uses a dedicated transport with a generous ResponseHeaderTimeout (120 s)
+// to accommodate slow-to-respond models (Codex, o-series) without timing out
+// before the first response byte arrives.
 func HTTPStreamClient() *http.Client {
-	return streamingHTTPClient
+	return httpclient.LLMStream
 }
-
-// ─── OpenAIProvider ──────────────────────────────────────────────────
 
 // OpenAIProvider implements an OpenAI-compatible LLM provider.
 type OpenAIProvider struct {

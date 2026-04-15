@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ashiqrniloy/synapta-cli/internal/httpclient"
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
 
@@ -176,7 +177,7 @@ func (g *GitHubCopilotOAuth) startDeviceFlow(deviceURL string) (*deviceCodeRespo
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", CopilotHeaders["User-Agent"])
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpclient.Default.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("device flow request failed: %w", err)
 	}
@@ -294,7 +295,7 @@ func (g *GitHubCopilotOAuth) pollForAccessToken(tokenURL, deviceCode string, int
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", CopilotHeaders["User-Agent"])
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpclient.Default.Do(req)
 		if err != nil {
 			continue
 		}
@@ -359,7 +360,7 @@ func (g *GitHubCopilotOAuth) refreshCopilotToken(githubToken, domain string) (*l
 		req.Header.Set(k, v)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpclient.Default.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -425,7 +426,7 @@ func (g *GitHubCopilotOAuth) enableModel(copilotToken, modelID, domain string) b
 		req.Header.Set(k, v)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpclient.Default.Do(req)
 	if err != nil {
 		return false
 	}
@@ -481,7 +482,7 @@ func FetchCopilotPremiumUsage(githubToken, domain string) (*CopilotPremiumUsage,
 			req.Header.Set(k, v)
 		}
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpclient.Default.Do(req)
 		if err != nil {
 			continue
 		}
