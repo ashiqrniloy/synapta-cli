@@ -44,11 +44,26 @@
 // for multi-turn conversations — all genuine benefits.  Disabling HTTP/2
 // would not fix the underlying timeout problem and would regress
 // performance, so it is intentionally not done here.
+//
+// # Optional request tracing
+//
+// Set SYNAPTA_HTTP_TRACE=1 to attach low-noise net/http/httptrace diagnostics
+// to all HTTP clients in this package. Tracing intentionally prints only on
+// failed requests and focuses on where the request likely failed (DNS,
+// connect, TLS, or waiting for response headers).
 package httpclient
 
 import (
+	"crypto/rand"
+	"crypto/tls"
+	"encoding/hex"
+	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptrace"
+	"os"
+	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -75,6 +90,8 @@ const (
 	dialTimeout         = 30 * time.Second
 	tlsHandshakeTimeout = 15 * time.Second
 	keepAliveInterval   = 30 * time.Second
+
+	traceEnvVar = "SYNAPTA_HTTP_TRACE"
 )
 
 // ─── Shared clients ───────────────────────────────────────────────────────────
@@ -93,6 +110,9 @@ var (
 	// HTTP/2 is kept enabled — it provides connection reuse and header
 	// compression that benefit multi-turn LLM sessions.
 	LLMStream *http.Client
+
+	httpTraceEnabled = parseTraceEnabled(os.Getenv(traceEnvVar))
+	traceCounter     uint64
 )
 
 func init() {
@@ -113,12 +133,12 @@ func init() {
 	}
 
 	Default = &http.Client{
-		Transport: sharedTransport,
+		Transport: traceRoundTripper("default", sharedTransport),
 		Timeout:   defaultTimeout,
 	}
 
 	LLM = &http.Client{
-		Transport: sharedTransport,
+		Transport: traceRoundTripper("llm", sharedTransport),
 		Timeout:   llmTimeout,
 	}
 
@@ -143,6 +163,188 @@ func init() {
 	// keeps emitting tokens.  ResponseHeaderTimeout on the transport still
 	// protects against servers that never send the first byte.
 	LLMStream = &http.Client{
-		Transport: streamTransport,
+		Transport: traceRoundTripper("llm-stream", streamTransport),
 	}
+}
+
+type tracingTransport struct {
+	name string
+	next http.RoundTripper
+}
+
+func traceRoundTripper(name string, next http.RoundTripper) http.RoundTripper {
+	if next == nil {
+		next = http.DefaultTransport
+	}
+	return &tracingTransport{name: name, next: next}
+}
+
+func (t *tracingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !httpTraceEnabled || req == nil {
+		return t.next.RoundTrip(req)
+	}
+
+	trace := newHTTPTraceRecord(t.name, req)
+	tracedReq := req.Clone(httptrace.WithClientTrace(req.Context(), trace.clientTrace()))
+
+	resp, err := t.next.RoundTrip(tracedReq)
+	if err != nil {
+		return nil, trace.wrapError(err)
+	}
+	return resp, nil
+}
+
+type httpTraceRecord struct {
+	id       string
+	client   string
+	method   string
+	target   string
+	started  time.Time
+	gotConn  time.Time
+	wroteReq time.Time
+	firstB   time.Time
+
+	connReused bool
+	connWasIdle bool
+	connIdleFor time.Duration
+	network     string
+	addr        string
+	dnsErr      string
+	connectErr  string
+	tlsErr      string
+}
+
+func newHTTPTraceRecord(client string, req *http.Request) *httpTraceRecord {
+	target := ""
+	if req != nil && req.URL != nil {
+		target = req.URL.Scheme + "://" + req.URL.Host + req.URL.EscapedPath()
+	}
+	return &httpTraceRecord{
+		id:      nextTraceID(),
+		client:  client,
+		method:  req.Method,
+		target:  target,
+		started: time.Now(),
+	}
+}
+
+func (t *httpTraceRecord) clientTrace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			t.gotConn = time.Now()
+			t.connReused = info.Reused
+			t.connWasIdle = info.WasIdle
+			t.connIdleFor = info.IdleTime
+			if info.Conn != nil {
+				t.network = info.Conn.RemoteAddr().Network()
+				t.addr = info.Conn.RemoteAddr().String()
+			}
+		},
+		DNSDone: func(info httptrace.DNSDoneInfo) {
+			if info.Err != nil {
+				t.dnsErr = info.Err.Error()
+			}
+		},
+		ConnectDone: func(network, addr string, err error) {
+			t.network = network
+			t.addr = addr
+			if err != nil {
+				t.connectErr = err.Error()
+			}
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			if err != nil {
+				t.tlsErr = err.Error()
+			}
+		},
+		WroteRequest: func(_ httptrace.WroteRequestInfo) {
+			t.wroteReq = time.Now()
+		},
+		GotFirstResponseByte: func() {
+			t.firstB = time.Now()
+		},
+	}
+}
+
+func (t *httpTraceRecord) wrapError(err error) error {
+	elapsed := time.Since(t.started).Round(time.Millisecond)
+	phase := "before write"
+
+	switch {
+	case t.dnsErr != "":
+		phase = "dns"
+	case t.connectErr != "":
+		phase = "connect"
+	case t.tlsErr != "":
+		phase = "tls"
+	case !t.wroteReq.IsZero() && t.firstB.IsZero():
+		phase = "awaiting response headers"
+	case !t.firstB.IsZero():
+		phase = "response body/read"
+	case !t.gotConn.IsZero():
+		phase = "request write"
+	}
+
+	conn := "new"
+	if t.connReused {
+		conn = "reused"
+	}
+
+	hint := ""
+	if strings.Contains(strings.ToLower(err.Error()), "timeout awaiting response headers") {
+		hint = " hint=response_header_timeout"
+	}
+
+	msg := fmt.Sprintf(
+		"http trace id=%s client=%s req=%s %s phase=%s elapsed=%s conn=%s net=%s addr=%s%s",
+		t.id,
+		t.client,
+		t.method,
+		t.target,
+		phase,
+		elapsed,
+		conn,
+		t.network,
+		t.addr,
+		hint,
+	)
+	if t.connWasIdle {
+		msg += fmt.Sprintf(" idle_for=%s", t.connIdleFor.Round(time.Millisecond))
+	}
+	if t.dnsErr != "" {
+		msg += " dns_err=" + quoteIfNeeded(t.dnsErr)
+	}
+	if t.connectErr != "" {
+		msg += " connect_err=" + quoteIfNeeded(t.connectErr)
+	}
+	if t.tlsErr != "" {
+		msg += " tls_err=" + quoteIfNeeded(t.tlsErr)
+	}
+
+	return fmt.Errorf("%s: %w", msg, err)
+}
+
+func parseTraceEnabled(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on", "debug", "trace":
+		return true
+	default:
+		return false
+	}
+}
+
+func nextTraceID() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return hex.EncodeToString(b[:])
+	}
+	v := atomic.AddUint64(&traceCounter, 1)
+	return fmt.Sprintf("%08x", v)
+}
+
+func quoteIfNeeded(v string) string {
+	if strings.ContainsAny(v, " \t") {
+		return fmt.Sprintf("%q", v)
+	}
+	return v
 }
