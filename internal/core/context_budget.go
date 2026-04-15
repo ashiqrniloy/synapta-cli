@@ -2,7 +2,6 @@ package core
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
@@ -276,30 +275,8 @@ func PrepareSummarizationSafely(messages []llm.Message, budgetTokens, truncateBe
 }
 
 // budgetEstimateMessageTokens estimates tokens in a single message.
-// Note: This differs from session_store.go's estimateMessageTokens to avoid conflicts.
 func budgetEstimateMessageTokens(msg llm.Message) int {
-	// Rough estimation: 1 token ≈ 4 characters
-	// Add overhead for role/function markers
-	content := strings.TrimSpace(msg.Content)
-	if content == "" {
-		return 0
-	}
-
-	tokens := (len(content) + 3) / 4
-
-	// Add overhead
-	switch msg.Role {
-	case "system":
-		tokens += 10 // System role marker
-	case "user":
-		tokens += 8 // User role marker
-	case "assistant":
-		tokens += 12 // Assistant role marker + tool_calls overhead
-	case "tool":
-		tokens += 15 // Tool role + tool_call_id overhead
-	}
-
-	return tokens
+	return llm.EstimateMessageTokens(msg)
 }
 
 // budgetEstimateAllTokens sums token estimates for a message list.

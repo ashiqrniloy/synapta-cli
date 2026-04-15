@@ -686,7 +686,7 @@ func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWin
 		tokensBefore = estimateContextTokens(contextSlice)
 	}
 	if previousSummary != "" {
-		tokensBefore += estimateTextTokens(compactionSummaryPrefix + previousSummary + compactionSummarySuffix)
+		tokensBefore += llm.EstimateTextTokens(compactionSummaryPrefix + previousSummary + compactionSummarySuffix)
 	}
 
 	if !force {
@@ -878,14 +878,7 @@ func estimateContextTokens(messages []llm.Message) int {
 }
 
 func estimateMessageTokens(msg llm.Message) int {
-	return estimateTextTokens(msg.Content)
-}
-
-func estimateTextTokens(text string) int {
-	if strings.TrimSpace(text) == "" {
-		return 0
-	}
-	return (len(text) + 3) / 4
+	return llm.EstimateMessageTokens(msg)
 }
 
 func summarizeMessagesDeterministic(messages []llm.Message) string {

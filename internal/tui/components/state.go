@@ -56,18 +56,7 @@ func (m *CodeAgentModel) providerDisplayLabel() string {
 }
 
 func estimateMessagesTokens(messages []llm.Message) int {
-	total := 0
-	for _, msg := range messages {
-		total += estimateTextTokens(msg.Content)
-	}
-	return total
-}
-
-func estimateTextTokens(text string) int {
-	if strings.TrimSpace(text) == "" {
-		return 0
-	}
-	return (len(text) + 3) / 4
+	return llm.EstimateMessagesTokens(messages)
 }
 
 func (m *CodeAgentModel) densityMode() string {
