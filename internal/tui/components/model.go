@@ -12,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 
+	"github.com/ashiqrniloy/synapta-cli/internal/application"
 	"github.com/ashiqrniloy/synapta-cli/internal/config"
 	"github.com/ashiqrniloy/synapta-cli/internal/core"
 	"github.com/ashiqrniloy/synapta-cli/internal/core/tools"
@@ -69,6 +70,11 @@ type CodeAgentModel struct {
 	chatService           *core.ChatService
 	systemPromptStore     *core.SystemPromptStore
 	contextManager        *core.ContextManager
+	chatController        *application.ChatController
+	sessionService        *application.SessionService
+	providerService       *application.ProviderService
+	extensionService      *application.ExtensionService
+	workspaceService      *application.WorkspaceService
 	sessionStore          *core.SessionStore
 	agentDir              string
 	conversationHistory   []llm.Message
@@ -146,6 +152,10 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	cwd, _ := os.Getwd()
 	toolset := tools.NewToolSet(cwd)
 
+	chatService := core.NewChatService(authStorage, toolset)
+	chatController := application.NewChatController(chatService)
+	contextManager := core.NewContextManager(core.AgentCode, agentDir, cwd, systemPromptStore)
+
 	sessionStore, _ := core.NewSessionStore(agentDir, core.AgentCode, cwd, core.DefaultCompactionSettings())
 	conversationHistory := make([]llm.Message, 0)
 	if sessionStore != nil {
@@ -155,6 +165,10 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 
 	skillCatalogCache := core.NewSkillCatalogCache()
 
+	sessionService := application.NewSessionService(agentDir, core.AgentCode, chatController, contextManager, sessionStore)
+	providerService := application.NewProviderService(authStorage, chatController)
+	extensionService := application.NewExtensionService()
+	workspaceService := application.NewWorkspaceService()
 	model := &CodeAgentModel{
 		styles:                styles,
 		ta:                    buildTextarea(t, cfg),
@@ -166,9 +180,14 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		sessionSearch:         NewSessionSearchPicker(styles),
 		skillCatalogCache:     skillCatalogCache,
 		authStorage:           authStorage,
-		chatService:           core.NewChatService(authStorage, toolset),
+		chatService:           chatService,
 		systemPromptStore:     systemPromptStore,
-		contextManager:        core.NewContextManager(core.AgentCode, agentDir, cwd, systemPromptStore),
+		contextManager:        contextManager,
+		chatController:        chatController,
+		sessionService:        sessionService,
+		providerService:       providerService,
+		extensionService:      extensionService,
+		workspaceService:      workspaceService,
 		sessionStore:          sessionStore,
 		agentDir:              agentDir,
 		conversationHistory:   conversationHistory,
