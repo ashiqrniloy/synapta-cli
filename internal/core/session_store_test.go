@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -200,5 +201,63 @@ func TestSessionStoreManualCompactionSummarizesEntireContextEachTime(t *testing.
 	}
 	if !strings.Contains(ctx[0].Content, "summary-1") || !strings.Contains(ctx[1].Content, "summary-2") {
 		t.Fatalf("expected both summaries in context, got %#v", ctx)
+	}
+}
+
+func TestSessionStoreLoadFromFile_IgnoresCorruptAndPartialJSONLLines(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewSessionStore(dir, AgentCode, "/tmp/project", DefaultCompactionSettings())
+	if err != nil {
+		t.Fatalf("NewSessionStore() error = %v", err)
+	}
+	if err := store.AppendMessage(llm.Message{Role: "user", Content: "ok-1"}); err != nil {
+		t.Fatalf("AppendMessage() error = %v", err)
+	}
+	if err := store.AppendMessage(llm.Message{Role: "assistant", Content: "ok-2"}); err != nil {
+		t.Fatalf("AppendMessage() error = %v", err)
+	}
+
+	path := store.SessionFile()
+	garbage := "\nthis is not json\n{\"type\":\"message\",\"message\":\"broken\"\n"
+	if f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644); err != nil {
+		t.Fatalf("open session file: %v", err)
+	} else {
+		if _, err := f.WriteString(garbage); err != nil {
+			_ = f.Close()
+			t.Fatalf("append garbage: %v", err)
+		}
+		_ = f.Close()
+	}
+
+	reopened, err := OpenSessionStore(dir, AgentCode, "/tmp/project", path, DefaultCompactionSettings())
+	if err != nil {
+		t.Fatalf("OpenSessionStore() error = %v", err)
+	}
+	ctx := reopened.ContextMessages()
+	if len(ctx) != 2 {
+		t.Fatalf("expected 2 valid messages after recovery, got %d (%#v)", len(ctx), ctx)
+	}
+	if ctx[0].Content != "ok-1" || ctx[1].Content != "ok-2" {
+		t.Fatalf("unexpected recovered messages: %#v", ctx)
+	}
+}
+
+func TestSessionStoreLoadFromFile_MissingHeaderEvenWithValidMessageFails(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/orphan.jsonl"
+	content := strings.Join([]string{
+		`{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"x"}}`,
+		`{"type":"message","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","content":"y"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write orphan session: %v", err)
+	}
+
+	_, err := OpenSessionStore(dir, AgentCode, "/tmp/project", path, DefaultCompactionSettings())
+	if err == nil {
+		t.Fatal("expected error for missing session header, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing session header") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
