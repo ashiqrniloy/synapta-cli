@@ -458,7 +458,7 @@ type CopilotPremiumUsage struct {
 
 // FetchCopilotPremiumUsage attempts to fetch monthly premium request usage.
 // This data is not guaranteed to be available for all accounts/plans.
-func FetchCopilotPremiumUsage(githubToken, domain string) (*CopilotPremiumUsage, error) {
+func FetchCopilotPremiumUsage(ctx context.Context, githubToken, domain string) (*CopilotPremiumUsage, error) {
 	if strings.TrimSpace(githubToken) == "" {
 		return nil, fmt.Errorf("missing github token")
 	}
@@ -472,7 +472,7 @@ func FetchCopilotPremiumUsage(githubToken, domain string) (*CopilotPremiumUsage,
 	}
 
 	for _, endpoint := range endpoints {
-		req, err := http.NewRequest("GET", endpoint, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 		if err != nil {
 			continue
 		}
@@ -484,6 +484,9 @@ func FetchCopilotPremiumUsage(githubToken, domain string) (*CopilotPremiumUsage,
 
 		resp, err := httpclient.Default.Do(req)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			continue
 		}
 		body, _ := io.ReadAll(resp.Body)
@@ -498,6 +501,9 @@ func FetchCopilotPremiumUsage(githubToken, domain string) (*CopilotPremiumUsage,
 		}
 	}
 
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	return nil, fmt.Errorf("premium usage not available")
 }
 

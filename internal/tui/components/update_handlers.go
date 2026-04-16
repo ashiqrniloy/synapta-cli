@@ -1,7 +1,6 @@
 package components
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -37,9 +36,7 @@ func (m *CodeAgentModel) handleCommandAction(msg CommandActionMsg) (tea.Model, t
 	switch commandID {
 	case "quit":
 		m.clearCommandMode()
-		if m.sessionStore != nil {
-			_ = m.sessionStore.Close()
-		}
+		m.shutdownLifecycle()
 		m.quit = true
 		return m, tea.Sequence(tea.Raw(ansi.ResetModeMouseButtonEvent+ansi.ResetModeMouseAnyEvent+ansi.ResetModeMouseExtSgr), tea.Quit)
 	case "bash":
@@ -601,7 +598,7 @@ func (m *CodeAgentModel) readFileForContext(path string) (string, error) {
 	}
 
 	// Execute the read tool
-	ctx := context.Background()
+	ctx := m.lifecycleContext()
 	result, err := readTool.Execute(ctx, tools.ReadInput{Path: path})
 	if err != nil {
 		return "", err

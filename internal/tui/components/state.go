@@ -312,7 +312,7 @@ func (m *CodeAgentModel) chatHistoryAsLLM() ([]llm.Message, error) {
 	if m.sessionStore != nil && !m.contextOverrideActive {
 		contextWindow := 128000
 		if m.chatService != nil && m.selectedProvider != "" && m.selectedModelID != "" {
-			if cw, err := m.chatService.ModelContextWindow(context.Background(), m.selectedProvider, m.selectedModelID); err == nil && cw > 0 {
+			if cw, err := m.chatService.ModelContextWindow(m.lifecycleContext(), m.selectedProvider, m.selectedModelID); err == nil && cw > 0 {
 				contextWindow = cw
 			}
 		}
@@ -328,7 +328,7 @@ func (m *CodeAgentModel) chatHistoryAsLLM() ([]llm.Message, error) {
 			}
 			return m.chatService.SummarizeCompaction(ctx, m.selectedProvider, m.selectedModelID, messagesForSummary, previousSummary)
 		}
-		compacted, _, err := m.sessionStore.CompactIfNeeded(context.Background(), contextWindow, summarizer)
+		compacted, _, err := m.sessionStore.CompactIfNeeded(m.lifecycleContext(), contextWindow, summarizer)
 		if err != nil {
 			return nil, err
 		}

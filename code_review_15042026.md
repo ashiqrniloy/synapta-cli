@@ -676,9 +676,9 @@ Cleaner persistence boundaries and easier future format upgrades.
 
 ### High Priority
 1. Fix context budget threshold inconsistency in `/home/arniloy/synapta-cli/internal/core/context_budget.go`
-2. Remove duplicated tool decoding/metadata logic and replace with a shared tool registry/parser
-3. Split `chat.go`, `provider.go`, `session_store.go`, and `write.go` into focused modules
-4. Improve cancellation propagation by eliminating unnecessary `context.Background()` use in async flows
+2. Remove duplicated tool decoding/metadata logic and replace with a shared tool registry/parser - DONE
+3. Split `chat.go`, `provider.go`, `session_store.go`, and `write.go` into focused modules - DONE
+4. Improve cancellation propagation by eliminating unnecessary `context.Background()` use in async flows - DONE
 5. Add failure-path tests for streaming, compaction, malformed tool payloads, and session corruption
 
 ### Medium Priority

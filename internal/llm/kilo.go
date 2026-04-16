@@ -434,8 +434,8 @@ func (g *KiloGateway) pollDeviceAuth(code string) (*DeviceAuthPollResponse, erro
 // ─── Balance ────────────────────────────────────────────────────────
 
 // FetchBalance fetches the account balance.
-func (g *KiloGateway) FetchBalance(token string) (float64, error) {
-	req, err := http.NewRequest("GET", KiloProfileURL+"/balance", nil)
+func (g *KiloGateway) FetchBalance(ctx context.Context, token string) (float64, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", KiloProfileURL+"/balance", nil)
 	if err != nil {
 		return 0, err
 	}

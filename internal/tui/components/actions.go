@@ -19,6 +19,21 @@ import (
 	"github.com/ashiqrniloy/synapta-cli/internal/oauth"
 )
 
+func (m *CodeAgentModel) lifecycleContext() context.Context {
+	if m != nil && m.lifecycleCtx != nil {
+		return m.lifecycleCtx
+	}
+	return context.Background()
+}
+
+func (m *CodeAgentModel) withLifecycleTimeout(timeout time.Duration) (context.Context, context.CancelFunc) {
+	base := m.lifecycleContext()
+	if timeout > 0 {
+		return context.WithTimeout(base, timeout)
+	}
+	return context.WithCancel(base)
+}
+
 func (m *CodeAgentModel) startChatStream(history []llm.Message) tea.Cmd {
 	if m.chatService == nil {
 		return func() tea.Msg { return chatStreamErrMsg{Err: fmt.Errorf("chat service not available")} }
@@ -37,7 +52,7 @@ func (m *CodeAgentModel) startChatStream(history []llm.Message) tea.Cmd {
 
 	// Create a cancellable context and store the cancel func on the model so
 	// that Ctrl+C (or a steering interrupt) can cancel the in-flight request.
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := m.withLifecycleTimeout(0)
 	m.cancelStream = cancel
 
 	go func() {
@@ -127,6 +142,9 @@ func (m *CodeAgentModel) fetchProviderBalanceCmd(providerID string) tea.Cmd {
 			return providerBalanceMsg{ProviderID: providerID}
 		}
 
+		ctx, cancel := m.withLifecycleTimeout(defaultBalanceCheckTimeout)
+		defer cancel()
+
 		switch providerID {
 		case "kilo":
 			creds, err := m.authStorage.GetOAuthCredentials("kilo")
@@ -134,7 +152,7 @@ func (m *CodeAgentModel) fetchProviderBalanceCmd(providerID string) tea.Cmd {
 				return providerBalanceMsg{ProviderID: providerID}
 			}
 			gateway := llm.NewKiloGateway()
-			balance, err := gateway.FetchBalance(creds.Access)
+			balance, err := gateway.FetchBalance(ctx, creds.Access)
 			if err != nil {
 				return providerBalanceMsg{ProviderID: providerID, Err: err}
 			}
@@ -151,7 +169,7 @@ func (m *CodeAgentModel) fetchProviderBalanceCmd(providerID string) tea.Cmd {
 					domain = strings.TrimSpace(extra.EnterpriseDomain)
 				}
 			}
-			usage, err := oauth.FetchCopilotPremiumUsage(creds.Refresh, domain)
+			usage, err := oauth.FetchCopilotPremiumUsage(ctx, creds.Refresh, domain)
 			if err != nil || usage == nil || usage.Total <= 0 {
 				return providerBalanceMsg{ProviderID: providerID}
 			}
@@ -193,7 +211,7 @@ func (m *CodeAgentModel) executeBashCommand(command string, startedAt time.Time)
 		}
 
 		bashTool := tools.NewBashTool(cwd)
-		res, err := bashTool.Execute(context.Background(), tools.BashInput{Command: command}, nil)
+		res, err := bashTool.Execute(m.lifecycleContext(), tools.BashInput{Command: command}, nil)
 		output := toolResultPlainText(res)
 		if strings.TrimSpace(output) == "" && err != nil {
 			output = err.Error()
@@ -252,9 +270,12 @@ func (m *CodeAgentModel) manualCompactCmd() tea.Cmd {
 			return compactDoneMsg{Err: fmt.Errorf("session store not available")}
 		}
 
+		ctx, cancel := m.withLifecycleTimeout(defaultModelFetchTimeout)
+		defer cancel()
+
 		contextWindow := 128000
 		if m.chatService != nil && m.selectedProvider != "" && m.selectedModelID != "" {
-			if cw, err := m.chatService.ModelContextWindow(context.Background(), m.selectedProvider, m.selectedModelID); err == nil && cw > 0 {
+			if cw, err := m.chatService.ModelContextWindow(ctx, m.selectedProvider, m.selectedModelID); err == nil && cw > 0 {
 				contextWindow = cw
 			}
 		}
@@ -272,7 +293,7 @@ func (m *CodeAgentModel) manualCompactCmd() tea.Cmd {
 			return m.chatService.SummarizeCompaction(ctx, m.selectedProvider, m.selectedModelID, messagesForSummary, previousSummary)
 		}
 
-		compacted, method, err := m.sessionStore.ManualCompact(context.Background(), contextWindow, summarizer)
+		compacted, method, err := m.sessionStore.ManualCompact(ctx, contextWindow, summarizer)
 		if err != nil {
 			return compactDoneMsg{Err: err}
 		}
@@ -287,7 +308,10 @@ func (m *CodeAgentModel) loadModels() tea.Cmd {
 			return ModelsLoadedMsg{}
 		}
 
-		available, err := m.chatService.AvailableModels(context.Background())
+		ctx, cancel := m.withLifecycleTimeout(defaultModelFetchTimeout)
+		defer cancel()
+
+		available, err := m.chatService.AvailableModels(ctx)
 		if err != nil {
 			return ModelsLoadErrMsg{Err: err}
 		}
@@ -323,7 +347,7 @@ func (m *CodeAgentModel) loadModels() tea.Cmd {
 func (m *CodeAgentModel) startKiloAuth() tea.Cmd {
 	return func() tea.Msg {
 		gateway := llm.NewKiloGateway()
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := m.withLifecycleTimeout(0)
 		defer cancel()
 
 		var verificationURL string
@@ -386,7 +410,7 @@ func (m *CodeAgentModel) startCopilotAuth() tea.Cmd {
 		defer close(authCh)
 
 		provider := oauth.NewGitHubCopilotOAuth("")
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := m.withLifecycleTimeout(0)
 		defer cancel()
 
 		authCh <- CopilotAuthProgressMsg("Initiating device authorization...")

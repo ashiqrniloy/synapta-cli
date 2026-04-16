@@ -19,6 +19,11 @@ import (
 	"github.com/ashiqrniloy/synapta-cli/internal/tui/theme"
 )
 
+const (
+	defaultModelFetchTimeout   = 12 * time.Second
+	defaultBalanceCheckTimeout = 8 * time.Second
+)
+
 type keybindingRow struct {
 	Action      string
 	Binding     string
@@ -113,6 +118,8 @@ type CodeAgentModel struct {
 	promptBuildCount           int
 	stablePrefixChangeCount    int
 	cancelStream               context.CancelFunc
+	lifecycleCtx               context.Context
+	cancelLifecycle           context.CancelFunc
 	pendingUserMessage         string
 	availableExtensions        []core.Extension
 
@@ -143,6 +150,7 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	if sessionStore != nil {
 		conversationHistory = sessionStore.ContextMessages()
 	}
+	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
 
 	skillCatalogCache := core.NewSkillCatalogCache()
 
@@ -165,6 +173,8 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		conversationHistory:   conversationHistory,
 		activeAssistantIdx:    -1,
 		activeSystemStatusIdx: -1,
+		lifecycleCtx:          lifecycleCtx,
+		cancelLifecycle:       cancelLifecycle,
 		activeToolIndices:     map[string]int{},
 		toolExpanded:          map[string]bool{},
 		chatViewport:          vp,
