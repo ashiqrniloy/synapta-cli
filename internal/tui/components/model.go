@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	defaultModelFetchTimeout   = 12 * time.Second
-	defaultBalanceCheckTimeout = 8 * time.Second
+	defaultModelFetchTimeout       = 12 * time.Second
+	defaultBalanceCheckTimeout     = 8 * time.Second
+	defaultManualCompactionTimeout = 300 * time.Second
 )
 
 type keybindingRow struct {

@@ -270,7 +270,7 @@ func (m *CodeAgentModel) manualCompactCmd() tea.Cmd {
 			return compactDoneMsg{Err: fmt.Errorf("session store not available")}
 		}
 
-		ctx, cancel := m.withLifecycleTimeout(defaultModelFetchTimeout)
+		ctx, cancel := m.withLifecycleTimeout(defaultManualCompactionTimeout)
 		defer cancel()
 
 		contextWindow := 128000
