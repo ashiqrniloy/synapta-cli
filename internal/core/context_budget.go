@@ -240,19 +240,35 @@ func PrepareRequestSafely(messages []llm.Message, contextWindow, maxRequestToken
 		maxRequestTokens = int(float64(contextWindow) * 0.80)
 	}
 
-	effectiveMax := maxRequestTokens - reserveTokens
-	// Only apply floor for large maxRequestTokens to allow for meaningful budgets
-	// For small maxRequestTokens (e.g., 2000), respect the user's budget
-	if maxRequestTokens >= 20000 && effectiveMax < 10000 {
-		effectiveMax = 10000 // Absolute minimum for large requests
+	usableBudget := maxRequestTokens - reserveTokens
+	const minUsableBudget = 256
+	budgetGuardNote := ""
+	if usableBudget <= 0 {
+		// Guard against invalid derived budgets (reserve >= max request).
+		usableBudget = min(maxRequestTokens, minUsableBudget)
+		if usableBudget <= 0 {
+			usableBudget = 1
+		}
+		budgetGuardNote = fmt.Sprintf(" derived budget was non-positive (configured max=%d, reserve=%d)", maxRequestTokens, reserveTokens)
+	} else if usableBudget < minUsableBudget {
+		// Guard against extremely tiny budgets; keep user-configured value but flag it.
+		budgetGuardNote = fmt.Sprintf(" derived budget is very small (%d tokens)", usableBudget)
 	}
 
 	size := EstimateContextSize(messages, contextWindow)
 
-	var warning string
-	if size.TotalTokens > maxRequestTokens {
-		truncated, reason := EnforceBudget(messages, effectiveMax, 0)
-		warning = fmt.Sprintf("context exceeded budget (%d → %d tokens): %s", size.TotalTokens, budgetEstimateAllTokens(truncated), reason)
+	if size.TotalTokens > usableBudget {
+		truncated, reason := EnforceBudget(messages, usableBudget, 0)
+		warning := fmt.Sprintf(
+			"context exceeded usable budget (configured max=%d, reserve=%d, usable=%d): %d → %d tokens: %s%s",
+			maxRequestTokens,
+			reserveTokens,
+			usableBudget,
+			size.TotalTokens,
+			budgetEstimateAllTokens(truncated),
+			reason,
+			budgetGuardNote,
+		)
 		return truncated, EstimateContextSize(truncated, contextWindow), warning
 	}
 
