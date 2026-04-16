@@ -56,15 +56,25 @@ func (s *ChatService) Stream(
 			if callID == "" {
 				callID = fmt.Sprintf("tool_%d_%s", round, tc.Function.Name)
 			}
-			path, command := toolEventMetadata(tc.Function.Name, tc.Function.Arguments)
+			parsed, parseErr := ParseToolCall(tc)
+			path, command := parsed.Path, parsed.Command
 
 			if onToolEvent != nil {
 				_ = onToolEvent(ToolEvent{Type: ToolEventStart, CallID: callID, ToolName: tc.Function.Name, Path: path, Command: command})
 			}
 
-			toolResult, execErr := s.executeToolCall(ctx, tc, callID, onToolEvent)
-			if execErr != nil {
-				toolResult = map[string]any{"error": execErr.Error()}
+			var (
+				toolResult any
+				execErr    error
+			)
+			if parseErr != nil {
+				execErr = parseErr
+				toolResult = map[string]any{"error": parseErr.Error()}
+			} else {
+				toolResult, execErr = s.executeToolCall(ctx, parsed, callID, onToolEvent)
+				if execErr != nil {
+					toolResult = map[string]any{"error": execErr.Error()}
+				}
 			}
 
 			payload, _ := json.Marshal(toolResult)

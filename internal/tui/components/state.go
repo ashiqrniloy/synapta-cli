@@ -519,26 +519,16 @@ type toolInvocationMeta struct {
 	Command string
 }
 
-func parseToolInvocationMeta(toolName, args string) toolInvocationMeta {
-	meta := toolInvocationMeta{Name: strings.TrimSpace(toolName)}
-	switch meta.Name {
-	case "read":
-		var in tools.ReadInput
-		if err := json.Unmarshal([]byte(args), &in); err == nil {
-			meta.Path = strings.TrimSpace(in.Path)
-		}
-	case "write":
-		var in tools.WriteInput
-		if err := json.Unmarshal([]byte(args), &in); err == nil {
-			meta.Path = strings.TrimSpace(in.Path)
-		}
-	case "bash":
-		var in tools.BashInput
-		if err := json.Unmarshal([]byte(args), &in); err == nil {
-			meta.Command = strings.TrimSpace(in.Command)
-		}
+func parseToolInvocationMeta(tc llm.ToolCall) toolInvocationMeta {
+	parsed, err := core.ParseToolCall(tc)
+	if err != nil {
+		return toolInvocationMeta{Name: strings.TrimSpace(tc.Function.Name)}
 	}
-	return meta
+	return toolInvocationMeta{
+		Name:    strings.TrimSpace(parsed.Name),
+		Path:    strings.TrimSpace(parsed.Path),
+		Command: strings.TrimSpace(parsed.Command),
+	}
 }
 
 func buildToolInvocationMetaByCallID(history []llm.Message) map[string]toolInvocationMeta {
@@ -552,7 +542,7 @@ func buildToolInvocationMetaByCallID(history []llm.Message) map[string]toolInvoc
 			if callID == "" {
 				continue
 			}
-			metaByCallID[callID] = parseToolInvocationMeta(tc.Function.Name, tc.Function.Arguments)
+			metaByCallID[callID] = parseToolInvocationMeta(tc)
 		}
 	}
 	return metaByCallID

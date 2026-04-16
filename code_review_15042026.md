@@ -27,32 +27,7 @@ If addressed, the outcome would be a codebase that is easier to reason about, mo
 
 ## 1. Simplification Opportunities
 
-### 1.1 Split oversized orchestration files into focused units
-**Issue**  
-Several files carry multiple responsibilities and have become difficult to reason about:
-- `/home/arniloy/synapta-cli/internal/core/chat.go`
-- `/home/arniloy/synapta-cli/internal/llm/provider.go`
-- `/home/arniloy/synapta-cli/internal/core/session_store.go`
-- `/home/arniloy/synapta-cli/internal/core/tools/write.go`
-- `/home/arniloy/synapta-cli/internal/tui/components/codeagent.go`
 
-This increases cognitive load, makes targeted testing harder, and encourages duplicated helper logic.
-
-**What should be done**  
-Refactor each large file into smaller modules organized around one responsibility.
-
-**How it should be done**  
-Suggested decomposition:
-- `internal/core/chat.go` → `stream.go`, `tool_dispatch.go`, `provider_cache.go`, `tool_schema.go`
-- `internal/llm/provider.go` → `chat_completions.go`, `responses_api.go`, `stream_parser.go`, `request_builder.go`
-- `internal/core/session_store.go` → `session_io.go`, `session_compaction.go`, `session_listing.go`, `session_types.go`
-- `internal/core/tools/write.go` → `write_plan.go`, `write_apply.go`, `write_diff.go`, `write_validate.go`
-- `internal/tui/components/codeagent.go` → `model.go`, `chat_state.go`, `panes.go`, `async_state.go`
-
-Keep current exported APIs stable while moving internal helpers behind smaller files.
-
-**Outcome**  
-Smaller review surface, easier testing, fewer merge conflicts, and a much better foundation for future features.
 
 ---
 
