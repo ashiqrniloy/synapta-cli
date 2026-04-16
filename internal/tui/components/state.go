@@ -520,7 +520,7 @@ type toolInvocationMeta struct {
 }
 
 func parseToolInvocationMeta(tc llm.ToolCall) toolInvocationMeta {
-	parsed, err := core.ParseToolCall(tc)
+	parsed, err := core.ParseToolCall(tc, nil)
 	if err != nil {
 		return toolInvocationMeta{Name: strings.TrimSpace(tc.Function.Name)}
 	}

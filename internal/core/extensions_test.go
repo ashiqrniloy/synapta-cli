@@ -46,6 +46,23 @@ func TestLoadExtensions_FailureModes(t *testing.T) {
 			wantExtensions:    2,
 			wantWarningSubstr: nil,
 		},
+		{
+			name: "collects extension tool manifest warnings",
+			setup: func(t *testing.T, root string) (string, string) {
+				cwd := root + "/cwd"
+				agent := root + "/agent"
+				extMustMkdirAll(t, cwd+"/extensions/ext-a")
+				extMustMkdirAll(t, agent+"/extensions/ext-b/tools")
+
+				extMustWriteFile(t, cwd+"/extensions/ext-a/extension.json", `{"id":"e-a","command":"echo"}`)
+				extMustWriteFile(t, agent+"/extensions/ext-b/extension.json", `{"id":"e-b","command":"echo"}`)
+				extMustWriteFile(t, cwd+"/extensions/ext-a/tool.json", `{bad}`)
+				extMustWriteFile(t, agent+"/extensions/ext-b/tools/b.json", `{bad}`)
+				return cwd, agent
+			},
+			wantExtensions:    2,
+			wantWarningSubstr: []string{"invalid extension tool manifest", "ext-a/tool.json", "ext-b/tools/b.json"},
+		},
 	}
 
 	for _, tt := range tests {

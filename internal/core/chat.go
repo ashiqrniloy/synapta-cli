@@ -39,6 +39,8 @@ type ToolEvent struct {
 type ChatService struct {
 	auth      *llm.AuthStorage
 	tools     *tools.ToolSet
+	registry  *ToolRegistry
+	warnings  []string
 	mu        sync.RWMutex
 	providers map[string]cachedProvider
 }
@@ -49,9 +51,22 @@ type cachedProvider struct {
 }
 
 func NewChatService(auth *llm.AuthStorage, toolset *tools.ToolSet) *ChatService {
+	return NewChatServiceWithRuntimeTools(auth, toolset, LoadToolRegistryOptions{AgentDir: llm.GetAgentDir()})
+}
+
+func NewChatServiceWithRuntimeTools(auth *llm.AuthStorage, toolset *tools.ToolSet, opts LoadToolRegistryOptions) *ChatService {
+	registry := NewToolRegistry()
+	warnings := make([]string, 0)
+	if err := registry.RegisterBuiltins(toolset); err != nil {
+		warnings = append(warnings, err.Error())
+	}
+	warnings = append(warnings, registry.LoadRuntimeTools(opts)...)
+
 	return &ChatService{
 		auth:      auth,
 		tools:     toolset,
+		registry:  registry,
+		warnings:  warnings,
 		providers: make(map[string]cachedProvider),
 	}
 }
@@ -59,6 +74,16 @@ func NewChatService(auth *llm.AuthStorage, toolset *tools.ToolSet) *ChatService 
 // Tools returns the underlying tool set for direct access.
 func (s *ChatService) Tools() *tools.ToolSet {
 	return s.tools
+}
+
+func (s *ChatService) ToolRegistry() *ToolRegistry {
+	return s.registry
+}
+
+func (s *ChatService) ToolRegistryWarnings() []string {
+	out := make([]string, len(s.warnings))
+	copy(out, s.warnings)
+	return out
 }
 
 // InvalidateProviderCache clears all cached provider instances.

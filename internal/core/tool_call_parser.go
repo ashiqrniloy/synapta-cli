@@ -5,50 +5,85 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ashiqrniloy/synapta-cli/internal/core/tools"
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
 
 // ParsedToolCall is the normalized/decoded representation of an LLM tool call.
 type ParsedToolCall struct {
-	Name    string
-	Input   any
-	Path    string
-	Command string
+	Name         string
+	RawArguments json.RawMessage
+	Path         string
+	Command      string
 }
 
 // ParseToolCall decodes a tool call input, extracts lightweight metadata
-// (path/command), and returns a validation error when parsing/shape is invalid.
-func ParseToolCall(tc llm.ToolCall) (ParsedToolCall, error) {
+// (path/command), and validates tool existence when registry is provided.
+func ParseToolCall(tc llm.ToolCall, registry *ToolRegistry) (ParsedToolCall, error) {
 	name := strings.TrimSpace(tc.Function.Name)
 	parsed := ParsedToolCall{Name: name}
+	if name == "" {
+		return parsed, fmt.Errorf("unknown tool: empty name")
+	}
+
+	args := strings.TrimSpace(tc.Function.Arguments)
+	if args == "" {
+		args = "{}"
+	}
+	raw := json.RawMessage(args)
+	if !json.Valid(raw) {
+		return parsed, fmt.Errorf("invalid %s arguments: invalid JSON", name)
+	}
+
+	if registry != nil {
+		spec, ok := registry.Get(name)
+		if !ok {
+			return parsed, fmt.Errorf("unknown tool: %s", name)
+		}
+		if err := json.Unmarshal(raw, new(any)); err != nil {
+			return parsed, fmt.Errorf("invalid %s arguments: %w", name, err)
+		}
+		if len(spec.Parameters) == 0 {
+			parsed.RawArguments = raw
+			parsed.Path, parsed.Command = extractToolCallMeta(name, raw)
+			return parsed, nil
+		}
+	}
+
+	parsed.RawArguments = raw
+	parsed.Path, parsed.Command = extractToolCallMeta(name, raw)
+	return parsed, nil
+}
+
+func extractToolCallMeta(name string, raw json.RawMessage) (path string, command string) {
+	type pathOnly struct {
+		Path string `json:"path"`
+	}
+	type cmdOnly struct {
+		Command string `json:"command"`
+	}
 
 	switch name {
-	case "read":
-		var in tools.ReadInput
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &in); err != nil {
-			return parsed, fmt.Errorf("invalid read arguments: %w", err)
+	case "read", "write":
+		var p pathOnly
+		if err := json.Unmarshal(raw, &p); err == nil {
+			return strings.TrimSpace(p.Path), ""
 		}
-		parsed.Input = in
-		parsed.Path = strings.TrimSpace(in.Path)
-		return parsed, nil
-	case "write":
-		var in tools.WriteInput
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &in); err != nil {
-			return parsed, fmt.Errorf("invalid write arguments: %w", err)
-		}
-		parsed.Input = in
-		parsed.Path = strings.TrimSpace(in.Path)
-		return parsed, nil
 	case "bash":
-		var in tools.BashInput
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &in); err != nil {
-			return parsed, fmt.Errorf("invalid bash arguments: %w", err)
+		var c cmdOnly
+		if err := json.Unmarshal(raw, &c); err == nil {
+			return "", strings.TrimSpace(c.Command)
 		}
-		parsed.Input = in
-		parsed.Command = strings.TrimSpace(in.Command)
-		return parsed, nil
-	default:
-		return parsed, fmt.Errorf("unknown tool: %s", name)
 	}
+
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return "", ""
+	}
+	if v, ok := m["path"].(string); ok {
+		path = strings.TrimSpace(v)
+	}
+	if v, ok := m["command"].(string); ok {
+		command = strings.TrimSpace(v)
+	}
+	return path, command
 }

@@ -9,6 +9,33 @@ import (
 	"strings"
 )
 
+func collectExtensionToolManifestWarnings(extDir string) []string {
+	warnings := make([]string, 0)
+	candidates := []string{filepath.Join(extDir, "tool.json")}
+
+	toolsDir := filepath.Join(extDir, "tools")
+	if entries, err := os.ReadDir(toolsDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+				continue
+			}
+			candidates = append(candidates, filepath.Join(toolsDir, entry.Name()))
+		}
+	}
+
+	for _, path := range candidates {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var probe map[string]any
+		if err := json.Unmarshal(raw, &probe); err != nil {
+			warnings = append(warnings, fmt.Sprintf("invalid extension tool manifest: %s (%v)", path, err))
+		}
+	}
+	return warnings
+}
+
 type Extension struct {
 	ID          string
 	Name        string
@@ -93,6 +120,8 @@ func LoadExtensions(opts LoadExtensionsOptions) ExtensionsResult {
 				warnings = append(warnings, fmt.Sprintf("extension %q has empty command (%s)", id, manifestPath))
 				continue
 			}
+
+			warnings = append(warnings, collectExtensionToolManifestWarnings(extDir)...)
 
 			workdir := strings.TrimSpace(mf.WorkDir)
 			if workdir == "" {

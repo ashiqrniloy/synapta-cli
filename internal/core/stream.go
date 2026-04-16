@@ -56,7 +56,7 @@ func (s *ChatService) Stream(
 			if callID == "" {
 				callID = fmt.Sprintf("tool_%d_%s", round, tc.Function.Name)
 			}
-			parsed, parseErr := ParseToolCall(tc)
+			parsed, parseErr := ParseToolCall(tc, s.registry)
 			path, command := parsed.Path, parsed.Command
 
 			if onToolEvent != nil {
