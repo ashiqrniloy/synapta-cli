@@ -110,7 +110,7 @@ Consistent behavior across the toolchain and simpler filesystem-related code.
 
 ## 2. Accuracy and Robustness Improvements
 
-### 2.1 Context budget logic compares against one threshold but enforces another
+### 2.1 Context budget logic compares against one threshold but enforces another :DONE
 **Issue**  
 In `/home/arniloy/synapta-cli/internal/core/context_budget.go`, `PrepareRequestSafely` checks `size.TotalTokens > maxRequestTokens`, but truncates to `effectiveMax = maxRequestTokens - reserveTokens`.
 
@@ -180,7 +180,7 @@ No silent corruption of tool-turn history and easier debugging of unexpected too
 
 ---
 
-### 2.4 Duplicate tool argument decoding creates drift risk
+### 2.4 Duplicate tool argument decoding creates drift risk :DONE
 **Issue**  
 Tool argument parsing exists in more than one place. For example:
 - `/home/arniloy/synapta-cli/internal/core/chat.go` (`toolEventMetadata`, `executeToolCall`)
@@ -248,7 +248,7 @@ Reduced memory risk and more uniform HTTP error handling.
 
 ---
 
-### 2.7 Some long-running background operations ignore caller context
+### 2.7 Some long-running background operations ignore caller context : DONE
 **Issue**  
 There are multiple `context.Background()` invocations in the TUI action layer, such as in:
 - `/home/arniloy/synapta-cli/internal/tui/components/actions.go`
@@ -274,7 +274,7 @@ Cleaner cancellation semantics and fewer leaked goroutines/work after the UI sta
 
 ---
 
-### 2.8 Tests are too light on failure-path behavior for core infrastructure
+### 2.8 Tests are too light on failure-path behavior for core infrastructure : DONE
 **Issue**  
 There are tests for context budget, provider normalization, session store, and write tool, but failure-path coverage appears limited relative to code complexity.
 
@@ -520,7 +520,7 @@ Reduced repeated traversal cost while keeping correctness.
 
 ## 5. Modularity and Extensibility Improvements
 
-### 5.1 Introduce a first-class tool plugin/registry architecture
+### 5.1 Introduce a first-class tool plugin/registry architecture : DONE
 **Issue**  
 Tooling is currently effectively hardcoded to `read`, `write`, and `bash` inside `/home/arniloy/synapta-cli/internal/core/chat.go` and toolset wiring.
 
@@ -588,7 +588,7 @@ Users can tailor memory behavior without rewriting storage internals.
 
 ---
 
-### 5.4 Decouple TUI actions from business logic services
+### 5.4 Decouple TUI actions from business logic services - DONE
 **Issue**  
 `/home/arniloy/synapta-cli/internal/tui/components/actions.go` directly knows about auth storage, chat service, session store, model loading, balance fetches, compaction, and bash execution.
 
@@ -675,11 +675,11 @@ Cleaner persistence boundaries and easier future format upgrades.
 ## 6. Priority Recommendations
 
 ### High Priority
-1. Fix context budget threshold inconsistency in `/home/arniloy/synapta-cli/internal/core/context_budget.go`
+1. Fix context budget threshold inconsistency in `/home/arniloy/synapta-cli/internal/core/context_budget.go` - DONE
 2. Remove duplicated tool decoding/metadata logic and replace with a shared tool registry/parser - DONE
 3. Split `chat.go`, `provider.go`, `session_store.go`, and `write.go` into focused modules - DONE
 4. Improve cancellation propagation by eliminating unnecessary `context.Background()` use in async flows - DONE
-5. Add failure-path tests for streaming, compaction, malformed tool payloads, and session corruption
+5. Add failure-path tests for streaming, compaction, malformed tool payloads, and session corruption - DONE
 
 ### Medium Priority
 1. Add provider/model-aware token estimation and calibration
