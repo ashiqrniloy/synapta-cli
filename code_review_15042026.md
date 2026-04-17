@@ -402,7 +402,7 @@ Less duplication, easier provider compatibility work, and lower bug surface.
 
 ---
 
-### 3.4 Similar domain normalization logic appears in multiple packages
+### 3.4 Similar domain normalization logic appears in multiple packages : DONE
 **Issue**  
 There are repeated patterns of trimming, validating, lowercasing, and path/domain normalization across config, skills, OAuth, tools, and TUI.
 
