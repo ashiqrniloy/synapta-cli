@@ -199,51 +199,107 @@ func normalizeShortcutKey(key string) string {
 	return strings.TrimSpace(k)
 }
 
-// mergeKeybindings unmarshals the "keybindings" viper key into a temporary
-// struct and copies only non-empty values onto dst, preserving defaults for
-// any field the user left unset.
+// mergeField descriptors keep merge logic table-driven and reduce field-by-field
+// imperative copy blocks.
+type keybindingField struct {
+	key string
+	set func(*Keybindings, string)
+}
+
+var keybindingFields = []keybindingField{
+	{key: "newline", set: func(k *Keybindings, v string) { k.Newline = v }},
+	{key: "submit", set: func(k *Keybindings, v string) { k.Submit = v }},
+	{key: "quit", set: func(k *Keybindings, v string) { k.Quit = v }},
+	{key: "stop", set: func(k *Keybindings, v string) { k.Stop = v }},
+	{key: "command", set: func(k *Keybindings, v string) { k.Command = v }},
+	{key: "context", set: func(k *Keybindings, v string) { k.Context = v }},
+	{key: "file_browser", set: func(k *Keybindings, v string) { k.FileBrowser = v }},
+	{key: "help", set: func(k *Keybindings, v string) { k.Help = v }},
+	{key: "extensions", set: func(k *Keybindings, v string) { k.Extensions = v }},
+}
+
+type themeStringField struct {
+	key string
+	set func(*Theme, string)
+}
+
+type themeFloatField struct {
+	key string
+	set func(*Theme, float64)
+}
+
+var themeStringFields = []themeStringField{
+	{key: "name", set: func(t *Theme, v string) { t.Name = v }},
+	{key: "background", set: func(t *Theme, v string) { t.Background = v }},
+	{key: "foreground", set: func(t *Theme, v string) { t.Foreground = v }},
+	{key: "primary", set: func(t *Theme, v string) { t.Primary = v }},
+	{key: "secondary", set: func(t *Theme, v string) { t.Secondary = v }},
+	{key: "accent", set: func(t *Theme, v string) { t.Accent = v }},
+	{key: "muted", set: func(t *Theme, v string) { t.Muted = v }},
+	{key: "border", set: func(t *Theme, v string) { t.Border = v }},
+	{key: "selection", set: func(t *Theme, v string) { t.Selection = v }},
+	{key: "error", set: func(t *Theme, v string) { t.Error = v }},
+	{key: "success", set: func(t *Theme, v string) { t.Success = v }},
+	{key: "cursor_fg", set: func(t *Theme, v string) { t.CursorFG = v }},
+	{key: "cursor_bg", set: func(t *Theme, v string) { t.CursorBG = v }},
+	{key: "highlight_color", set: func(t *Theme, v string) { t.HighlightColor = v }},
+	{key: "interaction_highlight_color", set: func(t *Theme, v string) { t.InteractionHighlightColor = v }},
+	{key: "system_message_color", set: func(t *Theme, v string) { t.SystemMessageColor = v }},
+}
+
+var themeFloatFields = []themeFloatField{
+	{key: "highlight_opacity", set: func(t *Theme, v float64) { t.HighlightOpacity = v }},
+	{key: "interaction_highlight_opacity", set: func(t *Theme, v float64) { t.InteractionHighlightOpacity = v }},
+	{key: "system_message_opacity", set: func(t *Theme, v float64) { t.SystemMessageOpacity = v }},
+}
+
+func mergeThemePalette(v *viper.Viper, prefix string, dst *Theme) {
+	for _, f := range themeStringFields {
+		k := prefix + "." + f.key
+		if !v.IsSet(k) {
+			continue
+		}
+		value := v.GetString(k)
+		if value == "" {
+			continue
+		}
+		f.set(dst, value)
+	}
+	for _, f := range themeFloatFields {
+		k := prefix + "." + f.key
+		if !v.IsSet(k) {
+			continue
+		}
+		f.set(dst, v.GetFloat64(k))
+	}
+}
+
+// mergeKeybindings copies only configured non-empty bindings onto dst,
+// preserving defaults for fields that were omitted.
 func mergeKeybindings(v *viper.Viper, dst *Keybindings) error {
 	if !v.IsSet("keybindings") {
 		return nil
 	}
-	var from Keybindings
-	if err := v.UnmarshalKey("keybindings", &from); err != nil {
-		return fmt.Errorf("unmarshaling keybindings: %w", err)
+
+	for _, f := range keybindingFields {
+		key := "keybindings." + f.key
+		if !v.IsSet(key) {
+			continue
+		}
+		value := strings.TrimSpace(v.GetString(key))
+		if value == "" {
+			continue
+		}
+		f.set(dst, value)
 	}
-	if from.Newline != "" {
-		dst.Newline = from.Newline
-	}
-	if from.Submit != "" {
-		dst.Submit = from.Submit
-	}
-	if from.Quit != "" {
-		dst.Quit = from.Quit
-	}
-	if from.Stop != "" {
-		dst.Stop = from.Stop
-	}
-	if from.Command != "" {
-		dst.Command = from.Command
-	}
-	if from.Context != "" {
-		dst.Context = from.Context
-	}
-	if from.FileBrowser != "" {
-		dst.FileBrowser = from.FileBrowser
-	}
-	if from.Help != "" {
-		dst.Help = from.Help
-	}
-	if from.Extensions != "" {
-		dst.Extensions = from.Extensions
-	}
+
 	return nil
 }
 
 // mergeThemes collects all theme palette sub-keys under "themes.*" (excluding
-// "themes.default") using UnmarshalKey and merges them into dst.
+// "themes.default") and merges only configured fields into each palette.
 func mergeThemes(v *viper.Viper, dst *RawThemes) error {
-	if dk := v.GetString("themes.default"); dk != "" {
+	if dk := strings.TrimSpace(v.GetString("themes.default")); dk != "" {
 		dst.Default = dk
 	}
 
@@ -256,22 +312,22 @@ func mergeThemes(v *viper.Viper, dst *RawThemes) error {
 			continue
 		}
 		rest := strings.TrimPrefix(k, prefix)
-		// rest is either "default" or "<name>.<field>"
 		if rest == "default" {
 			continue
 		}
 		name := strings.SplitN(rest, ".", 2)[0]
+		if name == "" {
+			continue
+		}
 		seen[name] = struct{}{}
 	}
 
 	for name := range seen {
-		var t Theme
-		if err := v.UnmarshalKey("themes."+name, &t); err != nil {
-			return fmt.Errorf("unmarshaling theme %q: %w", name, err)
-		}
 		if dst.Map == nil {
 			dst.Map = make(map[string]Theme)
 		}
+		t := dst.Map[name]
+		mergeThemePalette(v, "themes."+name, &t)
 		dst.Map[name] = t
 	}
 	return nil
