@@ -88,7 +88,7 @@ type chatStreamErrMsg struct {
 type compactDoneMsg struct {
 	Compacted bool
 	History   []llm.Message
-	Method    string
+	Method    core.CompactionMethod
 	Err       error
 }
 

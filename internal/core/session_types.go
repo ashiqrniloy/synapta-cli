@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -12,11 +13,59 @@ import (
 const (
 	currentSessionVersion = 1
 
-	compactionSummaryPrefix       = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n"
-	compactionSummarySuffix       = "\n</summary>"
-	compactionMethodModel         = "model"
-	compactionMethodDeterministic = "fallback"
+	compactionSummaryPrefix = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n"
+	compactionSummarySuffix = "\n</summary>"
 )
+
+type CompactionMethod string
+
+const (
+	CompactionMethodModel         CompactionMethod = "model"
+	CompactionMethodDeterministic CompactionMethod = "fallback"
+)
+
+func (m CompactionMethod) IsValid() bool {
+	switch m {
+	case CompactionMethodModel, CompactionMethodDeterministic:
+		return true
+	default:
+		return false
+	}
+}
+
+type SessionEntryType string
+
+const (
+	SessionEntryTypeSession    SessionEntryType = "session"
+	SessionEntryTypeMessage    SessionEntryType = "message"
+	SessionEntryTypeCompaction SessionEntryType = "compaction"
+	SessionEntryTypeContextOp  SessionEntryType = "context_op"
+)
+
+func (t SessionEntryType) IsValid() bool {
+	switch t {
+	case SessionEntryTypeSession, SessionEntryTypeMessage, SessionEntryTypeCompaction, SessionEntryTypeContextOp:
+		return true
+	default:
+		return false
+	}
+}
+
+type SessionOperationAction string
+
+const (
+	SessionOperationActionEdit   SessionOperationAction = "edit"
+	SessionOperationActionRemove SessionOperationAction = "remove"
+)
+
+func (a SessionOperationAction) IsValid() bool {
+	switch a {
+	case SessionOperationActionEdit, SessionOperationActionRemove:
+		return true
+	default:
+		return false
+	}
+}
 
 type CompactionSettings struct {
 	Enabled          bool
@@ -44,17 +93,8 @@ type SessionInfo struct {
 	FirstMessage string
 }
 
-type sessionEntryType string
-
-const (
-	sessionEntryTypeSession    sessionEntryType = "session"
-	sessionEntryTypeMessage    sessionEntryType = "message"
-	sessionEntryTypeCompaction sessionEntryType = "compaction"
-	sessionEntryTypeContextOp  sessionEntryType = "context_op"
-)
-
 type sessionEntry struct {
-	Type                  sessionEntryType
+	Type                  SessionEntryType
 	Version               int
 	ID                    string
 	Timestamp             time.Time
@@ -63,17 +103,27 @@ type sessionEntry struct {
 	Summary               string
 	FirstKeptMessageIndex int
 	TokensBefore          int
-	CompactionMethod      string
+	CompactionMethod      CompactionMethod
 	Operation             *ContextOperation
 }
 
 type ContextOperation struct {
-	Action       string `json:"action"`
-	ContextIndex int    `json:"contextIndex"`
-	Role         string `json:"role,omitempty"`
-	Category     string `json:"category,omitempty"`
-	BeforeHash   string `json:"beforeHash,omitempty"`
-	AfterHash    string `json:"afterHash,omitempty"`
+	Action       SessionOperationAction `json:"action"`
+	ContextIndex int                    `json:"contextIndex"`
+	Role         llm.MessageRole        `json:"role,omitempty"`
+	Category     string                 `json:"category,omitempty"`
+	BeforeHash   string                 `json:"beforeHash,omitempty"`
+	AfterHash    string                 `json:"afterHash,omitempty"`
+}
+
+func (op ContextOperation) Validate() error {
+	if !op.Action.IsValid() {
+		return fmt.Errorf("invalid context operation action: %q", op.Action)
+	}
+	if op.Role != "" && !op.Role.IsValid() {
+		return fmt.Errorf("invalid context operation role: %q", op.Role)
+	}
+	return nil
 }
 
 type contextMessageRef struct {

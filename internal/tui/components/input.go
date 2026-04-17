@@ -184,16 +184,19 @@ func (m *CodeAgentModel) openCommandModal() {
 	m.recalculateLayout()
 }
 
-func (m *CodeAgentModel) applyInputMode(mode string) {
+func (m *CodeAgentModel) applyInputMode(mode InputMode) {
+	if !mode.IsValid() {
+		mode = InputModeChat
+	}
 	m.inputMode = mode
 	switch mode {
-	case inputModeBash:
+	case InputModeBash:
 		if m.skillPicker != nil {
 			m.skillPicker.Deactivate()
 		}
 		m.ta.Placeholder = "bash> Enter command (Enter=run, Esc=exit bash mode)"
 	default:
-		m.inputMode = inputModeChat
+		m.inputMode = InputModeChat
 		m.ta.Placeholder = "Type your message... (Enter=send, Shift+Enter/Ctrl+N=newline)"
 	}
 }
@@ -214,7 +217,7 @@ func (m *CodeAgentModel) reloadAvailableSkills() {
 }
 
 func (m *CodeAgentModel) activateSkillPicker() {
-	if m.skillPicker == nil || m.inputMode != inputModeChat || len(m.availableSkills) == 0 {
+	if m.skillPicker == nil || m.inputMode != InputModeChat || len(m.availableSkills) == 0 {
 		return
 	}
 	m.skillPicker.Activate(m.availableSkills)
@@ -319,7 +322,7 @@ func (m *CodeAgentModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 	}
 
 	if m.shouldInsertNewline(msg, keyStr) {
-		if (m.inputMode == inputModeChat || m.inputMode == inputModeBash) && !m.picker.IsActive() && (m.skillPicker == nil || !m.skillPicker.IsActive()) {
+		if (m.inputMode == InputModeChat || m.inputMode == InputModeBash) && !m.picker.IsActive() && (m.skillPicker == nil || !m.skillPicker.IsActive()) {
 			m.ta.InsertRune('\n')
 			m.recalculateLayout()
 			return m, nil

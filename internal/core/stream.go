@@ -42,7 +42,7 @@ func (s *ChatService) Stream(
 			return nil
 		}
 
-		assistantMsg := llm.Message{Role: "assistant", Content: assistantText, ToolCalls: append([]llm.ToolCall(nil), toolCalls...)}
+		assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: assistantText, ToolCalls: append([]llm.ToolCall(nil), toolCalls...)}
 		if onAssistantToolCalls != nil {
 			if err := onAssistantToolCalls(assistantMsg); err != nil {
 				return err
@@ -78,7 +78,7 @@ func (s *ChatService) Stream(
 			}
 
 			payload, _ := json.Marshal(toolResult)
-			messages = append(messages, llm.Message{Role: "tool", ToolCallID: callID, Name: tc.Function.Name, Content: string(payload)})
+			messages = append(messages, llm.Message{Role: llm.RoleTool, ToolCallID: callID, Name: tc.Function.Name, Content: string(payload)})
 
 			if onToolEvent != nil {
 				output := toolResultText(toolResult)

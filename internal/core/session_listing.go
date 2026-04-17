@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
 
 func ListAllSessions(baseDir, agentID string) ([]SessionInfo, error) {
@@ -140,7 +142,7 @@ func isValidSessionFile(path string) bool {
 	if err != nil {
 		return false
 	}
-	return e.Type == sessionEntryTypeSession && strings.TrimSpace(e.ID) != ""
+	return e.Type == SessionEntryTypeSession && strings.TrimSpace(e.ID) != ""
 }
 
 func buildSessionInfo(path string) (SessionInfo, error) {
@@ -166,7 +168,7 @@ func buildSessionInfo(path string) (SessionInfo, error) {
 	if err := scanner.Err(); err != nil {
 		return SessionInfo{}, err
 	}
-	if len(entries) == 0 || entries[0].Type != sessionEntryTypeSession {
+	if len(entries) == 0 || entries[0].Type != SessionEntryTypeSession {
 		return SessionInfo{}, fmt.Errorf("invalid session file")
 	}
 
@@ -179,14 +181,14 @@ func buildSessionInfo(path string) (SessionInfo, error) {
 	messageCount := 0
 	firstMessage := ""
 	for _, e := range entries {
-		if e.Type != sessionEntryTypeMessage || e.Message == nil {
+		if e.Type != SessionEntryTypeMessage || e.Message == nil {
 			continue
 		}
-		if e.Message.Role != "user" && e.Message.Role != "assistant" {
+		if e.Message.Role != llm.RoleUser && e.Message.Role != llm.RoleAssistant {
 			continue
 		}
 		messageCount++
-		if firstMessage == "" && e.Message.Role == "user" {
+		if firstMessage == "" && e.Message.Role == llm.RoleUser {
 			firstMessage = strings.TrimSpace(e.Message.Content)
 		}
 	}

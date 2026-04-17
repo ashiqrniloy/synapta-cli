@@ -430,7 +430,7 @@ func (m *CodeAgentModel) handleCompactDone(msg compactDoneMsg) (tea.Model, tea.C
 	}
 	if msg.Compacted {
 		methodLabel := "model"
-		if strings.TrimSpace(msg.Method) == "fallback" {
+		if msg.Method == core.CompactionMethodDeterministic {
 			methodLabel = "fallback synthetic"
 		}
 		m.appendSystemMessage("[Compact] ✓ Session compacted ("+methodLabel+")", "done")

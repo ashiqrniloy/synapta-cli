@@ -86,7 +86,7 @@ type CodeAgentModel struct {
 	streamChunkCount      int
 	streamCharCount       int
 
-	inputMode         string
+	inputMode         InputMode
 	currentCwd        string
 	currentGitBranch  string
 	isExecutingBash   bool
@@ -94,7 +94,7 @@ type CodeAgentModel struct {
 	chatPaneWidth     int
 	contextPaneWidth  int
 	contextPaneHeight int
-	layoutMode        string
+	layoutMode        LayoutMode
 
 	contextActions             []ContextAction
 	contextModalOpen           bool
@@ -199,10 +199,10 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		toolExpanded:          map[string]bool{},
 		chatViewport:          vp,
 		chatAutoScroll:        true,
-		inputMode:             inputModeChat,
+		inputMode:             InputModeChat,
 		currentCwd:            cwd,
 		currentGitBranch:      detectGitBranch(cwd),
-		layoutMode:            layoutModeStacked,
+		layoutMode:            LayoutModeStacked,
 	}
 
 	if cfg.Provider.Default != "" && cfg.Provider.Model != "" {
@@ -234,7 +234,7 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	model.commandModalInput.SetValue(":")
 	model.commandModalInput.Blur()
 
-	model.applyInputMode(inputModeChat)
+	model.applyInputMode(InputModeChat)
 	return model
 }
 

@@ -67,7 +67,7 @@ func (s *SessionService) Resume(cwd, sessionPath string) (*core.SessionStore, er
 	return store, nil
 }
 
-func (s *SessionService) ManualCompact(ctx context.Context, providerID, modelID string) (bool, []llm.Message, string, error) {
+func (s *SessionService) ManualCompact(ctx context.Context, providerID, modelID string) (bool, []llm.Message, core.CompactionMethod, error) {
 	if s.sessionStore == nil {
 		return false, nil, "", fmt.Errorf("session store not available")
 	}

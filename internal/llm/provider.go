@@ -80,7 +80,7 @@ func (p *GitHubCopilotProvider) SetInitiatorHeader(req *http.Request, messages [
 	initiator := "user"
 	if len(messages) > 0 {
 		lastMsg := messages[len(messages)-1]
-		if lastMsg.Role != "user" {
+		if lastMsg.Role != RoleUser {
 			initiator = "agent"
 		}
 	}

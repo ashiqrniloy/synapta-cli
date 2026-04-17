@@ -117,13 +117,13 @@ func EstimateMessageTokens(msg Message) int {
 	}
 
 	switch msg.Role {
-	case "system":
+	case RoleSystem:
 		tokens += 10
-	case "user":
+	case RoleUser:
 		tokens += 8
-	case "assistant":
+	case RoleAssistant:
 		tokens += 12
-	case "tool":
+	case RoleTool:
 		tokens += 15
 	}
 

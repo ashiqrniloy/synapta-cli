@@ -14,7 +14,7 @@ func (s *SessionStore) ContextOperations() []ContextOperation {
 	defer s.mu.Unlock()
 	ops := make([]ContextOperation, 0)
 	for _, e := range s.entries {
-		if e.Type == sessionEntryTypeContextOp && e.Operation != nil {
+		if e.Type == SessionEntryTypeContextOp && e.Operation != nil {
 			ops = append(ops, *e.Operation)
 		}
 	}
@@ -22,11 +22,15 @@ func (s *SessionStore) ContextOperations() []ContextOperation {
 }
 
 func (s *SessionStore) AppendMessage(msg llm.Message) error {
+	if err := msg.Validate(); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	entry := sessionEntry{
-		Type:      sessionEntryTypeMessage,
+		Type:      SessionEntryTypeMessage,
 		Timestamp: time.Now(),
 		Message:   &msg,
 	}
@@ -93,7 +97,7 @@ func (s *SessionStore) contextMessageRefsLocked() []contextMessageRef {
 	result := make([]contextMessageRef, 0, len(compactions)+len(messages)-start)
 	for _, compaction := range compactions {
 		result = append(result, contextMessageRef{
-			Message:      llm.Message{Role: "user", Content: compactionSummaryPrefix + strings.TrimSpace(compaction.Summary) + compactionSummarySuffix},
+			Message:      llm.Message{Role: llm.RoleUser, Content: compactionSummaryPrefix + strings.TrimSpace(compaction.Summary) + compactionSummarySuffix},
 			EntryIndex:   -1,
 			MessageIndex: -1,
 			IsCompaction: true,
@@ -112,7 +116,7 @@ func (s *SessionStore) contextMessageRefsLocked() []contextMessageRef {
 func (s *SessionStore) messageEntryIndicesLocked() []int {
 	indices := make([]int, 0)
 	for i, e := range s.entries {
-		if e.Type != sessionEntryTypeMessage || e.Message == nil {
+		if e.Type != SessionEntryTypeMessage || e.Message == nil {
 			continue
 		}
 		if !isDynamicContextMessage(*e.Message) {
@@ -135,16 +139,16 @@ func (s *SessionStore) UpdateContextMessageAt(index int, content string) error {
 	if ref.IsCompaction || ref.EntryIndex < 0 {
 		return fmt.Errorf("selected context entry is not editable")
 	}
-	if ref.EntryIndex >= len(s.entries) || s.entries[ref.EntryIndex].Type != sessionEntryTypeMessage || s.entries[ref.EntryIndex].Message == nil {
+	if ref.EntryIndex >= len(s.entries) || s.entries[ref.EntryIndex].Type != SessionEntryTypeMessage || s.entries[ref.EntryIndex].Message == nil {
 		return fmt.Errorf("selected context entry not found")
 	}
 	before := s.entries[ref.EntryIndex].Message.Content
 	s.entries[ref.EntryIndex].Message.Content = content
 	op := sessionEntry{
-		Type:      sessionEntryTypeContextOp,
+		Type:      SessionEntryTypeContextOp,
 		Timestamp: time.Now(),
 		Operation: &ContextOperation{
-			Action:       "edit",
+			Action:       SessionOperationActionEdit,
 			ContextIndex: index,
 			Role:         ref.Message.Role,
 			BeforeHash:   hashText(before),
@@ -167,7 +171,7 @@ func (s *SessionStore) RemoveContextMessageAt(index int) error {
 	if ref.IsCompaction || ref.EntryIndex < 0 {
 		return fmt.Errorf("selected context entry is not removable")
 	}
-	if ref.EntryIndex >= len(s.entries) || s.entries[ref.EntryIndex].Type != sessionEntryTypeMessage || s.entries[ref.EntryIndex].Message == nil {
+	if ref.EntryIndex >= len(s.entries) || s.entries[ref.EntryIndex].Type != SessionEntryTypeMessage || s.entries[ref.EntryIndex].Message == nil {
 		return fmt.Errorf("selected context entry not found")
 	}
 
@@ -175,7 +179,7 @@ func (s *SessionStore) RemoveContextMessageAt(index int) error {
 	s.entries = append(s.entries[:ref.EntryIndex], s.entries[ref.EntryIndex+1:]...)
 	if ref.MessageIndex >= 0 {
 		for i := range s.entries {
-			if s.entries[i].Type != sessionEntryTypeCompaction {
+			if s.entries[i].Type != SessionEntryTypeCompaction {
 				continue
 			}
 			if s.entries[i].FirstKeptMessageIndex > ref.MessageIndex {
@@ -184,10 +188,10 @@ func (s *SessionStore) RemoveContextMessageAt(index int) error {
 		}
 	}
 	op := sessionEntry{
-		Type:      sessionEntryTypeContextOp,
+		Type:      SessionEntryTypeContextOp,
 		Timestamp: time.Now(),
 		Operation: &ContextOperation{
-			Action:       "remove",
+			Action:       SessionOperationActionRemove,
 			ContextIndex: index,
 			Role:         removed.Role,
 			BeforeHash:   hashText(removed.Content),
@@ -197,19 +201,19 @@ func (s *SessionStore) RemoveContextMessageAt(index int) error {
 	return s.rewriteAllLocked()
 }
 
-func (s *SessionStore) CompactIfNeeded(ctx context.Context, contextWindow int, summarizer CompactionSummarizer) (bool, string, error) {
+func (s *SessionStore) CompactIfNeeded(ctx context.Context, contextWindow int, summarizer CompactionSummarizer) (bool, CompactionMethod, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.compactLocked(ctx, false, contextWindow, summarizer)
 }
 
-func (s *SessionStore) ManualCompact(ctx context.Context, contextWindow int, summarizer CompactionSummarizer) (bool, string, error) {
+func (s *SessionStore) ManualCompact(ctx context.Context, contextWindow int, summarizer CompactionSummarizer) (bool, CompactionMethod, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.compactLocked(ctx, true, contextWindow, summarizer)
 }
 
-func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWindow int, summarizer CompactionSummarizer) (bool, string, error) {
+func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWindow int, summarizer CompactionSummarizer) (bool, CompactionMethod, error) {
 	if !s.settings.Enabled && !force {
 		return false, "", nil
 	}
@@ -267,7 +271,7 @@ func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWin
 	if force {
 		toSummarize = contextSlice
 	}
-	method := compactionMethodModel
+	method := CompactionMethodModel
 	newSummary := ""
 	if summarizer != nil {
 		var err error
@@ -277,14 +281,14 @@ func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWin
 		}
 	}
 	if strings.TrimSpace(newSummary) == "" {
-		method = compactionMethodDeterministic
+		method = CompactionMethodDeterministic
 		newSummary = summarizeMessagesDeterministic(toSummarize)
 	}
 
 	summary := strings.TrimSpace(newSummary)
 
 	compaction := sessionEntry{
-		Type:                  sessionEntryTypeCompaction,
+		Type:                  SessionEntryTypeCompaction,
 		Timestamp:             time.Now(),
 		Summary:               summary,
 		FirstKeptMessageIndex: start + keepRel,
@@ -301,7 +305,7 @@ func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWin
 func (s *SessionStore) messageEntriesLocked() []llm.Message {
 	out := make([]llm.Message, 0)
 	for _, e := range s.entries {
-		if e.Type != sessionEntryTypeMessage || e.Message == nil {
+		if e.Type != SessionEntryTypeMessage || e.Message == nil {
 			continue
 		}
 		if !isDynamicContextMessage(*e.Message) {
@@ -316,11 +320,11 @@ func isDynamicContextMessage(msg llm.Message) bool {
 	hasContent := strings.TrimSpace(msg.Content) != ""
 
 	switch msg.Role {
-	case "assistant":
+	case llm.RoleAssistant:
 		return hasContent || len(msg.ToolCalls) > 0
-	case "tool":
+	case llm.RoleTool:
 		return hasContent || strings.TrimSpace(msg.ToolCallID) != "" || strings.TrimSpace(msg.Name) != ""
-	case "user", "system":
+	case llm.RoleUser, llm.RoleSystem:
 		return hasContent
 	default:
 		return false
@@ -329,7 +333,7 @@ func isDynamicContextMessage(msg llm.Message) bool {
 
 func (s *SessionStore) latestCompactionLocked() *sessionEntry {
 	for i := len(s.entries) - 1; i >= 0; i-- {
-		if s.entries[i].Type == sessionEntryTypeCompaction {
+		if s.entries[i].Type == SessionEntryTypeCompaction {
 			copyEntry := s.entries[i]
 			return &copyEntry
 		}
@@ -340,7 +344,7 @@ func (s *SessionStore) latestCompactionLocked() *sessionEntry {
 func (s *SessionStore) compactionEntriesLocked() []sessionEntry {
 	entries := make([]sessionEntry, 0)
 	for i := 0; i < len(s.entries); i++ {
-		if s.entries[i].Type != sessionEntryTypeCompaction {
+		if s.entries[i].Type != SessionEntryTypeCompaction {
 			continue
 		}
 		entries = append(entries, s.entries[i])
@@ -386,7 +390,7 @@ func summarizeMessagesDeterministic(messages []llm.Message) string {
 		if len(content) > 200 {
 			content = content[:200] + "..."
 		}
-		base += fmt.Sprintf("- [%s] %s\n", strings.ToUpper(m.Role), content)
+		base += fmt.Sprintf("- [%s] %s\n", strings.ToUpper(string(m.Role)), content)
 	}
 	return strings.TrimSpace(base)
 }

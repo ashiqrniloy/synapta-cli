@@ -88,7 +88,7 @@ func (m *CodeAgentModel) buildContextEntries() []ContextEntry {
 		entry := ContextEntry{
 			Order:           order + 1,
 			ContextIndex:    i,
-			Role:            msg.Role,
+			Role:            string(msg.Role),
 			Content:         content,
 			HistoryIndex:    -1,
 			RawHistoryIndex: -1,
@@ -269,18 +269,18 @@ func assistantToolCallsContent(calls []llm.ToolCall) string {
 func hasContextPayloadLocal(msg llm.Message) bool {
 	hasContent := strings.TrimSpace(msg.Content) != ""
 	switch msg.Role {
-	case "assistant":
+	case llm.RoleAssistant:
 		return hasContent || len(msg.ToolCalls) > 0
-	case "tool":
+	case llm.RoleTool:
 		return hasContent || strings.TrimSpace(msg.ToolCallID) != "" || strings.TrimSpace(msg.Name) != ""
 	default:
 		return hasContent
 	}
 }
 
-func isContextRoleLocal(role string) bool {
+func isContextRoleLocal(role llm.MessageRole) bool {
 	switch role {
-	case "user", "assistant", "tool", "system":
+	case llm.RoleUser, llm.RoleAssistant, llm.RoleTool, llm.RoleSystem:
 		return true
 	default:
 		return false

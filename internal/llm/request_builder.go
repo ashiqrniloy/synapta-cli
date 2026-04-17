@@ -30,7 +30,7 @@ func (p *OpenAIProvider) buildResponsesRequestBody(req ChatRequest, stream bool)
 	seenFunctionCalls := make(map[string]bool)
 	for _, msg := range req.Messages {
 		switch msg.Role {
-		case "tool":
+		case RoleTool:
 			callID, _ := splitToolCallID(msg.ToolCallID)
 			if callID == "" {
 				continue
@@ -57,11 +57,11 @@ func (p *OpenAIProvider) buildResponsesRequestBody(req ChatRequest, stream bool)
 				"call_id": callID,
 				"output":  output,
 			})
-		case "assistant":
+		case RoleAssistant:
 			if msg.Content != "" {
 				input = append(input, map[string]any{
 					"type":   "message",
-					"role":   "assistant",
+					"role":   string(RoleAssistant),
 					"status": "completed",
 					"content": []any{
 						map[string]any{"type": "output_text", "text": msg.Content},
@@ -86,26 +86,26 @@ func (p *OpenAIProvider) buildResponsesRequestBody(req ChatRequest, stream bool)
 				input = append(input, item)
 				seenFunctionCalls[callID] = true
 			}
-		case "user":
+		case RoleUser:
 			if msg.Content != "" {
 				input = append(input, map[string]any{
-					"role": "user",
+					"role": string(RoleUser),
 					"content": []any{
 						map[string]any{"type": "input_text", "text": msg.Content},
 					},
 				})
 			}
-		case "system", "developer":
+		case RoleSystem, RoleDeveloper:
 			if msg.Content != "" {
 				input = append(input, map[string]any{
-					"role":    msg.Role,
+					"role":    string(msg.Role),
 					"content": msg.Content,
 				})
 			}
 		default:
 			if msg.Content != "" {
 				input = append(input, map[string]any{
-					"role":    msg.Role,
+					"role":    string(msg.Role),
 					"content": msg.Content,
 				})
 			}
@@ -144,7 +144,7 @@ func (p *OpenAIProvider) buildRequestBody(req ChatRequest) map[string]any {
 	messages := make([]map[string]any, len(req.Messages))
 	for i, msg := range req.Messages {
 		m := map[string]any{
-			"role":    msg.Role,
+			"role":    string(msg.Role),
 			"content": msg.Content,
 		}
 		if msg.ToolCallID != "" {
@@ -202,7 +202,7 @@ func (p *OpenAIProvider) setDynamicHeaders(req *http.Request, messages []Message
 	initiator := "user"
 	if len(messages) > 0 {
 		lastMsg := messages[len(messages)-1]
-		if lastMsg.Role != "user" {
+		if lastMsg.Role != RoleUser {
 			initiator = "agent"
 		}
 	}
@@ -210,7 +210,7 @@ func (p *OpenAIProvider) setDynamicHeaders(req *http.Request, messages []Message
 	req.Header.Set("Openai-Intent", "conversation-edits")
 
 	for _, msg := range messages {
-		if msg.Role == "user" && strings.Contains(msg.Content, "data:image/") {
+		if msg.Role == RoleUser && strings.Contains(msg.Content, "data:image/") {
 			req.Header.Set("Copilot-Vision-Request", "true")
 			return
 		}

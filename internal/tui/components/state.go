@@ -583,7 +583,7 @@ func (m *CodeAgentModel) rebuildTranscriptFromHistory() {
 			if content == "" {
 				continue
 			}
-			messages = append(messages, ChatMessage{Role: msg.Role, Content: content})
+			messages = append(messages, ChatMessage{Role: string(msg.Role), Content: content})
 		case "tool":
 			content := parseToolContentForTranscript(msg.Content)
 			if strings.TrimSpace(content) == "" {

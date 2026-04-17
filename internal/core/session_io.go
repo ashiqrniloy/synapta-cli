@@ -77,7 +77,7 @@ func (s *SessionStore) startNewLocked() error {
 	s.filePath = filepath.Join(s.sessionDir, fileTime+"_"+s.sessionID+".jsonl")
 
 	header := sessionEntry{
-		Type:      sessionEntryTypeSession,
+		Type:      SessionEntryTypeSession,
 		Version:   currentSessionVersion,
 		ID:        s.sessionID,
 		Timestamp: timestamp,
@@ -131,7 +131,7 @@ func (s *SessionStore) loadFromFileLocked() error {
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("scan session file: %w", err)
 	}
-	if len(s.entries) == 0 || s.entries[0].Type != sessionEntryTypeSession {
+	if len(s.entries) == 0 || s.entries[0].Type != SessionEntryTypeSession {
 		return fmt.Errorf("invalid session file: missing session header")
 	}
 	header := s.entries[0]

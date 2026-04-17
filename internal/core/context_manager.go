@@ -138,7 +138,7 @@ func (m *ContextManager) Build(history []llm.Message) ([]llm.Message, error) {
 
 	messages := make([]llm.Message, 0, len(history)+2)
 	if strings.TrimSpace(stablePrefix) != "" {
-		messages = append(messages, llm.Message{Role: "system", Content: stablePrefix})
+		messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: stablePrefix})
 	}
 
 	for _, msg := range history {
@@ -177,9 +177,9 @@ func hasContextPayload(msg llm.Message) bool {
 	}
 }
 
-func isContextRole(role string) bool {
+func isContextRole(role llm.MessageRole) bool {
 	switch role {
-	case "user", "assistant", "tool", "system":
+	case llm.RoleUser, llm.RoleAssistant, llm.RoleTool, llm.RoleSystem:
 		return true
 	default:
 		return false
@@ -348,7 +348,7 @@ func hashMessages(messages []llm.Message) string {
 	var b strings.Builder
 	for _, m := range messages {
 		b.WriteString("<")
-		b.WriteString(m.Role)
+		b.WriteString(string(m.Role))
 		b.WriteString(":")
 		b.WriteString(m.Name)
 		b.WriteString(":")

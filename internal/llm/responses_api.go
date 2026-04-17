@@ -128,7 +128,7 @@ func parseResponsesChat(body []byte) (*ChatResponse, error) {
 		return nil, fmt.Errorf("parsing response: %w", err)
 	}
 
-	message := Message{Role: "assistant"}
+	message := Message{Role: RoleAssistant}
 	if outText, ok := payload["output_text"].(string); ok && outText != "" {
 		message.Content += outText
 	}

@@ -542,7 +542,7 @@ The CLI becomes much more extensible without editing core orchestration code.
 
 ---
 
-### 5.2 Make providers injectable and registry-based
+### 5.2 Make providers injectable and registry-based :DONE
 **Issue**  
 Provider selection is hardcoded around Kilo and GitHub Copilot in `/home/arniloy/synapta-cli/internal/core/chat.go`.
 
@@ -657,7 +657,7 @@ More flexible skill systems for different teams and workflows.
 
 ---
 
-### 5.7 Separate domain model from persistence DTOs in session storage
+### 5.7 Separate domain model from persistence DTOs in session storage : Done
 **Issue**  
 `sessionEntry` in `/home/arniloy/synapta-cli/internal/core/session_store.go` is both a persistence format and part of the working domain model.
 

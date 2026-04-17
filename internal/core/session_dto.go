@@ -40,9 +40,9 @@ func encodeSessionEntryJSONLine(entry sessionEntry) (string, error) {
 }
 
 func (dto sessionEntryDTO) toDomain() (sessionEntry, error) {
-	t := sessionEntryType(strings.TrimSpace(dto.Type))
-	if t == "" {
-		return sessionEntry{}, fmt.Errorf("missing entry type")
+	t := SessionEntryType(strings.TrimSpace(dto.Type))
+	if !t.IsValid() {
+		return sessionEntry{}, fmt.Errorf("invalid entry type: %q", dto.Type)
 	}
 
 	ts := time.Time{}
@@ -55,6 +55,11 @@ func (dto sessionEntryDTO) toDomain() (sessionEntry, error) {
 		ts = parsed
 	}
 
+	method := CompactionMethod(strings.TrimSpace(dto.CompactionMethod))
+	if method != "" && !method.IsValid() {
+		return sessionEntry{}, fmt.Errorf("invalid compaction method: %q", dto.CompactionMethod)
+	}
+
 	entry := sessionEntry{
 		Type:                  t,
 		Version:               dto.Version,
@@ -65,11 +70,24 @@ func (dto sessionEntryDTO) toDomain() (sessionEntry, error) {
 		Summary:               dto.Summary,
 		FirstKeptMessageIndex: dto.FirstKeptMessageIndex,
 		TokensBefore:          dto.TokensBefore,
-		CompactionMethod:      dto.CompactionMethod,
+		CompactionMethod:      method,
 		Operation:             dto.Operation,
 	}
 
-	if entry.Type == sessionEntryTypeSession && strings.TrimSpace(entry.ID) == "" {
+	if entry.Message != nil {
+		if err := entry.Message.Validate(); err != nil {
+			return sessionEntry{}, err
+		}
+	}
+	if entry.Operation != nil {
+		if err := entry.Operation.Validate(); err != nil {
+			return sessionEntry{}, err
+		}
+	}
+	if entry.Type == SessionEntryTypeCompaction && !entry.CompactionMethod.IsValid() {
+		return sessionEntry{}, fmt.Errorf("compaction entry missing valid method")
+	}
+	if entry.Type == SessionEntryTypeSession && strings.TrimSpace(entry.ID) == "" {
 		return sessionEntry{}, fmt.Errorf("session header missing id")
 	}
 
@@ -86,7 +104,7 @@ func (entry sessionEntry) toDTO() sessionEntryDTO {
 		Summary:               entry.Summary,
 		FirstKeptMessageIndex: entry.FirstKeptMessageIndex,
 		TokensBefore:          entry.TokensBefore,
-		CompactionMethod:      entry.CompactionMethod,
+		CompactionMethod:      string(entry.CompactionMethod),
 		Operation:             entry.Operation,
 	}
 	if !entry.Timestamp.IsZero() {

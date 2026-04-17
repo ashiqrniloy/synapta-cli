@@ -11,6 +11,10 @@ import (
 )
 
 func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	if err := req.Validate(); err != nil {
+		return nil, err
+	}
+
 	api := p.apiForModel(req.Model)
 	if api == APIOpenAIResponses {
 		return p.chatResponses(ctx, req)
@@ -36,6 +40,10 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (*ChatRespon
 }
 
 func (p *OpenAIProvider) ChatStream(ctx context.Context, req ChatRequest, callback StreamCallback) error {
+	if err := req.Validate(); err != nil {
+		return err
+	}
+
 	api := p.apiForModel(req.Model)
 	if api == APIOpenAIResponses {
 		return p.chatStreamResponses(ctx, req, callback)
