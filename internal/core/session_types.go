@@ -44,18 +44,27 @@ type SessionInfo struct {
 	FirstMessage string
 }
 
+type sessionEntryType string
+
+const (
+	sessionEntryTypeSession    sessionEntryType = "session"
+	sessionEntryTypeMessage    sessionEntryType = "message"
+	sessionEntryTypeCompaction sessionEntryType = "compaction"
+	sessionEntryTypeContextOp  sessionEntryType = "context_op"
+)
+
 type sessionEntry struct {
-	Type                  string            `json:"type"`
-	Version               int               `json:"version,omitempty"`
-	ID                    string            `json:"id,omitempty"`
-	Timestamp             string            `json:"timestamp,omitempty"`
-	CWD                   string            `json:"cwd,omitempty"`
-	Message               *llm.Message      `json:"message,omitempty"`
-	Summary               string            `json:"summary,omitempty"`
-	FirstKeptMessageIndex int               `json:"firstKeptMessageIndex,omitempty"`
-	TokensBefore          int               `json:"tokensBefore,omitempty"`
-	CompactionMethod      string            `json:"compactionMethod,omitempty"`
-	Operation             *ContextOperation `json:"operation,omitempty"`
+	Type                  sessionEntryType
+	Version               int
+	ID                    string
+	Timestamp             time.Time
+	CWD                   string
+	Message               *llm.Message
+	Summary               string
+	FirstKeptMessageIndex int
+	TokensBefore          int
+	CompactionMethod      string
+	Operation             *ContextOperation
 }
 
 type ContextOperation struct {

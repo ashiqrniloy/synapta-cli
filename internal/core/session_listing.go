@@ -2,7 +2,6 @@ package core
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -137,11 +136,11 @@ func isValidSessionFile(path string) bool {
 	if line == "" {
 		return false
 	}
-	var e sessionEntry
-	if err := json.Unmarshal([]byte(line), &e); err != nil {
+	e, err := decodeSessionEntryJSONLine(line)
+	if err != nil {
 		return false
 	}
-	return e.Type == "session" && strings.TrimSpace(e.ID) != ""
+	return e.Type == sessionEntryTypeSession && strings.TrimSpace(e.ID) != ""
 }
 
 func buildSessionInfo(path string) (SessionInfo, error) {
@@ -158,8 +157,8 @@ func buildSessionInfo(path string) (SessionInfo, error) {
 		if line == "" {
 			continue
 		}
-		var e sessionEntry
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
+		e, err := decodeSessionEntryJSONLine(line)
+		if err != nil {
 			continue
 		}
 		entries = append(entries, e)
@@ -167,12 +166,12 @@ func buildSessionInfo(path string) (SessionInfo, error) {
 	if err := scanner.Err(); err != nil {
 		return SessionInfo{}, err
 	}
-	if len(entries) == 0 || entries[0].Type != "session" {
+	if len(entries) == 0 || entries[0].Type != sessionEntryTypeSession {
 		return SessionInfo{}, fmt.Errorf("invalid session file")
 	}
 
 	header := entries[0]
-	created, _ := time.Parse(time.RFC3339, header.Timestamp)
+	created := header.Timestamp
 	if created.IsZero() {
 		created = time.Now()
 	}
@@ -180,7 +179,7 @@ func buildSessionInfo(path string) (SessionInfo, error) {
 	messageCount := 0
 	firstMessage := ""
 	for _, e := range entries {
-		if e.Type != "message" || e.Message == nil {
+		if e.Type != sessionEntryTypeMessage || e.Message == nil {
 			continue
 		}
 		if e.Message.Role != "user" && e.Message.Role != "assistant" {

@@ -2,7 +2,6 @@ package core
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -78,10 +77,10 @@ func (s *SessionStore) startNewLocked() error {
 	s.filePath = filepath.Join(s.sessionDir, fileTime+"_"+s.sessionID+".jsonl")
 
 	header := sessionEntry{
-		Type:      "session",
+		Type:      sessionEntryTypeSession,
 		Version:   currentSessionVersion,
 		ID:        s.sessionID,
-		Timestamp: timestamp.Format(time.RFC3339),
+		Timestamp: timestamp,
 		CWD:       s.cwd,
 	}
 	s.entries = []sessionEntry{header}
@@ -123,8 +122,8 @@ func (s *SessionStore) loadFromFileLocked() error {
 		if line == "" {
 			continue
 		}
-		var e sessionEntry
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
+		e, err := decodeSessionEntryJSONLine(line)
+		if err != nil {
 			continue
 		}
 		s.entries = append(s.entries, e)
@@ -132,7 +131,7 @@ func (s *SessionStore) loadFromFileLocked() error {
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("scan session file: %w", err)
 	}
-	if len(s.entries) == 0 || s.entries[0].Type != "session" {
+	if len(s.entries) == 0 || s.entries[0].Type != sessionEntryTypeSession {
 		return fmt.Errorf("invalid session file: missing session header")
 	}
 	header := s.entries[0]
@@ -165,11 +164,11 @@ func (s *SessionStore) appendEntryLocked(e sessionEntry) error {
 	if err := s.ensureAppendFileLocked(); err != nil {
 		return err
 	}
-	data, err := json.Marshal(e)
+	line, err := encodeSessionEntryJSONLine(e)
 	if err != nil {
-		return fmt.Errorf("marshal session entry: %w", err)
+		return err
 	}
-	if _, err := s.appendFile.WriteString(string(data) + "\n"); err != nil {
+	if _, err := s.appendFile.WriteString(line + "\n"); err != nil {
 		_ = s.closeAppendFileLocked()
 		return fmt.Errorf("append session entry: %w", err)
 	}
@@ -211,11 +210,11 @@ func (s *SessionStore) rewriteAllLocked() error {
 	}
 	defer f.Close()
 	for _, e := range s.entries {
-		data, err := json.Marshal(e)
+		line, err := encodeSessionEntryJSONLine(e)
 		if err != nil {
-			return fmt.Errorf("marshal session entry: %w", err)
+			return err
 		}
-		if _, err := f.WriteString(string(data) + "\n"); err != nil {
+		if _, err := f.WriteString(line + "\n"); err != nil {
 			return fmt.Errorf("write session entry: %w", err)
 		}
 	}

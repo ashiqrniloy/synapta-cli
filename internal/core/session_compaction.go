@@ -14,7 +14,7 @@ func (s *SessionStore) ContextOperations() []ContextOperation {
 	defer s.mu.Unlock()
 	ops := make([]ContextOperation, 0)
 	for _, e := range s.entries {
-		if e.Type == "context_op" && e.Operation != nil {
+		if e.Type == sessionEntryTypeContextOp && e.Operation != nil {
 			ops = append(ops, *e.Operation)
 		}
 	}
@@ -26,8 +26,8 @@ func (s *SessionStore) AppendMessage(msg llm.Message) error {
 	defer s.mu.Unlock()
 
 	entry := sessionEntry{
-		Type:      "message",
-		Timestamp: time.Now().Format(time.RFC3339),
+		Type:      sessionEntryTypeMessage,
+		Timestamp: time.Now(),
 		Message:   &msg,
 	}
 	s.entries = append(s.entries, entry)
@@ -48,11 +48,8 @@ func (s *SessionStore) ContextMessageTimestamps() []time.Time {
 	for _, ref := range refs {
 		ts := time.Time{}
 		if ref.EntryIndex >= 0 && ref.EntryIndex < len(s.entries) {
-			raw := strings.TrimSpace(s.entries[ref.EntryIndex].Timestamp)
-			if raw != "" {
-				if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
-					ts = parsed
-				}
+			if parsed := s.entries[ref.EntryIndex].Timestamp; !parsed.IsZero() {
+				ts = parsed
 			}
 		}
 		out = append(out, ts)
@@ -115,7 +112,7 @@ func (s *SessionStore) contextMessageRefsLocked() []contextMessageRef {
 func (s *SessionStore) messageEntryIndicesLocked() []int {
 	indices := make([]int, 0)
 	for i, e := range s.entries {
-		if e.Type != "message" || e.Message == nil {
+		if e.Type != sessionEntryTypeMessage || e.Message == nil {
 			continue
 		}
 		if !isDynamicContextMessage(*e.Message) {
@@ -138,14 +135,14 @@ func (s *SessionStore) UpdateContextMessageAt(index int, content string) error {
 	if ref.IsCompaction || ref.EntryIndex < 0 {
 		return fmt.Errorf("selected context entry is not editable")
 	}
-	if ref.EntryIndex >= len(s.entries) || s.entries[ref.EntryIndex].Type != "message" || s.entries[ref.EntryIndex].Message == nil {
+	if ref.EntryIndex >= len(s.entries) || s.entries[ref.EntryIndex].Type != sessionEntryTypeMessage || s.entries[ref.EntryIndex].Message == nil {
 		return fmt.Errorf("selected context entry not found")
 	}
 	before := s.entries[ref.EntryIndex].Message.Content
 	s.entries[ref.EntryIndex].Message.Content = content
 	op := sessionEntry{
-		Type:      "context_op",
-		Timestamp: time.Now().Format(time.RFC3339),
+		Type:      sessionEntryTypeContextOp,
+		Timestamp: time.Now(),
 		Operation: &ContextOperation{
 			Action:       "edit",
 			ContextIndex: index,
@@ -170,7 +167,7 @@ func (s *SessionStore) RemoveContextMessageAt(index int) error {
 	if ref.IsCompaction || ref.EntryIndex < 0 {
 		return fmt.Errorf("selected context entry is not removable")
 	}
-	if ref.EntryIndex >= len(s.entries) || s.entries[ref.EntryIndex].Type != "message" || s.entries[ref.EntryIndex].Message == nil {
+	if ref.EntryIndex >= len(s.entries) || s.entries[ref.EntryIndex].Type != sessionEntryTypeMessage || s.entries[ref.EntryIndex].Message == nil {
 		return fmt.Errorf("selected context entry not found")
 	}
 
@@ -178,7 +175,7 @@ func (s *SessionStore) RemoveContextMessageAt(index int) error {
 	s.entries = append(s.entries[:ref.EntryIndex], s.entries[ref.EntryIndex+1:]...)
 	if ref.MessageIndex >= 0 {
 		for i := range s.entries {
-			if s.entries[i].Type != "compaction" {
+			if s.entries[i].Type != sessionEntryTypeCompaction {
 				continue
 			}
 			if s.entries[i].FirstKeptMessageIndex > ref.MessageIndex {
@@ -187,8 +184,8 @@ func (s *SessionStore) RemoveContextMessageAt(index int) error {
 		}
 	}
 	op := sessionEntry{
-		Type:      "context_op",
-		Timestamp: time.Now().Format(time.RFC3339),
+		Type:      sessionEntryTypeContextOp,
+		Timestamp: time.Now(),
 		Operation: &ContextOperation{
 			Action:       "remove",
 			ContextIndex: index,
@@ -287,8 +284,8 @@ func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWin
 	summary := strings.TrimSpace(newSummary)
 
 	compaction := sessionEntry{
-		Type:                  "compaction",
-		Timestamp:             time.Now().Format(time.RFC3339),
+		Type:                  sessionEntryTypeCompaction,
+		Timestamp:             time.Now(),
 		Summary:               summary,
 		FirstKeptMessageIndex: start + keepRel,
 		TokensBefore:          tokensBefore,
@@ -304,7 +301,7 @@ func (s *SessionStore) compactLocked(ctx context.Context, force bool, contextWin
 func (s *SessionStore) messageEntriesLocked() []llm.Message {
 	out := make([]llm.Message, 0)
 	for _, e := range s.entries {
-		if e.Type != "message" || e.Message == nil {
+		if e.Type != sessionEntryTypeMessage || e.Message == nil {
 			continue
 		}
 		if !isDynamicContextMessage(*e.Message) {
@@ -332,7 +329,7 @@ func isDynamicContextMessage(msg llm.Message) bool {
 
 func (s *SessionStore) latestCompactionLocked() *sessionEntry {
 	for i := len(s.entries) - 1; i >= 0; i-- {
-		if s.entries[i].Type == "compaction" {
+		if s.entries[i].Type == sessionEntryTypeCompaction {
 			copyEntry := s.entries[i]
 			return &copyEntry
 		}
@@ -343,7 +340,7 @@ func (s *SessionStore) latestCompactionLocked() *sessionEntry {
 func (s *SessionStore) compactionEntriesLocked() []sessionEntry {
 	entries := make([]sessionEntry, 0)
 	for i := 0; i < len(s.entries); i++ {
-		if s.entries[i].Type != "compaction" {
+		if s.entries[i].Type != sessionEntryTypeCompaction {
 			continue
 		}
 		entries = append(entries, s.entries[i])
