@@ -10,11 +10,6 @@ import (
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
 
-const (
-	ProviderKilo          = "kilo"
-	ProviderGitHubCopilot = "github-copilot"
-)
-
 type ToolEventType string
 
 const (
@@ -35,14 +30,20 @@ type ToolEvent struct {
 	ContextContent string
 }
 
-// ChatService provides chat + tool-calling runtime behavior.
+// ChatService provides chat + tool-calling runtime behaviour.
+//
+// It delegates all provider-specific concerns (token resolution, token
+// refresh, provider construction, model discovery) to the ProviderRegistry
+// injected at construction time.  Adding a new provider therefore requires
+// no changes to ChatService — only a new ProviderDescriptor registration.
 type ChatService struct {
-	auth      *llm.AuthStorage
-	tools     *tools.ToolSet
-	registry  *ToolRegistry
-	warnings  []string
-	mu        sync.RWMutex
-	providers map[string]cachedProvider
+	auth        *llm.AuthStorage
+	tools       *tools.ToolSet
+	registry    *ToolRegistry
+	providerReg *llm.ProviderRegistry
+	warnings    []string
+	mu          sync.RWMutex
+	providers   map[string]cachedProvider
 }
 
 type cachedProvider struct {
@@ -50,24 +51,34 @@ type cachedProvider struct {
 	token    string
 }
 
+// NewChatService creates a ChatService using the built-in provider registry.
 func NewChatService(auth *llm.AuthStorage, toolset *tools.ToolSet) *ChatService {
 	return NewChatServiceWithRuntimeTools(auth, toolset, LoadToolRegistryOptions{AgentDir: llm.GetAgentDir()})
 }
 
+// NewChatServiceWithRuntimeTools creates a ChatService with explicit tool and
+// provider registry options.
 func NewChatServiceWithRuntimeTools(auth *llm.AuthStorage, toolset *tools.ToolSet, opts LoadToolRegistryOptions) *ChatService {
-	registry := NewToolRegistry()
+	return newChatService(auth, toolset, opts, builtinProviderRegistry)
+}
+
+// newChatService is the internal constructor; it accepts an explicit provider
+// registry to make unit-testing straightforward.
+func newChatService(auth *llm.AuthStorage, toolset *tools.ToolSet, opts LoadToolRegistryOptions, provReg *llm.ProviderRegistry) *ChatService {
+	toolReg := NewToolRegistry()
 	warnings := make([]string, 0)
-	if err := registry.RegisterBuiltins(toolset); err != nil {
+	if err := toolReg.RegisterBuiltins(toolset); err != nil {
 		warnings = append(warnings, err.Error())
 	}
-	warnings = append(warnings, registry.LoadRuntimeTools(opts)...)
+	warnings = append(warnings, toolReg.LoadRuntimeTools(opts)...)
 
 	return &ChatService{
-		auth:      auth,
-		tools:     toolset,
-		registry:  registry,
-		warnings:  warnings,
-		providers: make(map[string]cachedProvider),
+		auth:        auth,
+		tools:       toolset,
+		registry:    toolReg,
+		providerReg: provReg,
+		warnings:    warnings,
+		providers:   make(map[string]cachedProvider),
 	}
 }
 
@@ -93,19 +104,21 @@ func (s *ChatService) InvalidateProviderCache() {
 	s.providers = make(map[string]cachedProvider)
 }
 
+// AvailableModels returns every model across all registered providers for
+// which credentials are currently available.  Providers without credentials
+// are silently skipped; an error is only returned when no provider at all
+// could be initialised.
 func (s *ChatService) AvailableModels(ctx context.Context) ([]*llm.Model, error) {
 	_ = ctx
 
 	models := make([]*llm.Model, 0)
-
-	kiloProvider, err := s.providerFor(ProviderKilo)
-	if err == nil {
-		models = append(models, kiloProvider.Models()...)
-	}
-
-	copilotProvider, err := s.providerFor(ProviderGitHubCopilot)
-	if err == nil {
-		models = append(models, copilotProvider.Models()...)
+	for _, desc := range s.providerReg.All() {
+		p, err := s.providerFor(desc.ID)
+		if err != nil {
+			// Provider unavailable (no credentials, network error, etc.) — skip.
+			continue
+		}
+		models = append(models, p.Models()...)
 	}
 
 	if len(models) == 0 {

@@ -442,8 +442,8 @@ Faster session search/resume UI and reduced disk I/O.
 
 ---
 
-### 4.3 Kilo gateway constructs its own HTTP client instead of shared clients
-**Issue**  
+### 4.3 Kilo gateway constructs its own HTTP client instead of shared clients : DONE
+**Issue**   
 `/home/arniloy/synapta-cli/internal/llm/kilo.go` creates a dedicated `http.Client{Timeout: ...}` rather than reusing `/home/arniloy/synapta-cli/internal/httpclient/client.go`.
 
 This bypasses shared transport tuning, tracing, and pooling strategy.
