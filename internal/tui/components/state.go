@@ -78,7 +78,7 @@ func (m *CodeAgentModel) keybindingRows() []keybindingRow {
 	}
 
 	rows := []keybindingRow{
-		{Action: "Submit", Binding: m.getSubmitKey(), Description: "Send message / run bash"},
+		{Action: "Submit", Binding: m.getSubmitKey(), Description: "Send message / run shell"},
 		{Action: "Newline", Binding: newline, Description: "Insert newline in input"},
 		{Action: "Command palette", Binding: m.getCommandKey(), Description: "Open command picker"},
 		{Action: "File browser", Binding: m.getFileBrowserKey(), Description: "Open file browser modal"},
@@ -105,7 +105,7 @@ func (m *CodeAgentModel) commandShortcutRows() []keybindingRow {
 	}
 	actionLabel := map[string]string{
 		"quit":            "Quit",
-		"bash":            "Bash",
+		"shell":           "Shell",
 		"browse-files":    "Browse Files",
 		"help":            "Help",
 		"context-manager": "Context Manager",
@@ -116,7 +116,7 @@ func (m *CodeAgentModel) commandShortcutRows() []keybindingRow {
 	}
 	actionDesc := map[string]string{
 		"quit":            "Exit Synapta Code",
-		"bash":            "Switch to bash mode",
+		"shell":           "Switch to shell mode",
 		"browse-files":    "Browse and add files to context",
 		"help":            "Open keybindings modal",
 		"context-manager": "Open context modal",
@@ -274,7 +274,7 @@ func (m *CodeAgentModel) chatWorkingStatusText() string {
 
 func (m *CodeAgentModel) bashWorkingStatusText() string {
 	spinner := []string{"⠋", "⠙", "⠹", "⠸"}[m.workingFrame%4]
-	return fmt.Sprintf("[Bash] %s Running command...", spinner)
+	return fmt.Sprintf("[Shell] %s Running command...", spinner)
 }
 
 func formatToolContextContent(e core.ToolEvent) string {

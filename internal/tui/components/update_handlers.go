@@ -39,10 +39,10 @@ func (m *CodeAgentModel) handleCommandAction(msg CommandActionMsg) (tea.Model, t
 		m.shutdownLifecycle()
 		m.quit = true
 		return m, tea.Sequence(tea.Raw(ansi.ResetModeMouseButtonEvent+ansi.ResetModeMouseAnyEvent+ansi.ResetModeMouseExtSgr), tea.Quit)
-	case "bash":
+	case "shell", "bash":
 		m.clearCommandMode()
 		m.applyInputMode(inputModeBash)
-		m.appendSystemMessage("[Bash] Mode enabled. Enter a command and press Enter.", "info")
+		m.appendSystemMessage("[Shell] Mode enabled. Enter a command and press Enter.", "info")
 		return m, nil
 	case "help":
 		m.clearCommandMode()
@@ -547,13 +547,13 @@ func (m *CodeAgentModel) handleBashCommandDone(msg bashCommandDoneMsg) (tea.Mode
 		state = "error"
 	}
 	if msg.Err != nil {
-		m.finalizeWorkingSystemMessage("[Bash] ✗ Command failed", "error")
+		m.finalizeWorkingSystemMessage("[Shell] ✗ Command failed", "error")
 	} else {
-		m.finalizeWorkingSystemMessage("[Bash] ✓ Command finished", "done")
+		m.finalizeWorkingSystemMessage("[Shell] ✓ Command finished", "done")
 	}
-	m.appendChatMessage(ChatMessage{Role: "tool", ToolName: "bash", ToolCommand: msg.Command, ToolState: state, Content: msg.Output, ToolStartedAt: msg.StartedAt, ToolEndedAt: msg.EndedAt})
+	m.appendChatMessage(ChatMessage{Role: "tool", ToolName: "shell", ToolCommand: msg.Command, ToolState: state, Content: msg.Output, ToolStartedAt: msg.StartedAt, ToolEndedAt: msg.EndedAt})
 	if msg.IsCD && msg.Err == nil {
-		m.appendSystemMessage("[Bash] cwd: "+m.currentCwd, "info")
+		m.appendSystemMessage("[Shell] cwd: "+m.currentCwd, "info")
 	}
 	m.refreshChatViewport()
 	return m, nil
@@ -587,7 +587,6 @@ func (m *CodeAgentModel) handleFileAdded(msg FileAddedMsg) (tea.Model, tea.Cmd) 
 	// Insert the file path into the textarea as an attachment token.
 	reference := " `" + path + "`"
 
-
 	// Get current value
 	currentValue := m.ta.Value()
 
@@ -616,7 +615,7 @@ func (m *CodeAgentModel) readFileForContext(path string) (string, error) {
 	if m.chatService == nil || m.chatService.Tools() == nil {
 		return "", fmt.Errorf("toolset not available")
 	}
-	
+
 	readTool := m.chatService.Tools().Read
 	if readTool == nil {
 		return "", fmt.Errorf("read tool not available")
@@ -636,7 +635,7 @@ func (m *CodeAgentModel) readFileForContext(path string) (string, error) {
 			content.WriteString(part.Text)
 		}
 	}
-	
+
 	return content.String(), nil
 }
 

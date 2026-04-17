@@ -17,7 +17,6 @@ import (
 
 var attachmentTokenRE = regexp.MustCompile("`([^`\\n]+)`")
 
-
 func (m *CodeAgentModel) shutdownLifecycle() {
 	if m.cancelStream != nil {
 		m.cancelStream()
@@ -59,7 +58,7 @@ func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quit
 
 	if keyStr == "esc" && m.inputMode == inputModeBash && strings.TrimSpace(m.ta.Value()) == "" {
 		m.applyInputMode(inputModeChat)
-		m.appendSystemMessage("[Bash] Mode disabled", "info")
+		m.appendSystemMessage("[Shell] Mode disabled", "info")
 		return true, nil
 	}
 	if keyStr == "ctrl+shift+c" || keyStr == "ctrl+y" {

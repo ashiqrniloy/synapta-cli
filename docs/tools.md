@@ -1,10 +1,10 @@
 # Tool Registry and Custom Tools
 
-Synapta now supports a **runtime tool registry** so tools are no longer hardcoded to only `read`, `write`, and `bash`.
+Synapta uses a **runtime tool registry** so tools are not hardcoded in chat execution.
 
 At runtime, Synapta loads tools from three sources:
 
-1. **Built-in tools** (`read`, `write`, `bash`)
+1. **Built-in tools** (`read`, `write`, `shell`)
 2. **Extension-provided tools** (from extension directories)
 3. **User manifests** (JSON files you add)
 
@@ -30,7 +30,107 @@ If multiple manifests reuse the same tool name, the later loaded one replaces th
 
 ---
 
-## Tool manifest format
+## Built-in registry contract (for Go tools)
+
+Built-ins are registered in:
+
+- `/home/arn/Projects/synapta-cli/internal/core/tool_registry.go`
+
+Each registered tool now provides a **single registry record** with:
+
+- `Name`
+- `Description`
+- `Parameters` (JSON schema)
+- `Decoder(raw string) (any, error)`
+- `Metadata(decoded any) tools.ToolMetadata`
+- `Executor(ctx, decoded any, onUpdate)`
+
+This is the runtime source of truth used for:
+
+- OpenAI-compatible tool definitions
+- argument decode/validation
+- metadata extraction for stream/UI (`path`, `command`)
+- execution
+
+### Current built-ins
+
+- `read`
+- `write`
+- `shell`
+
+Schemas for built-ins live in:
+
+- `/home/arn/Projects/synapta-cli/internal/core/tools/schema.go`
+
+---
+
+## Adding a new built-in tool (step-by-step)
+
+1. **Implement tool logic** in `internal/core/tools/`.
+   - expose `Name()` and `Description()`
+   - add your input struct
+   - add `Execute(...)`
+
+2. **Add schema function** in:
+   - `/home/arn/Projects/synapta-cli/internal/core/tools/schema.go`
+
+3. **Wire it in ToolSet** (if needed) in:
+   - `/home/arn/Projects/synapta-cli/internal/core/tools/types.go`
+
+4. **Register in registry** in:
+   - `/home/arn/Projects/synapta-cli/internal/core/tool_registry.go`
+
+   Add one `ToolSpec` with:
+   - `Name`, `Description`, `Parameters`
+   - `Decoder`: unmarshal raw JSON args into typed input
+   - `Metadata`: extract `path` and/or `command` if applicable
+   - `Executor`: type assert decoded input and run the tool
+
+5. **Run tests**
+   - `go test ./...`
+
+### Minimal registration pattern
+
+```go
+if toolset.MyTool != nil {
+    if err := r.Register(ToolSpec{
+        Name:        toolset.MyTool.Name(),
+        Description: toolset.MyTool.Description(),
+        Parameters:  tools.MyToolJSONSchema(),
+        Source:      ToolSourceBuiltin,
+        Decoder: func(raw string) (any, error) {
+            if strings.TrimSpace(raw) == "" {
+                raw = "{}"
+            }
+            var in tools.MyToolInput
+            if err := json.Unmarshal([]byte(raw), &in); err != nil {
+                return nil, fmt.Errorf("invalid my_tool arguments: %w", err)
+            }
+            return in, nil
+        },
+        Metadata: func(decoded any) tools.ToolMetadata {
+            in, ok := decoded.(tools.MyToolInput)
+            if !ok {
+                return tools.ToolMetadata{}
+            }
+            return tools.ToolMetadata{Path: strings.TrimSpace(in.Path)}
+        },
+        Executor: func(ctx context.Context, input any, onUpdate tools.StreamUpdate) (any, error) {
+            in, ok := input.(tools.MyToolInput)
+            if !ok {
+                return nil, fmt.Errorf("invalid my_tool arguments: expected MyToolInput")
+            }
+            return toolset.MyTool.Execute(ctx, in)
+        },
+    }); err != nil {
+        return err
+    }
+}
+```
+
+---
+
+## Manifest tool format (external tools)
 
 Create a JSON file like:
 
@@ -69,48 +169,30 @@ Create a JSON file like:
 - `parameters`: JSON schema for tool arguments.
 - `command` (**required**): executable to run.
 - `args`: command arguments.
-- `workdir`: working directory (relative paths resolve from the manifest directory).
+- `workdir`: working directory (relative paths resolve from manifest directory).
 - `policy`: execution metadata.
   - `timeout_seconds`: hard timeout for command execution.
-  - `require_confirmation`: policy hint (for governance/UX hooks).
+  - `require_confirmation`: policy hint.
   - `allow_network`: policy hint.
-- `capabilities`: free-form capability tags.
-- `safe_working_directory_scope`: sandbox metadata for governance.
-- `streaming`: if true, stdout/stderr lines are streamed as incremental tool updates.
+- `capabilities`: free-form tags.
+- `safe_working_directory_scope`: governance metadata.
+- `streaming`: if true, stdout/stderr lines are streamed as incremental updates.
 
 ---
 
-## Execution contract
+## Manifest execution contract
 
 For manifest-backed tools:
 
-- Synapta passes tool-call JSON arguments to the process **via stdin**.
+- Synapta passes tool-call JSON arguments via **stdin**.
 - `stdout`/`stderr` are returned as tool output.
 - If `streaming=true`, line updates are emitted while the command runs.
-- Non-zero exit status returns an error to the model (with captured output included).
-
----
-
-## Minimal example (project-local)
-
-Create `./tools/date.json`:
-
-```json
-{
-  "name": "now",
-  "description": "Return current date/time",
-  "parameters": { "type": "object", "properties": {} },
-  "command": "bash",
-  "args": ["-lc", "date"]
-}
-```
-
-Restart Synapta and the `now` tool will be available to tool-calling models.
+- Non-zero exit status returns an error to the model (with captured output).
 
 ---
 
 ## Notes
 
-- Built-ins still work exactly as before.
+- Built-ins still work exactly as before (with `bash` renamed to `shell`).
 - Invalid manifests are skipped and surfaced as runtime warnings.
-- Extension command manifests (`extension.json`) are separate from extension tool manifests (`tool.json`, `tools/*.json`).
+- Extension command manifests (`extension.json`) are separate from tool manifests (`tool.json`, `tools/*.json`).

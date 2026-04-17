@@ -34,7 +34,7 @@ keybindings:
 # Type ":" then one of these shortcuts and press Enter.
 command_shortcuts:
   q: "quit"
-  b: "bash"
+  b: "shell"
   h: "help"
   k: "context-manager"
   m: "set-model"

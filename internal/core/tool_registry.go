@@ -36,8 +36,9 @@ type SafeWorkingDirectoryScope struct {
 	Mode  string   `json:"mode,omitempty"`
 	Paths []string `json:"paths,omitempty"`
 }
-
-type ToolExecutor func(ctx context.Context, arguments json.RawMessage, onUpdate tools.StreamUpdate) (any, error)
+type ToolExecutor func(ctx context.Context, input any, onUpdate tools.StreamUpdate) (any, error)
+type ToolDecoder func(raw string) (any, error)
+type ToolMetadataExtractor func(decoded any) tools.ToolMetadata
 
 type ToolSpec struct {
 	Name                 string                    `json:"name"`
@@ -48,6 +49,8 @@ type ToolSpec struct {
 	SafeWorkingDirectory SafeWorkingDirectoryScope `json:"safe_working_directory_scope,omitempty"`
 	Streaming            bool                      `json:"streaming,omitempty"`
 	Source               string                    `json:"source,omitempty"`
+	Decoder              ToolDecoder               `json:"-"`
+	Metadata             ToolMetadataExtractor     `json:"-"`
 	Executor             ToolExecutor              `json:"-"`
 
 	ResolvedWorkingDirectory string `json:"-"`
@@ -103,6 +106,36 @@ func (r *ToolRegistry) Get(name string) (ToolSpec, bool) {
 	return spec, ok
 }
 
+func (r *ToolRegistry) Decode(name string, raw string) (any, error) {
+	spec, ok := r.Get(name)
+	if !ok {
+		return nil, fmt.Errorf("unknown tool: %s", strings.TrimSpace(name))
+	}
+	if spec.Decoder == nil {
+		var v any
+		if strings.TrimSpace(raw) == "" {
+			raw = "{}"
+		}
+		if err := json.Unmarshal([]byte(raw), &v); err != nil {
+			return nil, fmt.Errorf("invalid %s arguments: %w", spec.Name, err)
+		}
+		return v, nil
+	}
+	decoded, err := spec.Decoder(raw)
+	if err != nil {
+		return nil, err
+	}
+	return decoded, nil
+}
+
+func (r *ToolRegistry) Metadata(name string, decoded any) tools.ToolMetadata {
+	spec, ok := r.Get(name)
+	if !ok || spec.Metadata == nil {
+		return tools.ToolMetadata{}
+	}
+	return spec.Metadata(decoded)
+}
+
 func (r *ToolRegistry) Definitions() []llm.ToolDefinition {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -134,18 +167,36 @@ func (r *ToolRegistry) RegisterBuiltins(toolset *tools.ToolSet) error {
 	if toolset == nil {
 		return nil
 	}
+
 	if toolset.Read != nil {
 		if err := r.Register(ToolSpec{
-			Name:                 "read",
+			Name:                 toolset.Read.Name(),
 			Description:          toolset.Read.Description(),
-			Parameters:           readToolParametersSchema(),
+			Parameters:           tools.ReadJSONSchema(),
 			Source:               ToolSourceBuiltin,
 			Capabilities:         []string{"filesystem", "read-only"},
 			SafeWorkingDirectory: SafeWorkingDirectoryScope{Mode: "workspace"},
-			Executor: func(ctx context.Context, arguments json.RawMessage, _ tools.StreamUpdate) (any, error) {
+			Decoder: func(raw string) (any, error) {
+				if strings.TrimSpace(raw) == "" {
+					raw = "{}"
+				}
 				var in tools.ReadInput
-				if err := json.Unmarshal(arguments, &in); err != nil {
+				if err := json.Unmarshal([]byte(raw), &in); err != nil {
 					return nil, fmt.Errorf("invalid read arguments: %w", err)
+				}
+				return in, nil
+			},
+			Metadata: func(decoded any) tools.ToolMetadata {
+				in, ok := decoded.(tools.ReadInput)
+				if !ok {
+					return tools.ToolMetadata{}
+				}
+				return tools.ToolMetadata{Path: strings.TrimSpace(in.Path)}
+			},
+			Executor: func(ctx context.Context, input any, _ tools.StreamUpdate) (any, error) {
+				in, ok := input.(tools.ReadInput)
+				if !ok {
+					return nil, fmt.Errorf("invalid read arguments: expected ReadInput")
 				}
 				return toolset.Read.Execute(ctx, in)
 			},
@@ -153,18 +204,36 @@ func (r *ToolRegistry) RegisterBuiltins(toolset *tools.ToolSet) error {
 			return err
 		}
 	}
+
 	if toolset.Write != nil {
 		if err := r.Register(ToolSpec{
-			Name:                 "write",
+			Name:                 toolset.Write.Name(),
 			Description:          toolset.Write.Description(),
-			Parameters:           writeToolParametersSchema(),
+			Parameters:           tools.WriteJSONSchema(),
 			Source:               ToolSourceBuiltin,
 			Capabilities:         []string{"filesystem", "mutating"},
 			SafeWorkingDirectory: SafeWorkingDirectoryScope{Mode: "workspace"},
-			Executor: func(ctx context.Context, arguments json.RawMessage, _ tools.StreamUpdate) (any, error) {
+			Decoder: func(raw string) (any, error) {
+				if strings.TrimSpace(raw) == "" {
+					raw = "{}"
+				}
 				var in tools.WriteInput
-				if err := json.Unmarshal(arguments, &in); err != nil {
+				if err := json.Unmarshal([]byte(raw), &in); err != nil {
 					return nil, fmt.Errorf("invalid write arguments: %w", err)
+				}
+				return in, nil
+			},
+			Metadata: func(decoded any) tools.ToolMetadata {
+				in, ok := decoded.(tools.WriteInput)
+				if !ok {
+					return tools.ToolMetadata{}
+				}
+				return tools.ToolMetadata{Path: strings.TrimSpace(in.Path)}
+			},
+			Executor: func(ctx context.Context, input any, _ tools.StreamUpdate) (any, error) {
+				in, ok := input.(tools.WriteInput)
+				if !ok {
+					return nil, fmt.Errorf("invalid write arguments: expected WriteInput")
 				}
 				return toolset.Write.Execute(ctx, in)
 			},
@@ -172,19 +241,37 @@ func (r *ToolRegistry) RegisterBuiltins(toolset *tools.ToolSet) error {
 			return err
 		}
 	}
+
 	if toolset.Bash != nil {
 		if err := r.Register(ToolSpec{
-			Name:                 "bash",
+			Name:                 toolset.Bash.Name(),
 			Description:          toolset.Bash.Description(),
-			Parameters:           bashToolParametersSchema(),
+			Parameters:           tools.ShellJSONSchema(),
 			Source:               ToolSourceBuiltin,
 			Capabilities:         []string{"process", "mutating"},
 			SafeWorkingDirectory: SafeWorkingDirectoryScope{Mode: "workspace"},
 			Streaming:            true,
-			Executor: func(ctx context.Context, arguments json.RawMessage, onUpdate tools.StreamUpdate) (any, error) {
+			Decoder: func(raw string) (any, error) {
+				if strings.TrimSpace(raw) == "" {
+					raw = "{}"
+				}
 				var in tools.BashInput
-				if err := json.Unmarshal(arguments, &in); err != nil {
-					return nil, fmt.Errorf("invalid bash arguments: %w", err)
+				if err := json.Unmarshal([]byte(raw), &in); err != nil {
+					return nil, fmt.Errorf("invalid shell arguments: %w", err)
+				}
+				return in, nil
+			},
+			Metadata: func(decoded any) tools.ToolMetadata {
+				in, ok := decoded.(tools.BashInput)
+				if !ok {
+					return tools.ToolMetadata{}
+				}
+				return tools.ToolMetadata{Command: strings.TrimSpace(in.Command)}
+			},
+			Executor: func(ctx context.Context, input any, onUpdate tools.StreamUpdate) (any, error) {
+				in, ok := input.(tools.BashInput)
+				if !ok {
+					return nil, fmt.Errorf("invalid shell arguments: expected BashInput")
 				}
 				return toolset.Bash.Execute(ctx, in, onUpdate)
 			},
@@ -192,6 +279,7 @@ func (r *ToolRegistry) RegisterBuiltins(toolset *tools.ToolSet) error {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -300,7 +388,31 @@ func (r *ToolRegistry) registerManifestFile(path string, source string, cwd stri
 		Streaming:                mf.Streaming,
 		Source:                   source,
 		ResolvedWorkingDirectory: workDir,
-		Executor:                 manifestExecutor(command, mf.Args, workDir, mf.Policy.TimeoutSeconds, mf.Streaming),
+		Decoder: func(raw string) (any, error) {
+			if strings.TrimSpace(raw) == "" {
+				raw = "{}"
+			}
+			var in map[string]any
+			if err := json.Unmarshal([]byte(raw), &in); err != nil {
+				return nil, fmt.Errorf("invalid %s arguments: %w", name, err)
+			}
+			return in, nil
+		},
+		Metadata: func(decoded any) tools.ToolMetadata {
+			meta := tools.ToolMetadata{}
+			m, ok := decoded.(map[string]any)
+			if !ok {
+				return meta
+			}
+			if v, ok := m["path"].(string); ok {
+				meta.Path = strings.TrimSpace(v)
+			}
+			if v, ok := m["command"].(string); ok {
+				meta.Command = strings.TrimSpace(v)
+			}
+			return meta
+		},
+		Executor: manifestExecutor(command, mf.Args, workDir, mf.Policy.TimeoutSeconds, mf.Streaming),
 	}
 	if spec.SafeWorkingDirectory.Mode == "" {
 		spec.SafeWorkingDirectory.Mode = "workspace"
@@ -327,9 +439,23 @@ func resolveManifestWorkDir(configured, manifestDir, cwd, source string) string 
 func manifestExecutor(command string, args []string, workDir string, timeoutSeconds int, streaming bool) ToolExecutor {
 	trimmedCmd := strings.TrimSpace(command)
 	baseArgs := append([]string(nil), args...)
-	return func(ctx context.Context, arguments json.RawMessage, onUpdate tools.StreamUpdate) (any, error) {
-		if len(arguments) == 0 {
+	return func(ctx context.Context, input any, onUpdate tools.StreamUpdate) (any, error) {
+		var arguments []byte
+		switch v := input.(type) {
+		case nil:
 			arguments = []byte("{}")
+		case map[string]any:
+			b, err := json.Marshal(v)
+			if err != nil {
+				return nil, fmt.Errorf("marshal manifest tool args: %w", err)
+			}
+			arguments = b
+		default:
+			b, err := json.Marshal(v)
+			if err != nil {
+				return nil, fmt.Errorf("marshal manifest tool args: %w", err)
+			}
+			arguments = b
 		}
 		runCtx := ctx
 		cancel := func() {}

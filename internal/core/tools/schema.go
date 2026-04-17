@@ -1,6 +1,6 @@
-package core
+package tools
 
-func readToolParametersSchema() map[string]any {
+func ReadJSONSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -28,7 +28,7 @@ func readToolParametersSchema() map[string]any {
 	}
 }
 
-func writeToolParametersSchema() map[string]any {
+func WriteJSONSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -42,8 +42,8 @@ func writeToolParametersSchema() map[string]any {
 				"description": "Edit strategy (default: overwrite). " +
 					"overwrite=replace whole file (content required, must not be empty). " +
 					"append=add text to end of file or create it (content required). " +
-					"replace=literal find/replace in existing file (requires find+content, set expected_matches=1 for single occurrence). " +
-					"replace_regex=RE2 find/replace in existing file (requires find+content). " +
+					"replace=literal find/replace in existing content (requires find+content, set expected_matches=1 for single occurrence). " +
+					"replace_regex=RE2 find/replace in existing content (requires find+content). " +
 					"line_edit=replace start_line..end_line inclusive (requires start_line+end_line+content). " +
 					"insert_after_line=insert lines after after_line without replacing (requires after_line+content; after_line=0 inserts at top). " +
 					"patch=apply unified diff with hunk headers @@ -old,+new @@ (requires unified_diff).",
@@ -101,11 +101,11 @@ func writeToolParametersSchema() map[string]any {
 	}
 }
 
-func bashToolParametersSchema() map[string]any {
+func ShellJSONSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"command": map[string]any{"type": "string", "description": "Bash command to execute"},
+			"command": map[string]any{"type": "string", "description": "Shell command to execute"},
 			"timeout": map[string]any{"type": "number", "description": "Timeout in seconds (optional, no default timeout)"},
 		},
 		"required": []string{"command"},

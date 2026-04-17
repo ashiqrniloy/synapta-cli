@@ -24,7 +24,7 @@ func TestParseToolCall_MalformedArguments(t *testing.T) {
 	}{
 		{name: "read invalid json", toolName: "read", arguments: "{", errSubstr: "invalid read arguments"},
 		{name: "write invalid json", toolName: "write", arguments: "not-json", errSubstr: "invalid write arguments"},
-		{name: "bash invalid json", toolName: "bash", arguments: "[1,2", errSubstr: "invalid bash arguments"},
+		{name: "shell invalid json", toolName: "shell", arguments: "[1,2", errSubstr: "invalid shell arguments"},
 		{name: "unknown tool", toolName: "wat", arguments: "{}", errSubstr: "unknown tool"},
 	}
 
@@ -54,9 +54,9 @@ func TestParseToolCall_ExtractsMetadata(t *testing.T) {
 		t.Fatalf("expected path a.txt, got %q", parsed.Path)
 	}
 
-	parsed, err = ParseToolCall(llm.ToolCall{Function: llm.ToolFunctionCall{Name: "bash", Arguments: `{"command":"echo hi"}`}}, registry)
+	parsed, err = ParseToolCall(llm.ToolCall{Function: llm.ToolFunctionCall{Name: "shell", Arguments: `{"command":"echo hi"}`}}, registry)
 	if err != nil {
-		t.Fatalf("parse bash: %v", err)
+		t.Fatalf("parse shell: %v", err)
 	}
 	if parsed.Command != "echo hi" {
 		t.Fatalf("expected command echo hi, got %q", parsed.Command)

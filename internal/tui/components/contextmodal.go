@@ -144,8 +144,8 @@ func categorizeContextMessage(msg llm.Message) string {
 			return "files-read"
 		case "write":
 			return "files-written"
-		case "bash":
-			return "tool-bash"
+		case "shell":
+			return "tool-shell"
 		default:
 			return "tool-output"
 		}
@@ -199,14 +199,14 @@ func (m *CodeAgentModel) contextEntryLabel(msg llm.Message, category string, ts 
 			return "write · " + p
 		}
 		return "write"
-	case "tool-bash":
+	case "tool-shell":
 		if cmd := strings.TrimSpace(toolMeta.Command); cmd != "" {
-			return "bash · " + cmd
+			return "shell · " + cmd
 		}
 		if cmd := extractAfterPrefixLine(content, "Command: "); cmd != "" {
-			return "bash · " + cmd
+			return "shell · " + cmd
 		}
-		return "bash"
+		return "shell"
 	case "tool-output":
 		tool := strings.TrimSpace(msg.Name)
 		if tool == "" {

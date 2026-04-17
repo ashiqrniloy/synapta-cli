@@ -98,7 +98,7 @@ func (m *CodeAgentModel) commandShortcutCommandID() string {
 	case "q":
 		return "quit"
 	case "b":
-		return "bash"
+		return "shell"
 	case "h":
 		return "help"
 	case "k":
@@ -194,7 +194,7 @@ func (m *CodeAgentModel) applyInputMode(mode InputMode) {
 		if m.skillPicker != nil {
 			m.skillPicker.Deactivate()
 		}
-		m.ta.Placeholder = "bash> Enter command (Enter=run, Esc=exit bash mode)"
+		m.ta.Placeholder = "shell> Enter command (Enter=run, Esc=exit shell mode)"
 	default:
 		m.inputMode = InputModeChat
 		m.ta.Placeholder = "Type your message... (Enter=send, Shift+Enter/Ctrl+N=newline)"

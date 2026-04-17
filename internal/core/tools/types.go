@@ -58,6 +58,21 @@ type Tool interface {
 	Description() string
 }
 
+// ToolMetadata captures lightweight invocation metadata used by runtime and UI.
+type ToolMetadata struct {
+	Path    string `json:"path,omitempty"`
+	Command string `json:"command,omitempty"`
+}
+
+// RuntimeTool extends Tool with schema/decoding/metadata/execution hooks so a
+// tool can be registered as a single source of truth.
+type RuntimeTool interface {
+	Tool
+	JSONSchema() map[string]any
+	Decode(raw string) (any, error)
+	Metadata(any) ToolMetadata
+}
+
 // ReadInput is the input for the read tool.
 type ReadInput struct {
 	Path   string `json:"path"`
@@ -71,7 +86,7 @@ type ReadInput struct {
 	// Locate mode: search for a literal string or RE2 regex inside the file.
 	// Returns matching line numbers and optional surrounding context.
 	// When set, offset/limit/include_line_numbers are ignored.
-	Pattern        string `json:"pattern,omitempty"`         // literal string or regex (when pattern_is_regex=true)
+	Pattern        string `json:"pattern,omitempty"`          // literal string or regex (when pattern_is_regex=true)
 	PatternIsRegex *bool  `json:"pattern_is_regex,omitempty"` // default false → literal search
 	ContextLines   *int   `json:"context_lines,omitempty"`    // lines of context before/after each match (default 0)
 }
@@ -80,13 +95,13 @@ type ReadInput struct {
 type WriteMode string
 
 const (
-	WriteModeOverwrite      WriteMode = "overwrite"       // default; write full content
-	WriteModeAppend         WriteMode = "append"          // append content to end of file (or create)
-	WriteModeReplace        WriteMode = "replace"         // literal find/replace in existing content
-	WriteModeReplaceRegex   WriteMode = "replace_regex"   // regex find/replace in existing content
-	WriteModeLineEdit       WriteMode = "line_edit"       // replace [start_line,end_line] inclusive
+	WriteModeOverwrite       WriteMode = "overwrite"         // default; write full content
+	WriteModeAppend          WriteMode = "append"            // append content to end of file (or create)
+	WriteModeReplace         WriteMode = "replace"           // literal find/replace in existing content
+	WriteModeReplaceRegex    WriteMode = "replace_regex"     // regex find/replace in existing content
+	WriteModeLineEdit        WriteMode = "line_edit"         // replace [start_line,end_line] inclusive
 	WriteModeInsertAfterLine WriteMode = "insert_after_line" // insert lines after a given line number
-	WriteModePatch          WriteMode = "patch"           // apply unified diff
+	WriteModePatch           WriteMode = "patch"             // apply unified diff
 )
 
 // WriteInput is the input for the write tool.

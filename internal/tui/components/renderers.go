@@ -118,7 +118,6 @@ func (m *CodeAgentModel) renderModelFooter() string {
 	return muted.Render(line1 + "\n" + line2)
 }
 
-
 func (m *CodeAgentModel) renderContextPreviewLine(e ContextEntry, width int) string {
 	badge := renderContextBadge(e.Category)
 	usage := fmt.Sprintf("~%s", formatTokenCount(e.EstimatedTokens))
@@ -301,8 +300,8 @@ func contextBadgeLabel(category string) (string, string) {
 		bg, label = "31", "Read"
 	case "files-written":
 		bg, label = "29", "Write"
-	case "tool-bash":
-		bg, label = "130", "Bash"
+	case "tool-shell":
+		bg, label = "130", "Shell"
 	case "llm-output":
 		bg, label = "64", "LLM"
 	case "user-input":
@@ -602,7 +601,7 @@ func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
 	if strings.TrimSpace(msg.ToolPath) != "" {
 		meta = append(meta, m.styles.MutedStyle.Render("path: "+msg.ToolPath))
 	}
-	if msg.ToolName == "bash" && strings.TrimSpace(msg.ToolCommand) != "" {
+	if msg.ToolName == "shell" && strings.TrimSpace(msg.ToolCommand) != "" {
 		meta = append(meta, m.styles.MutedStyle.Render("command: "+msg.ToolCommand))
 	}
 
@@ -794,7 +793,7 @@ func (m *CodeAgentModel) styleToolBody(toolName, state, body string) string {
 			}
 		}
 		return strings.Join(lines, "\n")
-	case "bash":
+	case "shell":
 		if strings.Contains(body, "Full output:") {
 			return lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Render(body)
 		}

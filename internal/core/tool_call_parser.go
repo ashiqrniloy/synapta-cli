@@ -12,12 +12,13 @@ import (
 type ParsedToolCall struct {
 	Name         string
 	RawArguments json.RawMessage
+	Decoded      any
 	Path         string
 	Command      string
 }
 
-// ParseToolCall decodes a tool call input, extracts lightweight metadata
-// (path/command), and validates tool existence when registry is provided.
+// ParseToolCall decodes a tool call input and extracts lightweight metadata
+// (path/command), validating tool existence when a registry is provided.
 func ParseToolCall(tc llm.ToolCall, registry *ToolRegistry) (ParsedToolCall, error) {
 	name := strings.TrimSpace(tc.Function.Name)
 	parsed := ParsedToolCall{Name: name}
@@ -34,47 +35,24 @@ func ParseToolCall(tc llm.ToolCall, registry *ToolRegistry) (ParsedToolCall, err
 		return parsed, fmt.Errorf("invalid %s arguments: invalid JSON", name)
 	}
 
-	if registry != nil {
-		spec, ok := registry.Get(name)
-		if !ok {
-			return parsed, fmt.Errorf("unknown tool: %s", name)
-		}
-		if err := json.Unmarshal(raw, new(any)); err != nil {
-			return parsed, fmt.Errorf("invalid %s arguments: %w", name, err)
-		}
-		if len(spec.Parameters) == 0 {
-			parsed.RawArguments = raw
-			parsed.Path, parsed.Command = extractToolCallMeta(name, raw)
-			return parsed, nil
-		}
+	parsed.RawArguments = raw
+	if registry == nil {
+		parsed.Path, parsed.Command = extractToolCallMeta(raw)
+		return parsed, nil
 	}
 
-	parsed.RawArguments = raw
-	parsed.Path, parsed.Command = extractToolCallMeta(name, raw)
+	decoded, err := registry.Decode(name, args)
+	if err != nil {
+		return parsed, err
+	}
+	meta := registry.Metadata(name, decoded)
+	parsed.Decoded = decoded
+	parsed.Path = strings.TrimSpace(meta.Path)
+	parsed.Command = strings.TrimSpace(meta.Command)
 	return parsed, nil
 }
 
-func extractToolCallMeta(name string, raw json.RawMessage) (path string, command string) {
-	type pathOnly struct {
-		Path string `json:"path"`
-	}
-	type cmdOnly struct {
-		Command string `json:"command"`
-	}
-
-	switch name {
-	case "read", "write":
-		var p pathOnly
-		if err := json.Unmarshal(raw, &p); err == nil {
-			return strings.TrimSpace(p.Path), ""
-		}
-	case "bash":
-		var c cmdOnly
-		if err := json.Unmarshal(raw, &c); err == nil {
-			return "", strings.TrimSpace(c.Command)
-		}
-	}
-
+func extractToolCallMeta(raw json.RawMessage) (path string, command string) {
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return "", ""

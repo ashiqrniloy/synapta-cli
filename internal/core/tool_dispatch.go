@@ -19,7 +19,16 @@ func (s *ChatService) executeToolCall(ctx context.Context, parsed ParsedToolCall
 		return nil, fmt.Errorf("unknown tool: %s", parsed.Name)
 	}
 
-	return spec.Executor(ctx, parsed.RawArguments, func(update tools.Result) {
+	input := parsed.Decoded
+	if input == nil {
+		decoded, err := s.registry.Decode(parsed.Name, string(parsed.RawArguments))
+		if err != nil {
+			return nil, err
+		}
+		input = decoded
+	}
+
+	return spec.Executor(ctx, input, func(update tools.Result) {
 		if onToolEvent == nil {
 			return
 		}

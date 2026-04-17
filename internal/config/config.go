@@ -167,7 +167,7 @@ func defaultThemesMap() map[string]Theme {
 func defaultCommandShortcuts() map[string]string {
 	return map[string]string{
 		"q": "quit",
-		"b": "bash",
+		"b": "shell",
 		"f": "browse-files",
 		"h": "help",
 		"k": "context-manager",
