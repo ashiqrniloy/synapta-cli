@@ -7,7 +7,36 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/ashiqrniloy/synapta-cli/internal/fsutil"
 )
+
+func collectExtensionToolManifestWarnings(extDir string) []string {
+	warnings := make([]string, 0)
+	candidates := []string{filepath.Join(extDir, "tool.json")}
+
+	toolsDir := filepath.Join(extDir, "tools")
+	if entries, err := os.ReadDir(toolsDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+				continue
+			}
+			candidates = append(candidates, filepath.Join(toolsDir, entry.Name()))
+		}
+	}
+
+	for _, path := range candidates {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var probe map[string]any
+		if err := json.Unmarshal(raw, &probe); err != nil {
+			warnings = append(warnings, fmt.Sprintf("invalid extension tool manifest: %s (%v)", path, err))
+		}
+	}
+	return warnings
+}
 
 type Extension struct {
 	ID          string
@@ -44,10 +73,11 @@ func LoadExtensions(opts LoadExtensionsOptions) ExtensionsResult {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
+	cwd = fsutil.CleanAbs(cwd)
 
 	dirs := make([]string, 0, 2)
 	if strings.TrimSpace(opts.AgentDir) != "" {
-		dirs = append(dirs, filepath.Join(opts.AgentDir, "extensions"))
+		dirs = append(dirs, filepath.Join(fsutil.CleanAbs(opts.AgentDir), "extensions"))
 	}
 	if cwd != "" {
 		dirs = append(dirs, filepath.Join(cwd, "extensions"))
@@ -58,7 +88,7 @@ func LoadExtensions(opts LoadExtensionsOptions) ExtensionsResult {
 	warnings := make([]string, 0)
 
 	for _, base := range dirs {
-		entries, err := os.ReadDir(base)
+		entries, err := fsutil.ReadDirFiltered(base, fsutil.DefaultIgnoreRules())
 		if err != nil {
 			continue
 		}
@@ -94,11 +124,13 @@ func LoadExtensions(opts LoadExtensionsOptions) ExtensionsResult {
 				continue
 			}
 
+			warnings = append(warnings, collectExtensionToolManifestWarnings(extDir)...)
+
 			workdir := strings.TrimSpace(mf.WorkDir)
 			if workdir == "" {
 				workdir = extDir
-			} else if !filepath.IsAbs(workdir) {
-				workdir = filepath.Join(extDir, workdir)
+			} else {
+				workdir = fsutil.ResolvePath(extDir, workdir)
 			}
 
 			name := strings.TrimSpace(mf.Name)

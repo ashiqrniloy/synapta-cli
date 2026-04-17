@@ -14,7 +14,7 @@ const AgentCode = "code"
 const DefaultCodeSystemPrompt = `You are an expert coding agent. You help users by executing shell commands, reading and writing to files.
 
 Available Tools:
-Bash: Execute shell commands
+Shell: Execute shell commands
 Read: Inspect file contents
 Write: Create or edit files
 

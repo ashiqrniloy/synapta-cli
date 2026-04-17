@@ -31,13 +31,13 @@ type latestReleaseResponse struct {
 	TagName string `json:"tag_name"`
 }
 
-func NotifyIfAvailable(currentVersion string, w io.Writer) {
+func NotifyIfAvailable(ctx context.Context, currentVersion string, w io.Writer) {
 	currentVersion = normalizeVersion(currentVersion)
 	if currentVersion == "" || currentVersion == "dev" {
 		return
 	}
 
-	latest, err := latestVersionWithCache()
+	latest, err := latestVersionWithCache(ctx)
 	if err != nil {
 		return
 	}
@@ -51,7 +51,7 @@ func NotifyIfAvailable(currentVersion string, w io.Writer) {
 	fmt.Fprintf(w, "  curl -fsSL https://raw.githubusercontent.com/%s/%s/main/scripts/install.sh | sh\n\n", repoOwner, repoName)
 }
 
-func latestVersionWithCache() (string, error) {
+func latestVersionWithCache(ctx context.Context) (string, error) {
 	cachePath, err := cacheFilePath()
 	if err != nil {
 		return "", err
@@ -62,7 +62,7 @@ func latestVersionWithCache() (string, error) {
 		return state.LatestTag, nil
 	}
 
-	latest, err := fetchLatestReleaseTag()
+	latest, err := fetchLatestReleaseTag(ctx)
 	if err != nil {
 		if state.LatestTag != "" {
 			return state.LatestTag, nil
@@ -78,11 +78,15 @@ func latestVersionWithCache() (string, error) {
 	return latest, nil
 }
 
-func fetchLatestReleaseTag() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), checkTimeout)
+func fetchLatestReleaseTag(ctx context.Context) (string, error) {
+	checkCtx := ctx
+	cancel := func() {}
+	if checkTimeout > 0 {
+		checkCtx, cancel = context.WithTimeout(ctx, checkTimeout)
+	}
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf(updateCheckURL, repoOwner, repoName), nil)
+	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, fmt.Sprintf(updateCheckURL, repoOwner, repoName), nil)
 	if err != nil {
 		return "", err
 	}

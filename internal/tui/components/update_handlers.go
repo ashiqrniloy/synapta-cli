@@ -1,7 +1,6 @@
 package components
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -37,15 +36,13 @@ func (m *CodeAgentModel) handleCommandAction(msg CommandActionMsg) (tea.Model, t
 	switch commandID {
 	case "quit":
 		m.clearCommandMode()
-		if m.sessionStore != nil {
-			_ = m.sessionStore.Close()
-		}
+		m.shutdownLifecycle()
 		m.quit = true
 		return m, tea.Sequence(tea.Raw(ansi.ResetModeMouseButtonEvent+ansi.ResetModeMouseAnyEvent+ansi.ResetModeMouseExtSgr), tea.Quit)
-	case "bash":
+	case "shell", "bash":
 		m.clearCommandMode()
 		m.applyInputMode(inputModeBash)
-		m.appendSystemMessage("[Bash] Mode enabled. Enter a command and press Enter.", "info")
+		m.appendSystemMessage("[Shell] Mode enabled. Enter a command and press Enter.", "info")
 		return m, nil
 	case "help":
 		m.clearCommandMode()
@@ -216,8 +213,8 @@ func (m *CodeAgentModel) handleKiloAuthComplete(msg KiloAuthCompleteMsg) (tea.Mo
 	}
 	m.appendSystemMessage("[Kilo] ✓ Authentication successful! "+msg.Email, "done")
 	m.appendSystemMessage("[Kilo] ✓ "+fmt.Sprintf("%d models available", msg.ModelCount), "done")
-	if m.chatService != nil {
-		m.chatService.InvalidateProviderCache()
+	if m.chatController != nil {
+		m.chatController.InvalidateProviderCache()
 	}
 	return m, m.fetchProviderBalanceCmd("kilo")
 }
@@ -234,8 +231,8 @@ func (m *CodeAgentModel) handleCopilotAuthComplete(msg CopilotAuthCompleteMsg) (
 	}
 	m.appendSystemMessage("[GitHub Copilot] ✓ Authentication successful!", "done")
 	m.appendSystemMessage("[GitHub Copilot] ✓ "+fmt.Sprintf("%d models available", msg.ModelCount), "done")
-	if m.chatService != nil {
-		m.chatService.InvalidateProviderCache()
+	if m.chatController != nil {
+		m.chatController.InvalidateProviderCache()
 	}
 	return m, m.fetchProviderBalanceCmd("github-copilot")
 }
@@ -433,7 +430,7 @@ func (m *CodeAgentModel) handleCompactDone(msg compactDoneMsg) (tea.Model, tea.C
 	}
 	if msg.Compacted {
 		methodLabel := "model"
-		if strings.TrimSpace(msg.Method) == "fallback" {
+		if msg.Method == core.CompactionMethodDeterministic {
 			methodLabel = "fallback synthetic"
 		}
 		m.appendSystemMessage("[Compact] ✓ Session compacted ("+methodLabel+")", "done")
@@ -458,6 +455,9 @@ func (m *CodeAgentModel) handleNewSessionDone(msg newSessionDoneMsg) (tea.Model,
 		_ = m.sessionStore.Close()
 	}
 	m.sessionStore = msg.Store
+	if m.sessionService != nil {
+		m.sessionService.SetSessionStore(m.sessionStore)
+	}
 	if m.contextManager != nil {
 		m.contextManager.ClearSessionSystemPromptOverride()
 	}
@@ -484,6 +484,17 @@ func (m *CodeAgentModel) handleResumeSessionDone(msg resumeSessionDoneMsg) (tea.
 		m.currentCwd = sessionCWD
 		m.currentGitBranch = detectGitBranch(m.currentCwd)
 		m.chatService = core.NewChatService(m.authStorage, tools.NewToolSet(m.currentCwd))
+		if m.chatController != nil {
+			m.chatController.SetChatService(m.chatService)
+		}
+		if m.providerService != nil {
+			m.providerService.SetChatController(m.chatController)
+		}
+		if m.sessionService != nil {
+			m.sessionService.SetChatController(m.chatController)
+			m.sessionService.SetContextManager(m.contextManager)
+			m.sessionService.SetSessionStore(m.sessionStore)
+		}
 	}
 	if m.contextManager != nil {
 		m.contextManager.SetCWD(m.currentCwd)
@@ -511,6 +522,17 @@ func (m *CodeAgentModel) handleBashCommandDone(msg bashCommandDoneMsg) (tea.Mode
 			m.currentCwd = msg.NewCwd
 			m.currentGitBranch = detectGitBranch(m.currentCwd)
 			m.chatService = core.NewChatService(m.authStorage, tools.NewToolSet(m.currentCwd))
+			if m.chatController != nil {
+				m.chatController.SetChatService(m.chatService)
+			}
+			if m.providerService != nil {
+				m.providerService.SetChatController(m.chatController)
+			}
+			if m.sessionService != nil {
+				m.sessionService.SetChatController(m.chatController)
+				m.sessionService.SetContextManager(m.contextManager)
+				m.sessionService.SetSessionStore(m.sessionStore)
+			}
 			if m.contextManager != nil {
 				m.contextManager.SetCWD(m.currentCwd)
 				m.markContextEntriesDirty()
@@ -525,13 +547,13 @@ func (m *CodeAgentModel) handleBashCommandDone(msg bashCommandDoneMsg) (tea.Mode
 		state = "error"
 	}
 	if msg.Err != nil {
-		m.finalizeWorkingSystemMessage("[Bash] ✗ Command failed", "error")
+		m.finalizeWorkingSystemMessage("[Shell] ✗ Command failed", "error")
 	} else {
-		m.finalizeWorkingSystemMessage("[Bash] ✓ Command finished", "done")
+		m.finalizeWorkingSystemMessage("[Shell] ✓ Command finished", "done")
 	}
-	m.appendChatMessage(ChatMessage{Role: "tool", ToolName: "bash", ToolCommand: msg.Command, ToolState: state, Content: msg.Output, ToolStartedAt: msg.StartedAt, ToolEndedAt: msg.EndedAt})
+	m.appendChatMessage(ChatMessage{Role: "tool", ToolName: "shell", ToolCommand: msg.Command, ToolState: state, Content: msg.Output, ToolStartedAt: msg.StartedAt, ToolEndedAt: msg.EndedAt})
 	if msg.IsCD && msg.Err == nil {
-		m.appendSystemMessage("[Bash] cwd: "+m.currentCwd, "info")
+		m.appendSystemMessage("[Shell] cwd: "+m.currentCwd, "info")
 	}
 	m.refreshChatViewport()
 	return m, nil
@@ -565,7 +587,6 @@ func (m *CodeAgentModel) handleFileAdded(msg FileAddedMsg) (tea.Model, tea.Cmd) 
 	// Insert the file path into the textarea as an attachment token.
 	reference := " `" + path + "`"
 
-
 	// Get current value
 	currentValue := m.ta.Value()
 
@@ -594,14 +615,14 @@ func (m *CodeAgentModel) readFileForContext(path string) (string, error) {
 	if m.chatService == nil || m.chatService.Tools() == nil {
 		return "", fmt.Errorf("toolset not available")
 	}
-	
+
 	readTool := m.chatService.Tools().Read
 	if readTool == nil {
 		return "", fmt.Errorf("read tool not available")
 	}
 
 	// Execute the read tool
-	ctx := context.Background()
+	ctx := m.lifecycleContext()
 	result, err := readTool.Execute(ctx, tools.ReadInput{Path: path})
 	if err != nil {
 		return "", err
@@ -614,7 +635,7 @@ func (m *CodeAgentModel) readFileForContext(path string) (string, error) {
 			content.WriteString(part.Text)
 		}
 	}
-	
+
 	return content.String(), nil
 }
 

@@ -9,7 +9,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ashiqrniloy/synapta-cli/internal/httpclient"
 )
+
 // ─── Constants ──────────────────────────────────────────────────────
 
 const (
@@ -18,7 +21,6 @@ const (
 	KiloDeviceAuthURL  = KiloAPIBase + "/api/device-auth/codes"
 	KiloProfileURL     = KiloAPIBase + "/api/profile"
 	KiloPollInterval   = 3 * time.Second
-	KiloFetchTimeout   = 10 * time.Second
 	KiloTokenExpiry    = 365 * 24 * time.Hour // 1 year
 	KiloModelsCacheTTL = 24 * time.Hour
 )
@@ -92,10 +94,19 @@ type cachedModelSet struct {
 	expiresAt time.Time
 }
 
-// NewKiloGateway creates a new Kilo Gateway client.
+// NewKiloGateway creates a new Kilo Gateway client using the shared default HTTP client.
 func NewKiloGateway() *KiloGateway {
+	return NewKiloGatewayWithClient(httpclient.Default)
+}
+
+// NewKiloGatewayWithClient creates a new Kilo Gateway client with an injected HTTP client.
+func NewKiloGatewayWithClient(client *http.Client) *KiloGateway {
+	if client == nil {
+		client = httpclient.Default
+	}
+
 	return &KiloGateway{
-		httpClient:    &http.Client{Timeout: KiloFetchTimeout},
+		httpClient:    client,
 		modelsByToken: make(map[string]cachedModelSet),
 	}
 }
@@ -434,8 +445,8 @@ func (g *KiloGateway) pollDeviceAuth(code string) (*DeviceAuthPollResponse, erro
 // ─── Balance ────────────────────────────────────────────────────────
 
 // FetchBalance fetches the account balance.
-func (g *KiloGateway) FetchBalance(token string) (float64, error) {
-	req, err := http.NewRequest("GET", KiloProfileURL+"/balance", nil)
+func (g *KiloGateway) FetchBalance(ctx context.Context, token string) (float64, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", KiloProfileURL+"/balance", nil)
 	if err != nil {
 		return 0, err
 	}

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ashiqrniloy/synapta-cli/internal/fsutil"
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
 
@@ -138,7 +139,7 @@ func (m *ContextManager) Build(history []llm.Message) ([]llm.Message, error) {
 
 	messages := make([]llm.Message, 0, len(history)+2)
 	if strings.TrimSpace(stablePrefix) != "" {
-		messages = append(messages, llm.Message{Role: "system", Content: stablePrefix})
+		messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: stablePrefix})
 	}
 
 	for _, msg := range history {
@@ -177,9 +178,9 @@ func hasContextPayload(msg llm.Message) bool {
 	}
 }
 
-func isContextRole(role string) bool {
+func isContextRole(role llm.MessageRole) bool {
 	switch role {
-	case "user", "assistant", "tool", "system":
+	case llm.RoleUser, llm.RoleAssistant, llm.RoleTool, llm.RoleSystem:
 		return true
 	default:
 		return false
@@ -270,18 +271,29 @@ func discoverProjectContextPaths(agentDir, cwd string) []string {
 	paths := make([]string, 0)
 	seen := map[string]struct{}{}
 
-	if p, ok := findContextFileInDir(agentDir); ok {
+	normalizedAgentDir := fsutil.CleanAbs(strings.TrimSpace(agentDir))
+	normalizedCWD := fsutil.CleanAbs(strings.TrimSpace(cwd))
+
+	if p, ok := findContextFileInDir(normalizedAgentDir); ok {
+		canon := fsutil.CanonicalPath(p)
+		if canon == "" {
+			canon = p
+		}
 		paths = append(paths, p)
-		seen[p] = struct{}{}
+		seen[canon] = struct{}{}
 	}
 
 	ancestorPaths := make([]string, 0)
-	currentDir := cwd
-	for {
+	currentDir := normalizedCWD
+	for strings.TrimSpace(currentDir) != "" {
 		if p, ok := findContextFileInDir(currentDir); ok {
-			if _, exists := seen[p]; !exists {
+			canon := fsutil.CanonicalPath(p)
+			if canon == "" {
+				canon = p
+			}
+			if _, exists := seen[canon]; !exists {
 				ancestorPaths = append([]string{p}, ancestorPaths...)
-				seen[p] = struct{}{}
+				seen[canon] = struct{}{}
 			}
 		}
 		parent := filepath.Dir(currentDir)
@@ -348,7 +360,7 @@ func hashMessages(messages []llm.Message) string {
 	var b strings.Builder
 	for _, m := range messages {
 		b.WriteString("<")
-		b.WriteString(m.Role)
+		b.WriteString(string(m.Role))
 		b.WriteString(":")
 		b.WriteString(m.Name)
 		b.WriteString(":")

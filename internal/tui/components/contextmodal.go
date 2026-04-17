@@ -88,13 +88,13 @@ func (m *CodeAgentModel) buildContextEntries() []ContextEntry {
 		entry := ContextEntry{
 			Order:           order + 1,
 			ContextIndex:    i,
-			Role:            msg.Role,
+			Role:            string(msg.Role),
 			Content:         content,
 			HistoryIndex:    -1,
 			RawHistoryIndex: -1,
 			Category:        category,
 			Timestamp:       time.Time{},
-			EstimatedTokens: llm.EstimateMessageTokens(llm.Message{Role: msg.Role, Content: content, ToolCalls: msg.ToolCalls, ToolCallID: msg.ToolCallID, Name: msg.Name}),
+			EstimatedTokens: llm.EstimateMessageTokensForModel(m.selectedProvider, m.selectedModelID, llm.Message{Role: msg.Role, Content: content, ToolCalls: msg.ToolCalls, ToolCallID: msg.ToolCallID, Name: msg.Name}),
 		}
 
 		isHistoryMessage := hPos < len(filteredHistoryMsgs) && contextMessageEquals(msg, filteredHistoryMsgs[hPos])
@@ -144,8 +144,8 @@ func categorizeContextMessage(msg llm.Message) string {
 			return "files-read"
 		case "write":
 			return "files-written"
-		case "bash":
-			return "tool-bash"
+		case "shell":
+			return "tool-shell"
 		default:
 			return "tool-output"
 		}
@@ -199,14 +199,14 @@ func (m *CodeAgentModel) contextEntryLabel(msg llm.Message, category string, ts 
 			return "write · " + p
 		}
 		return "write"
-	case "tool-bash":
+	case "tool-shell":
 		if cmd := strings.TrimSpace(toolMeta.Command); cmd != "" {
-			return "bash · " + cmd
+			return "shell · " + cmd
 		}
 		if cmd := extractAfterPrefixLine(content, "Command: "); cmd != "" {
-			return "bash · " + cmd
+			return "shell · " + cmd
 		}
-		return "bash"
+		return "shell"
 	case "tool-output":
 		tool := strings.TrimSpace(msg.Name)
 		if tool == "" {
@@ -269,18 +269,18 @@ func assistantToolCallsContent(calls []llm.ToolCall) string {
 func hasContextPayloadLocal(msg llm.Message) bool {
 	hasContent := strings.TrimSpace(msg.Content) != ""
 	switch msg.Role {
-	case "assistant":
+	case llm.RoleAssistant:
 		return hasContent || len(msg.ToolCalls) > 0
-	case "tool":
+	case llm.RoleTool:
 		return hasContent || strings.TrimSpace(msg.ToolCallID) != "" || strings.TrimSpace(msg.Name) != ""
 	default:
 		return hasContent
 	}
 }
 
-func isContextRoleLocal(role string) bool {
+func isContextRoleLocal(role llm.MessageRole) bool {
 	switch role {
-	case "user", "assistant", "tool", "system":
+	case llm.RoleUser, llm.RoleAssistant, llm.RoleTool, llm.RoleSystem:
 		return true
 	default:
 		return false

@@ -55,8 +55,8 @@ func (m *CodeAgentModel) providerDisplayLabel() string {
 	}
 }
 
-func estimateMessagesTokens(messages []llm.Message) int {
-	return llm.EstimateMessagesTokens(messages)
+func estimateMessagesTokens(providerID, modelID string, messages []llm.Message) int {
+	return llm.EstimateMessagesTokensForModel(providerID, modelID, messages)
 }
 
 func (m *CodeAgentModel) densityMode() string {
@@ -78,7 +78,7 @@ func (m *CodeAgentModel) keybindingRows() []keybindingRow {
 	}
 
 	rows := []keybindingRow{
-		{Action: "Submit", Binding: m.getSubmitKey(), Description: "Send message / run bash"},
+		{Action: "Submit", Binding: m.getSubmitKey(), Description: "Send message / run shell"},
 		{Action: "Newline", Binding: newline, Description: "Insert newline in input"},
 		{Action: "Command palette", Binding: m.getCommandKey(), Description: "Open command picker"},
 		{Action: "File browser", Binding: m.getFileBrowserKey(), Description: "Open file browser modal"},
@@ -105,7 +105,7 @@ func (m *CodeAgentModel) commandShortcutRows() []keybindingRow {
 	}
 	actionLabel := map[string]string{
 		"quit":            "Quit",
-		"bash":            "Bash",
+		"shell":           "Shell",
 		"browse-files":    "Browse Files",
 		"help":            "Help",
 		"context-manager": "Context Manager",
@@ -116,7 +116,7 @@ func (m *CodeAgentModel) commandShortcutRows() []keybindingRow {
 	}
 	actionDesc := map[string]string{
 		"quit":            "Exit Synapta Code",
-		"bash":            "Switch to bash mode",
+		"shell":           "Switch to shell mode",
 		"browse-files":    "Browse and add files to context",
 		"help":            "Open keybindings modal",
 		"context-manager": "Open context modal",
@@ -274,7 +274,7 @@ func (m *CodeAgentModel) chatWorkingStatusText() string {
 
 func (m *CodeAgentModel) bashWorkingStatusText() string {
 	spinner := []string{"⠋", "⠙", "⠹", "⠸"}[m.workingFrame%4]
-	return fmt.Sprintf("[Bash] %s Running command...", spinner)
+	return fmt.Sprintf("[Shell] %s Running command...", spinner)
 }
 
 func formatToolContextContent(e core.ToolEvent) string {
@@ -312,7 +312,7 @@ func (m *CodeAgentModel) chatHistoryAsLLM() ([]llm.Message, error) {
 	if m.sessionStore != nil && !m.contextOverrideActive {
 		contextWindow := 128000
 		if m.chatService != nil && m.selectedProvider != "" && m.selectedModelID != "" {
-			if cw, err := m.chatService.ModelContextWindow(context.Background(), m.selectedProvider, m.selectedModelID); err == nil && cw > 0 {
+			if cw, err := m.chatService.ModelContextWindow(m.lifecycleContext(), m.selectedProvider, m.selectedModelID); err == nil && cw > 0 {
 				contextWindow = cw
 			}
 		}
@@ -328,7 +328,7 @@ func (m *CodeAgentModel) chatHistoryAsLLM() ([]llm.Message, error) {
 			}
 			return m.chatService.SummarizeCompaction(ctx, m.selectedProvider, m.selectedModelID, messagesForSummary, previousSummary)
 		}
-		compacted, _, err := m.sessionStore.CompactIfNeeded(context.Background(), contextWindow, summarizer)
+		compacted, _, err := m.sessionStore.CompactIfNeeded(m.lifecycleContext(), contextWindow, summarizer)
 		if err != nil {
 			return nil, err
 		}
@@ -519,26 +519,16 @@ type toolInvocationMeta struct {
 	Command string
 }
 
-func parseToolInvocationMeta(toolName, args string) toolInvocationMeta {
-	meta := toolInvocationMeta{Name: strings.TrimSpace(toolName)}
-	switch meta.Name {
-	case "read":
-		var in tools.ReadInput
-		if err := json.Unmarshal([]byte(args), &in); err == nil {
-			meta.Path = strings.TrimSpace(in.Path)
-		}
-	case "write":
-		var in tools.WriteInput
-		if err := json.Unmarshal([]byte(args), &in); err == nil {
-			meta.Path = strings.TrimSpace(in.Path)
-		}
-	case "bash":
-		var in tools.BashInput
-		if err := json.Unmarshal([]byte(args), &in); err == nil {
-			meta.Command = strings.TrimSpace(in.Command)
-		}
+func parseToolInvocationMeta(tc llm.ToolCall) toolInvocationMeta {
+	parsed, err := core.ParseToolCall(tc, nil)
+	if err != nil {
+		return toolInvocationMeta{Name: strings.TrimSpace(tc.Function.Name)}
 	}
-	return meta
+	return toolInvocationMeta{
+		Name:    strings.TrimSpace(parsed.Name),
+		Path:    strings.TrimSpace(parsed.Path),
+		Command: strings.TrimSpace(parsed.Command),
+	}
 }
 
 func buildToolInvocationMetaByCallID(history []llm.Message) map[string]toolInvocationMeta {
@@ -552,7 +542,7 @@ func buildToolInvocationMetaByCallID(history []llm.Message) map[string]toolInvoc
 			if callID == "" {
 				continue
 			}
-			metaByCallID[callID] = parseToolInvocationMeta(tc.Function.Name, tc.Function.Arguments)
+			metaByCallID[callID] = parseToolInvocationMeta(tc)
 		}
 	}
 	return metaByCallID
@@ -593,7 +583,7 @@ func (m *CodeAgentModel) rebuildTranscriptFromHistory() {
 			if content == "" {
 				continue
 			}
-			messages = append(messages, ChatMessage{Role: msg.Role, Content: content})
+			messages = append(messages, ChatMessage{Role: string(msg.Role), Content: content})
 		case "tool":
 			content := parseToolContentForTranscript(msg.Content)
 			if strings.TrimSpace(content) == "" {

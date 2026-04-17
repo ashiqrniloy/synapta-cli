@@ -3,9 +3,10 @@ package config
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
+	"github.com/ashiqrniloy/synapta-cli/internal/fsutil"
+	"github.com/ashiqrniloy/synapta-cli/internal/normalize"
 	"github.com/spf13/viper"
 	go_yaml "go.yaml.in/yaml/v3"
 )
@@ -167,7 +168,7 @@ func defaultThemesMap() map[string]Theme {
 func defaultCommandShortcuts() map[string]string {
 	return map[string]string{
 		"q": "quit",
-		"b": "bash",
+		"b": "shell",
 		"f": "browse-files",
 		"h": "help",
 		"k": "context-manager",
@@ -194,56 +195,110 @@ func DefaultConfig() *AppConfig {
 // ── Loading ───────────────────────────────────────────────────────────
 
 func normalizeShortcutKey(key string) string {
-	k := strings.ToLower(strings.TrimSpace(key))
-	k = strings.TrimPrefix(k, ":")
-	return strings.TrimSpace(k)
+	return normalize.ShortcutKey(key)
 }
 
-// mergeKeybindings unmarshals the "keybindings" viper key into a temporary
-// struct and copies only non-empty values onto dst, preserving defaults for
-// any field the user left unset.
+// mergeField descriptors keep merge logic table-driven and reduce field-by-field
+// imperative copy blocks.
+type keybindingField struct {
+	key string
+	set func(*Keybindings, string)
+}
+
+var keybindingFields = []keybindingField{
+	{key: "newline", set: func(k *Keybindings, v string) { k.Newline = v }},
+	{key: "submit", set: func(k *Keybindings, v string) { k.Submit = v }},
+	{key: "quit", set: func(k *Keybindings, v string) { k.Quit = v }},
+	{key: "stop", set: func(k *Keybindings, v string) { k.Stop = v }},
+	{key: "command", set: func(k *Keybindings, v string) { k.Command = v }},
+	{key: "context", set: func(k *Keybindings, v string) { k.Context = v }},
+	{key: "file_browser", set: func(k *Keybindings, v string) { k.FileBrowser = v }},
+	{key: "help", set: func(k *Keybindings, v string) { k.Help = v }},
+	{key: "extensions", set: func(k *Keybindings, v string) { k.Extensions = v }},
+}
+
+type themeStringField struct {
+	key string
+	set func(*Theme, string)
+}
+
+type themeFloatField struct {
+	key string
+	set func(*Theme, float64)
+}
+
+var themeStringFields = []themeStringField{
+	{key: "name", set: func(t *Theme, v string) { t.Name = v }},
+	{key: "background", set: func(t *Theme, v string) { t.Background = v }},
+	{key: "foreground", set: func(t *Theme, v string) { t.Foreground = v }},
+	{key: "primary", set: func(t *Theme, v string) { t.Primary = v }},
+	{key: "secondary", set: func(t *Theme, v string) { t.Secondary = v }},
+	{key: "accent", set: func(t *Theme, v string) { t.Accent = v }},
+	{key: "muted", set: func(t *Theme, v string) { t.Muted = v }},
+	{key: "border", set: func(t *Theme, v string) { t.Border = v }},
+	{key: "selection", set: func(t *Theme, v string) { t.Selection = v }},
+	{key: "error", set: func(t *Theme, v string) { t.Error = v }},
+	{key: "success", set: func(t *Theme, v string) { t.Success = v }},
+	{key: "cursor_fg", set: func(t *Theme, v string) { t.CursorFG = v }},
+	{key: "cursor_bg", set: func(t *Theme, v string) { t.CursorBG = v }},
+	{key: "highlight_color", set: func(t *Theme, v string) { t.HighlightColor = v }},
+	{key: "interaction_highlight_color", set: func(t *Theme, v string) { t.InteractionHighlightColor = v }},
+	{key: "system_message_color", set: func(t *Theme, v string) { t.SystemMessageColor = v }},
+}
+
+var themeFloatFields = []themeFloatField{
+	{key: "highlight_opacity", set: func(t *Theme, v float64) { t.HighlightOpacity = v }},
+	{key: "interaction_highlight_opacity", set: func(t *Theme, v float64) { t.InteractionHighlightOpacity = v }},
+	{key: "system_message_opacity", set: func(t *Theme, v float64) { t.SystemMessageOpacity = v }},
+}
+
+func mergeThemePalette(v *viper.Viper, prefix string, dst *Theme) {
+	for _, f := range themeStringFields {
+		k := prefix + "." + f.key
+		if !v.IsSet(k) {
+			continue
+		}
+		value := v.GetString(k)
+		if value == "" {
+			continue
+		}
+		f.set(dst, value)
+	}
+	for _, f := range themeFloatFields {
+		k := prefix + "." + f.key
+		if !v.IsSet(k) {
+			continue
+		}
+		f.set(dst, v.GetFloat64(k))
+	}
+}
+
+// mergeKeybindings copies only configured non-empty bindings onto dst,
+// preserving defaults for fields that were omitted.
 func mergeKeybindings(v *viper.Viper, dst *Keybindings) error {
 	if !v.IsSet("keybindings") {
 		return nil
 	}
-	var from Keybindings
-	if err := v.UnmarshalKey("keybindings", &from); err != nil {
-		return fmt.Errorf("unmarshaling keybindings: %w", err)
+
+	for _, f := range keybindingFields {
+		key := "keybindings." + f.key
+		if !v.IsSet(key) {
+			continue
+		}
+		value, ok := normalize.NonEmpty(v.GetString(key))
+		if !ok {
+			continue
+		}
+		f.set(dst, value)
 	}
-	if from.Newline != "" {
-		dst.Newline = from.Newline
-	}
-	if from.Submit != "" {
-		dst.Submit = from.Submit
-	}
-	if from.Quit != "" {
-		dst.Quit = from.Quit
-	}
-	if from.Stop != "" {
-		dst.Stop = from.Stop
-	}
-	if from.Command != "" {
-		dst.Command = from.Command
-	}
-	if from.Context != "" {
-		dst.Context = from.Context
-	}
-	if from.FileBrowser != "" {
-		dst.FileBrowser = from.FileBrowser
-	}
-	if from.Help != "" {
-		dst.Help = from.Help
-	}
-	if from.Extensions != "" {
-		dst.Extensions = from.Extensions
-	}
+
 	return nil
 }
 
 // mergeThemes collects all theme palette sub-keys under "themes.*" (excluding
-// "themes.default") using UnmarshalKey and merges them into dst.
+// "themes.default") and merges only configured fields into each palette.
 func mergeThemes(v *viper.Viper, dst *RawThemes) error {
-	if dk := v.GetString("themes.default"); dk != "" {
+	if dk, ok := normalize.NonEmpty(v.GetString("themes.default")); ok {
 		dst.Default = dk
 	}
 
@@ -256,22 +311,22 @@ func mergeThemes(v *viper.Viper, dst *RawThemes) error {
 			continue
 		}
 		rest := strings.TrimPrefix(k, prefix)
-		// rest is either "default" or "<name>.<field>"
 		if rest == "default" {
 			continue
 		}
 		name := strings.SplitN(rest, ".", 2)[0]
+		if name == "" {
+			continue
+		}
 		seen[name] = struct{}{}
 	}
 
 	for name := range seen {
-		var t Theme
-		if err := v.UnmarshalKey("themes."+name, &t); err != nil {
-			return fmt.Errorf("unmarshaling theme %q: %w", name, err)
-		}
 		if dst.Map == nil {
 			dst.Map = make(map[string]Theme)
 		}
+		t := dst.Map[name]
+		mergeThemePalette(v, "themes."+name, &t)
 		dst.Map[name] = t
 	}
 	return nil
@@ -284,10 +339,8 @@ func LoadConfig() (*AppConfig, error) {
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
 
-	homeDir, err := os.UserHomeDir()
-	if err == nil {
-		v.AddConfigPath(filepath.Join(homeDir, ".synapta"))
-	}
+	agentDir := fsutil.ResolveAgentDir("synapta", "SYNAPTA_DIR")
+	v.AddConfigPath(agentDir)
 	v.AddConfigPath("./config")
 	v.AddConfigPath("../config")
 
@@ -310,8 +363,8 @@ func LoadConfig() (*AppConfig, error) {
 	if shortcuts := v.GetStringMapString("command_shortcuts"); len(shortcuts) > 0 {
 		for rawKey, commandID := range shortcuts {
 			key := normalizeShortcutKey(rawKey)
-			id := strings.TrimSpace(commandID)
-			if key == "" || id == "" {
+			id, ok := normalize.NonEmpty(commandID)
+			if key == "" || !ok {
 				continue
 			}
 			cfg.CommandShortcuts[key] = id
@@ -327,7 +380,7 @@ func LoadConfig() (*AppConfig, error) {
 	}
 
 	// UI config.
-	if d := strings.ToLower(strings.TrimSpace(v.GetString("ui.density"))); d != "" {
+	if d := normalize.ID(v.GetString("ui.density")); d != "" {
 		if d == "compact" || d == "comfortable" {
 			cfg.UI.Density = d
 		}
@@ -425,17 +478,16 @@ func deepMerge(dst, src map[string]any) {
 // written back.  This preserves any user comments or keys that AppConfig does
 // not know about, while guaranteeing every section of the config is up-to-date.
 func SaveConfig(cfg *AppConfig) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
+	if _, err := os.UserHomeDir(); err != nil {
 		return fmt.Errorf("getting home dir: %w", err)
 	}
 
-	configDir := filepath.Join(homeDir, ".synapta")
+	configDir := fsutil.ResolveAgentDir("synapta", "SYNAPTA_DIR")
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("creating config dir: %w", err)
 	}
 
-	configPath := filepath.Join(configDir, "config.yaml")
+	configPath := fsutil.ResolvePath(configDir, "config.yaml")
 
 	// Build the new config map from the full AppConfig.
 	newMap, err := configToMap(cfg)

@@ -1,14 +1,11 @@
 package components
 
 import (
-	"fmt"
-	"os"
-	"os/exec"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/ashiqrniloy/synapta-cli/internal/application"
 	"github.com/ashiqrniloy/synapta-cli/internal/core"
 )
 
@@ -18,11 +15,12 @@ type extensionProcessDoneMsg struct {
 }
 
 func (m *CodeAgentModel) reloadAvailableExtensions() {
-	result := core.LoadExtensions(core.LoadExtensionsOptions{
-		CWD:      m.currentCwd,
-		AgentDir: m.agentDir,
-	})
+	if m.extensionService == nil {
+		return
+	}
+	result := m.extensionService.Load(m.currentCwd, m.agentDir)
 	m.availableExtensions = result.Extensions
+
 	for _, warning := range result.Warnings {
 		m.appendSystemMessage("[Extensions] "+warning, "error")
 	}
@@ -32,48 +30,37 @@ func (m *CodeAgentModel) reloadAvailableExtensions() {
 }
 
 func (m *CodeAgentModel) extensionByID(id string) (core.Extension, bool) {
-	for _, ext := range m.availableExtensions {
-		if ext.ID == id {
-			return ext, true
-		}
+	if m.extensionService == nil {
+		return core.Extension{}, false
 	}
-	return core.Extension{}, false
+	return m.extensionService.FindByID(m.availableExtensions, id)
 }
 
 func (m *CodeAgentModel) launchExtensionCmd(ext core.Extension) tea.Cmd {
-	command := strings.TrimSpace(ext.Command)
-	if command == "" {
+	if m.extensionService == nil {
 		return nil
 	}
-	args := append([]string(nil), ext.Args...)
-	wd := strings.TrimSpace(ext.WorkDir)
-	if wd == "" {
-		wd = ext.Dir
-	}
-	if wd == "" {
-		wd = m.currentCwd
+	cmd := m.extensionService.LaunchCommand(ext, m.currentCwd)
+	if cmd == nil {
+		return nil
 	}
 
-	return tea.ExecProcess(exec.Command(command, args...), func(err error) tea.Msg {
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return extensionProcessDoneMsg{ExtensionID: ext.ID, Err: err}
 	})
 }
 
 func (m *CodeAgentModel) extensionLaunchLabel(ext core.Extension) string {
-	parts := []string{ext.Command}
-	parts = append(parts, ext.Args...)
-	cmdline := strings.TrimSpace(strings.Join(parts, " "))
-	if cmdline == "" {
-		cmdline = "(invalid command)"
+	if m.extensionService == nil {
+		parts := []string{ext.Command}
+		parts = append(parts, ext.Args...)
+		cmdline := strings.TrimSpace(strings.Join(parts, " "))
+		if cmdline == "" {
+			cmdline = "(invalid command)"
+		}
+		return ext.Name + " · " + cmdline
 	}
-	wd := strings.TrimSpace(ext.WorkDir)
-	if wd == "" {
-		wd = ext.Dir
-	}
-	if wd == "" {
-		wd = m.currentCwd
-	}
-	return fmt.Sprintf("%s · %s · cwd=%s", ext.Name, cmdline, wd)
+	return m.extensionService.LaunchLabel(ext, m.currentCwd)
 }
 
 func (m *CodeAgentModel) handleExtensionDone(msg extensionProcessDoneMsg) {
@@ -96,6 +83,6 @@ func (m *CodeAgentModel) extensionKeybinding() string {
 }
 
 func touchExtensionLastLaunched(path string) {
-	now := time.Now()
-	_ = os.Chtimes(path, now, now)
+	service := application.NewExtensionService()
+	service.TouchLastLaunched(path)
 }

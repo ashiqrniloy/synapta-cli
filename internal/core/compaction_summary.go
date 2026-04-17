@@ -121,6 +121,6 @@ func BuildCompactionRequestMessages(messages []llm.Message, previousSummary stri
 	}
 	// Use "user" role so the conversation ends with a user message.
 	// This is required by providers like Google Vertex AI that do not support assistant message prefill.
-	out = append(out, llm.Message{Role: "user", Content: instruction})
+	out = append(out, llm.Message{Role: llm.RoleUser, Content: instruction})
 	return out
 }

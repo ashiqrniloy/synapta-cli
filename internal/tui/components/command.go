@@ -40,7 +40,7 @@ func CommandDisplayName(id string) string {
 func DefaultCommands() []CommandItem {
 	return []CommandItem{
 		{ID: "add-provider", Name: "Add Provider"},
-		{ID: "bash", Name: "Bash"},
+		{ID: "shell", Name: "Shell"},
 		{ID: "browse-files", Name: "Browse Files"},
 		{ID: "compact", Name: "Compact"},
 		{ID: "context-manager", Name: "Context Manager"},

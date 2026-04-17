@@ -49,6 +49,35 @@ Create `extension.json` in your extension directory:
 - `args` (optional): command arguments.
 - `workdir` (optional): working directory. Relative paths are resolved against extension directory.
 
+## Extension Tool Manifests
+
+Extensions can also contribute tools to the runtime tool registry.
+
+Supported files inside an extension:
+
+- `tool.json`
+- `tools/*.json`
+
+These follow the custom tool manifest documented in [`docs/tools.md`](./tools.md).
+
+Example `extensions/my-extension/tool.json`:
+
+```json
+{
+  "name": "my_extension_tool",
+  "description": "Tool exposed by my extension",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "input": { "type": "string" }
+    }
+  },
+  "command": "bash",
+  "args": ["-lc", "cat"],
+  "streaming": false
+}
+```
+
 ## Example: Local Extension
 
 ```bash

@@ -17,6 +17,19 @@ import (
 
 var attachmentTokenRE = regexp.MustCompile("`([^`\\n]+)`")
 
+func (m *CodeAgentModel) shutdownLifecycle() {
+	if m.cancelStream != nil {
+		m.cancelStream()
+		m.cancelStream = nil
+	}
+	if m.cancelLifecycle != nil {
+		m.cancelLifecycle()
+		m.cancelLifecycle = nil
+	}
+	if m.sessionStore != nil {
+		_ = m.sessionStore.Close()
+	}
+}
 func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quitKey string) (bool, tea.Cmd) {
 	contextKey := m.getContextKey()
 	fileBrowserKey := m.getFileBrowserKey()
@@ -39,15 +52,13 @@ func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quit
 	}
 	if keyStr == quitKey {
 		m.quit = true
-		if m.sessionStore != nil {
-			_ = m.sessionStore.Close()
-		}
+		m.shutdownLifecycle()
 		return true, tea.Sequence(tea.Raw(ansi.ResetModeMouseButtonEvent+ansi.ResetModeMouseAnyEvent+ansi.ResetModeMouseExtSgr), tea.Quit)
 	}
 
 	if keyStr == "esc" && m.inputMode == inputModeBash && strings.TrimSpace(m.ta.Value()) == "" {
 		m.applyInputMode(inputModeChat)
-		m.appendSystemMessage("[Bash] Mode disabled", "info")
+		m.appendSystemMessage("[Shell] Mode disabled", "info")
 		return true, nil
 	}
 	if keyStr == "ctrl+shift+c" || keyStr == "ctrl+y" {

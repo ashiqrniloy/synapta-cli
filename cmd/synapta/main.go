@@ -34,7 +34,7 @@ subcommand such as "synapta code" to launch the coding agent directly.`,
 			if cmd.Name() == "version" {
 				return
 			}
-			update.NotifyIfAvailable(version.Version, os.Stderr)
+			update.NotifyIfAvailable(cmd.Context(), version.Version, os.Stderr)
 		},
 	}
 	cmd.Version = version.Version

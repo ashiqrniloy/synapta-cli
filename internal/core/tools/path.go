@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ashiqrniloy/synapta-cli/internal/fsutil"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -38,10 +39,7 @@ func expandPath(path string) string {
 
 func resolveToCwd(path, cwd string) string {
 	expanded := expandPath(path)
-	if filepath.IsAbs(expanded) {
-		return expanded
-	}
-	return filepath.Join(cwd, expanded)
+	return fsutil.ResolvePath(cwd, expanded)
 }
 
 func fileExists(path string) bool {

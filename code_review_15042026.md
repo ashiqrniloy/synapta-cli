@@ -27,32 +27,7 @@ If addressed, the outcome would be a codebase that is easier to reason about, mo
 
 ## 1. Simplification Opportunities
 
-### 1.1 Split oversized orchestration files into focused units
-**Issue**  
-Several files carry multiple responsibilities and have become difficult to reason about:
-- `/home/arniloy/synapta-cli/internal/core/chat.go`
-- `/home/arniloy/synapta-cli/internal/llm/provider.go`
-- `/home/arniloy/synapta-cli/internal/core/session_store.go`
-- `/home/arniloy/synapta-cli/internal/core/tools/write.go`
-- `/home/arniloy/synapta-cli/internal/tui/components/codeagent.go`
 
-This increases cognitive load, makes targeted testing harder, and encourages duplicated helper logic.
-
-**What should be done**  
-Refactor each large file into smaller modules organized around one responsibility.
-
-**How it should be done**  
-Suggested decomposition:
-- `internal/core/chat.go` → `stream.go`, `tool_dispatch.go`, `provider_cache.go`, `tool_schema.go`
-- `internal/llm/provider.go` → `chat_completions.go`, `responses_api.go`, `stream_parser.go`, `request_builder.go`
-- `internal/core/session_store.go` → `session_io.go`, `session_compaction.go`, `session_listing.go`, `session_types.go`
-- `internal/core/tools/write.go` → `write_plan.go`, `write_apply.go`, `write_diff.go`, `write_validate.go`
-- `internal/tui/components/codeagent.go` → `model.go`, `chat_state.go`, `panes.go`, `async_state.go`
-
-Keep current exported APIs stable while moving internal helpers behind smaller files.
-
-**Outcome**  
-Smaller review surface, easier testing, fewer merge conflicts, and a much better foundation for future features.
 
 ---
 
@@ -135,7 +110,7 @@ Consistent behavior across the toolchain and simpler filesystem-related code.
 
 ## 2. Accuracy and Robustness Improvements
 
-### 2.1 Context budget logic compares against one threshold but enforces another
+### 2.1 Context budget logic compares against one threshold but enforces another :DONE
 **Issue**  
 In `/home/arniloy/synapta-cli/internal/core/context_budget.go`, `PrepareRequestSafely` checks `size.TotalTokens > maxRequestTokens`, but truncates to `effectiveMax = maxRequestTokens - reserveTokens`.
 
@@ -205,7 +180,7 @@ No silent corruption of tool-turn history and easier debugging of unexpected too
 
 ---
 
-### 2.4 Duplicate tool argument decoding creates drift risk
+### 2.4 Duplicate tool argument decoding creates drift risk :DONE
 **Issue**  
 Tool argument parsing exists in more than one place. For example:
 - `/home/arniloy/synapta-cli/internal/core/chat.go` (`toolEventMetadata`, `executeToolCall`)
@@ -273,7 +248,7 @@ Reduced memory risk and more uniform HTTP error handling.
 
 ---
 
-### 2.7 Some long-running background operations ignore caller context
+### 2.7 Some long-running background operations ignore caller context : DONE
 **Issue**  
 There are multiple `context.Background()` invocations in the TUI action layer, such as in:
 - `/home/arniloy/synapta-cli/internal/tui/components/actions.go`
@@ -299,7 +274,7 @@ Cleaner cancellation semantics and fewer leaked goroutines/work after the UI sta
 
 ---
 
-### 2.8 Tests are too light on failure-path behavior for core infrastructure
+### 2.8 Tests are too light on failure-path behavior for core infrastructure : DONE
 **Issue**  
 There are tests for context budget, provider normalization, session store, and write tool, but failure-path coverage appears limited relative to code complexity.
 
@@ -467,8 +442,8 @@ Faster session search/resume UI and reduced disk I/O.
 
 ---
 
-### 4.3 Kilo gateway constructs its own HTTP client instead of shared clients
-**Issue**  
+### 4.3 Kilo gateway constructs its own HTTP client instead of shared clients : DONE
+**Issue**   
 `/home/arniloy/synapta-cli/internal/llm/kilo.go` creates a dedicated `http.Client{Timeout: ...}` rather than reusing `/home/arniloy/synapta-cli/internal/httpclient/client.go`.
 
 This bypasses shared transport tuning, tracing, and pooling strategy.
@@ -545,7 +520,7 @@ Reduced repeated traversal cost while keeping correctness.
 
 ## 5. Modularity and Extensibility Improvements
 
-### 5.1 Introduce a first-class tool plugin/registry architecture
+### 5.1 Introduce a first-class tool plugin/registry architecture : DONE
 **Issue**  
 Tooling is currently effectively hardcoded to `read`, `write`, and `bash` inside `/home/arniloy/synapta-cli/internal/core/chat.go` and toolset wiring.
 
@@ -567,7 +542,7 @@ The CLI becomes much more extensible without editing core orchestration code.
 
 ---
 
-### 5.2 Make providers injectable and registry-based
+### 5.2 Make providers injectable and registry-based :DONE
 **Issue**  
 Provider selection is hardcoded around Kilo and GitHub Copilot in `/home/arniloy/synapta-cli/internal/core/chat.go`.
 
@@ -613,7 +588,7 @@ Users can tailor memory behavior without rewriting storage internals.
 
 ---
 
-### 5.4 Decouple TUI actions from business logic services
+### 5.4 Decouple TUI actions from business logic services - DONE
 **Issue**  
 `/home/arniloy/synapta-cli/internal/tui/components/actions.go` directly knows about auth storage, chat service, session store, model loading, balance fetches, compaction, and bash execution.
 
@@ -682,7 +657,7 @@ More flexible skill systems for different teams and workflows.
 
 ---
 
-### 5.7 Separate domain model from persistence DTOs in session storage
+### 5.7 Separate domain model from persistence DTOs in session storage : Done
 **Issue**  
 `sessionEntry` in `/home/arniloy/synapta-cli/internal/core/session_store.go` is both a persistence format and part of the working domain model.
 
@@ -700,11 +675,11 @@ Cleaner persistence boundaries and easier future format upgrades.
 ## 6. Priority Recommendations
 
 ### High Priority
-1. Fix context budget threshold inconsistency in `/home/arniloy/synapta-cli/internal/core/context_budget.go`
-2. Remove duplicated tool decoding/metadata logic and replace with a shared tool registry/parser
-3. Split `chat.go`, `provider.go`, `session_store.go`, and `write.go` into focused modules
-4. Improve cancellation propagation by eliminating unnecessary `context.Background()` use in async flows
-5. Add failure-path tests for streaming, compaction, malformed tool payloads, and session corruption
+1. Fix context budget threshold inconsistency in `/home/arniloy/synapta-cli/internal/core/context_budget.go` - DONE
+2. Remove duplicated tool decoding/metadata logic and replace with a shared tool registry/parser - DONE
+3. Split `chat.go`, `provider.go`, `session_store.go`, and `write.go` into focused modules - DONE
+4. Improve cancellation propagation by eliminating unnecessary `context.Background()` use in async flows - DONE
+5. Add failure-path tests for streaming, compaction, malformed tool payloads, and session corruption - DONE
 
 ### Medium Priority
 1. Add provider/model-aware token estimation and calibration

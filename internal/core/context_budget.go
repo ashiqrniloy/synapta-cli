@@ -46,10 +46,16 @@ type ContextSize struct {
 
 // EstimateContextSize calculates token usage for a set of messages.
 func EstimateContextSize(messages []llm.Message, contextWindow int) ContextSize {
+	return EstimateContextSizeForModel("", "", messages, contextWindow)
+}
+
+// EstimateContextSizeForModel calculates token usage for a set of messages using
+// provider/model-aware token estimation with conservative calibration.
+func EstimateContextSizeForModel(providerID, modelID string, messages []llm.Message, contextWindow int) ContextSize {
 	s := ContextSize{ContextWindow: contextWindow}
 
 	for _, msg := range messages {
-		tokens := budgetEstimateMessageTokens(msg)
+		tokens := budgetEstimateMessageTokensForModel(providerID, modelID, msg)
 		switch msg.Role {
 		case "system":
 			s.SystemPromptTokens += tokens
@@ -71,11 +77,17 @@ func EstimateContextSize(messages []llm.Message, contextWindow int) ContextSize 
 // EnforceBudget ensures messages fit within the token budget.
 // Returns truncated messages and information about what was trimmed.
 func EnforceBudget(messages []llm.Message, maxTokens int, truncateBelow int) ([]llm.Message, string) {
+	return EnforceBudgetForModel("", "", messages, maxTokens, truncateBelow)
+}
+
+// EnforceBudgetForModel ensures messages fit within the token budget using
+// provider/model-aware estimation.
+func EnforceBudgetForModel(providerID, modelID string, messages []llm.Message, maxTokens int, truncateBelow int) ([]llm.Message, string) {
 	if maxTokens <= 0 {
 		return messages, ""
 	}
 
-	current := budgetEstimateAllTokens(messages)
+	current := budgetEstimateAllTokensForModel(providerID, modelID, messages)
 	if current <= maxTokens {
 		return messages, ""
 	}
@@ -97,10 +109,10 @@ func EnforceBudget(messages []llm.Message, maxTokens int, truncateBelow int) ([]
 	}
 
 	// Count tokens in each category
-	systemTokens := budgetEstimateAllTokens(systemMsgs)
-	userTokens := budgetEstimateAllTokens(userMsgs)
-	assistantTokens := budgetEstimateAllTokens(assistantMsgs)
-	toolTokens := budgetEstimateAllTokens(toolMsgs)
+	systemTokens := budgetEstimateAllTokensForModel(providerID, modelID, systemMsgs)
+	userTokens := budgetEstimateAllTokensForModel(providerID, modelID, userMsgs)
+	assistantTokens := budgetEstimateAllTokensForModel(providerID, modelID, assistantMsgs)
+	toolTokens := budgetEstimateAllTokensForModel(providerID, modelID, toolMsgs)
 
 	// Reserve space for system and user messages
 	availableForOthers := maxTokens - systemTokens - userTokens
@@ -108,10 +120,10 @@ func EnforceBudget(messages []llm.Message, maxTokens int, truncateBelow int) ([]
 	// If we don't have room, truncate user messages
 	if availableForOthers < 0 {
 		userTokens = max(0, maxTokens-systemTokens)
-		truncated := budgetTruncateMessagesToTokens(userMsgs, userTokens, truncateBelow)
+		truncated := budgetTruncateMessagesToTokens(providerID, modelID, userMsgs, userTokens, truncateBelow)
 		kept := append([]llm.Message{}, systemMsgs...)
 		kept = append(kept, truncated...)
-		return finishBudgetEnforcement(kept, maxTokens, truncateBelow)
+		return finishBudgetEnforcement(providerID, modelID, kept, maxTokens)
 	}
 
 	// Try to fit everything, starting with most recent
@@ -122,32 +134,32 @@ func EnforceBudget(messages []llm.Message, maxTokens int, truncateBelow int) ([]
 	if remaining >= 0 {
 		kept = append(kept, assistantMsgs...)
 		kept = append(kept, toolMsgs...)
-		return finishBudgetEnforcement(kept, maxTokens, truncateBelow)
+		return finishBudgetEnforcement(providerID, modelID, kept, maxTokens)
 	}
 
 	// Need to drop something - start with oldest tool messages
 	kept = append(kept, assistantMsgs...)
 	remaining = availableForOthers - assistantTokens
 	if remaining >= 0 {
-		kept = append(kept, budgetTruncateMessagesToTokens(toolMsgs, remaining, truncateBelow)...)
-		return finishBudgetEnforcement(kept, maxTokens, truncateBelow)
+		kept = append(kept, budgetTruncateMessagesToTokens(providerID, modelID, toolMsgs, remaining, truncateBelow)...)
+		return finishBudgetEnforcement(providerID, modelID, kept, maxTokens)
 	}
 
 	// Drop all tool messages, keep only recent assistant
 	remaining = availableForOthers
 	if remaining <= 0 {
-		return finishBudgetEnforcement(kept, maxTokens, truncateBelow)
+		return finishBudgetEnforcement(providerID, modelID, kept, maxTokens)
 	}
 
 	// Truncate recent assistant messages
-	kept = append(kept, budgetTruncateMessagesToTokens(assistantMsgs, remaining, truncateBelow)...)
+	kept = append(kept, budgetTruncateMessagesToTokens(providerID, modelID, assistantMsgs, remaining, truncateBelow)...)
 
-	return finishBudgetEnforcement(kept, maxTokens, truncateBelow)
+	return finishBudgetEnforcement(providerID, modelID, kept, maxTokens)
 }
 
-func finishBudgetEnforcement(kept []llm.Message, maxTokens, truncateBelow int) ([]llm.Message, string) {
+func finishBudgetEnforcement(providerID, modelID string, kept []llm.Message, maxTokens int) ([]llm.Message, string) {
 	// If still over, keep only the most recent messages
-	if budgetEstimateAllTokens(kept) <= maxTokens {
+	if budgetEstimateAllTokensForModel(providerID, modelID, kept) <= maxTokens {
 		return kept, ""
 	}
 
@@ -156,7 +168,7 @@ func finishBudgetEnforcement(kept []llm.Message, maxTokens, truncateBelow int) (
 	for lo < hi {
 		mid := (lo + hi + 1) / 2
 		recent := kept[len(kept)-mid:]
-		if budgetEstimateAllTokens(recent) <= maxTokens {
+		if budgetEstimateAllTokensForModel(providerID, modelID, recent) <= maxTokens {
 			lo = mid
 		} else {
 			hi = mid - 1
@@ -174,7 +186,7 @@ func finishBudgetEnforcement(kept []llm.Message, maxTokens, truncateBelow int) (
 
 // budgetTruncateMessagesToTokens truncates message content to fit within token budget.
 // Drops messages entirely only after content truncation is exhausted.
-func budgetTruncateMessagesToTokens(messages []llm.Message, maxTokens, truncateBelow int) []llm.Message {
+func budgetTruncateMessagesToTokens(providerID, modelID string, messages []llm.Message, maxTokens, truncateBelow int) []llm.Message {
 	if len(messages) == 0 || maxTokens <= 0 {
 		return nil
 	}
@@ -188,7 +200,7 @@ func budgetTruncateMessagesToTokens(messages []llm.Message, maxTokens, truncateB
 		}
 
 		msg := msg // copy
-		tokens := budgetEstimateMessageTokens(msg)
+		tokens := budgetEstimateMessageTokensForModel(providerID, modelID, msg)
 
 		// Check if we need to truncate
 		if tokens > maxTokens-current {
@@ -202,7 +214,7 @@ func budgetTruncateMessagesToTokens(messages []llm.Message, maxTokens, truncateB
 				if len(msg.Content) > maxChars {
 					msg.Content = msg.Content[:maxChars] + "\n[truncated]"
 					result = append(result, msg)
-					current += budgetEstimateMessageTokens(msg)
+					current += budgetEstimateMessageTokensForModel(providerID, modelID, msg)
 					continue
 				}
 			}
@@ -216,7 +228,7 @@ func budgetTruncateMessagesToTokens(messages []llm.Message, maxTokens, truncateB
 			maxChars := truncateBelow * 4
 			if len(msg.Content) > maxChars {
 				msg.Content = msg.Content[:maxChars] + "\n[truncated]"
-				tokens = budgetEstimateMessageTokens(msg)
+				tokens = budgetEstimateMessageTokensForModel(providerID, modelID, msg)
 			}
 		}
 
@@ -230,6 +242,12 @@ func budgetTruncateMessagesToTokens(messages []llm.Message, maxTokens, truncateB
 // PrepareRequestSafely builds LLM messages with budget enforcement.
 // Returns messages, budget info, and any warning.
 func PrepareRequestSafely(messages []llm.Message, contextWindow, maxRequestTokens, reserveTokens int) ([]llm.Message, ContextSize, string) {
+	return PrepareRequestSafelyForModel("", "", messages, contextWindow, maxRequestTokens, reserveTokens)
+}
+
+// PrepareRequestSafelyForModel builds LLM messages with budget enforcement using
+// provider/model-aware estimates and calibration.
+func PrepareRequestSafelyForModel(providerID, modelID string, messages []llm.Message, contextWindow, maxRequestTokens, reserveTokens int) ([]llm.Message, ContextSize, string) {
 	if contextWindow <= 0 {
 		contextWindow = 128000 // Safe default
 	}
@@ -240,20 +258,36 @@ func PrepareRequestSafely(messages []llm.Message, contextWindow, maxRequestToken
 		maxRequestTokens = int(float64(contextWindow) * 0.80)
 	}
 
-	effectiveMax := maxRequestTokens - reserveTokens
-	// Only apply floor for large maxRequestTokens to allow for meaningful budgets
-	// For small maxRequestTokens (e.g., 2000), respect the user's budget
-	if maxRequestTokens >= 20000 && effectiveMax < 10000 {
-		effectiveMax = 10000 // Absolute minimum for large requests
+	usableBudget := maxRequestTokens - reserveTokens
+	const minUsableBudget = 256
+	budgetGuardNote := ""
+	if usableBudget <= 0 {
+		// Guard against invalid derived budgets (reserve >= max request).
+		usableBudget = min(maxRequestTokens, minUsableBudget)
+		if usableBudget <= 0 {
+			usableBudget = 1
+		}
+		budgetGuardNote = fmt.Sprintf(" derived budget was non-positive (configured max=%d, reserve=%d)", maxRequestTokens, reserveTokens)
+	} else if usableBudget < minUsableBudget {
+		// Guard against extremely tiny budgets; keep user-configured value but flag it.
+		budgetGuardNote = fmt.Sprintf(" derived budget is very small (%d tokens)", usableBudget)
 	}
 
-	size := EstimateContextSize(messages, contextWindow)
+	size := EstimateContextSizeForModel(providerID, modelID, messages, contextWindow)
 
-	var warning string
-	if size.TotalTokens > maxRequestTokens {
-		truncated, reason := EnforceBudget(messages, effectiveMax, 0)
-		warning = fmt.Sprintf("context exceeded budget (%d → %d tokens): %s", size.TotalTokens, budgetEstimateAllTokens(truncated), reason)
-		return truncated, EstimateContextSize(truncated, contextWindow), warning
+	if size.TotalTokens > usableBudget {
+		truncated, reason := EnforceBudgetForModel(providerID, modelID, messages, usableBudget, 0)
+		warning := fmt.Sprintf(
+			"context exceeded usable budget (configured max=%d, reserve=%d, usable=%d): %d → %d tokens: %s%s",
+			maxRequestTokens,
+			reserveTokens,
+			usableBudget,
+			size.TotalTokens,
+			budgetEstimateAllTokensForModel(providerID, modelID, truncated),
+			reason,
+			budgetGuardNote,
+		)
+		return truncated, EstimateContextSizeForModel(providerID, modelID, truncated, contextWindow), warning
 	}
 
 	return messages, size, ""
@@ -261,29 +295,39 @@ func PrepareRequestSafely(messages []llm.Message, contextWindow, maxRequestToken
 
 // PrepareSummarizationSafely prepares messages for summarization with budget limits.
 func PrepareSummarizationSafely(messages []llm.Message, budgetTokens, truncateBelow int) ([]llm.Message, string) {
+	return PrepareSummarizationSafelyForModel("", "", messages, budgetTokens, truncateBelow)
+}
+
+// PrepareSummarizationSafelyForModel prepares messages for summarization with
+// provider/model-aware budget limits.
+func PrepareSummarizationSafelyForModel(providerID, modelID string, messages []llm.Message, budgetTokens, truncateBelow int) ([]llm.Message, string) {
 	if budgetTokens <= 0 {
 		budgetTokens = 80000
 	}
 
-	current := budgetEstimateAllTokens(messages)
+	current := budgetEstimateAllTokensForModel(providerID, modelID, messages)
 	if current <= budgetTokens {
 		return messages, ""
 	}
 
-	truncated, reason := EnforceBudget(messages, budgetTokens, truncateBelow)
+	truncated, reason := EnforceBudgetForModel(providerID, modelID, messages, budgetTokens, truncateBelow)
 	return truncated, fmt.Sprintf("truncated for summarization: %s", reason)
 }
 
 // budgetEstimateMessageTokens estimates tokens in a single message.
 func budgetEstimateMessageTokens(msg llm.Message) int {
-	return llm.EstimateMessageTokens(msg)
+	return budgetEstimateMessageTokensForModel("", "", msg)
+}
+
+func budgetEstimateMessageTokensForModel(providerID, modelID string, msg llm.Message) int {
+	return llm.EstimateMessageTokensForModel(providerID, modelID, msg)
 }
 
 // budgetEstimateAllTokens sums token estimates for a message list.
 func budgetEstimateAllTokens(messages []llm.Message) int {
-	total := 0
-	for _, msg := range messages {
-		total += budgetEstimateMessageTokens(msg)
-	}
-	return total
+	return budgetEstimateAllTokensForModel("", "", messages)
+}
+
+func budgetEstimateAllTokensForModel(providerID, modelID string, messages []llm.Message) int {
+	return llm.EstimateMessagesTokensForModel(providerID, modelID, messages)
 }

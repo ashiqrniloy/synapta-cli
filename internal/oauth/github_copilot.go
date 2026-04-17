@@ -14,6 +14,7 @@ import (
 
 	"github.com/ashiqrniloy/synapta-cli/internal/httpclient"
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
+	"github.com/ashiqrniloy/synapta-cli/internal/normalize"
 )
 
 // GitHub Copilot OAuth provider implementation.
@@ -91,21 +92,7 @@ func (g *GitHubCopilotOAuth) getURLs(domain string) (deviceCode, accessToken, co
 }
 
 func normalizeDomain(input string) (string, bool) {
-	trimmed := strings.TrimSpace(input)
-	if trimmed == "" {
-		return "", true
-	}
-	if strings.Contains(trimmed, "://") {
-		u, err := url.Parse(trimmed)
-		if err != nil || strings.TrimSpace(u.Hostname()) == "" {
-			return "", false
-		}
-		return strings.TrimSpace(u.Hostname()), true
-	}
-	if strings.Contains(trimmed, "/") || strings.HasPrefix(trimmed, ".") || strings.HasSuffix(trimmed, ".") || !strings.Contains(trimmed, ".") {
-		return "", false
-	}
-	return trimmed, true
+	return normalize.DomainOrHost(input)
 }
 
 func (g *GitHubCopilotOAuth) Login(callbacks llm.OAuthLoginCallbacks) (*llm.OAuthCredentials, error) {
@@ -458,7 +445,7 @@ type CopilotPremiumUsage struct {
 
 // FetchCopilotPremiumUsage attempts to fetch monthly premium request usage.
 // This data is not guaranteed to be available for all accounts/plans.
-func FetchCopilotPremiumUsage(githubToken, domain string) (*CopilotPremiumUsage, error) {
+func FetchCopilotPremiumUsage(ctx context.Context, githubToken, domain string) (*CopilotPremiumUsage, error) {
 	if strings.TrimSpace(githubToken) == "" {
 		return nil, fmt.Errorf("missing github token")
 	}
@@ -472,7 +459,7 @@ func FetchCopilotPremiumUsage(githubToken, domain string) (*CopilotPremiumUsage,
 	}
 
 	for _, endpoint := range endpoints {
-		req, err := http.NewRequest("GET", endpoint, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 		if err != nil {
 			continue
 		}
@@ -484,6 +471,9 @@ func FetchCopilotPremiumUsage(githubToken, domain string) (*CopilotPremiumUsage,
 
 		resp, err := httpclient.Default.Do(req)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			continue
 		}
 		body, _ := io.ReadAll(resp.Body)
@@ -498,6 +488,9 @@ func FetchCopilotPremiumUsage(githubToken, domain string) (*CopilotPremiumUsage,
 		}
 	}
 
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	return nil, fmt.Errorf("premium usage not available")
 }
 
