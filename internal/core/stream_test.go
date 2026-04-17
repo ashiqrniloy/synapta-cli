@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -163,4 +165,105 @@ func TestStreamAssistantTurn_FallbackPaths(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAutoFillSHAAndReadCompactionForRepeatedReads(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	svc := NewChatService(nil, coretools.NewToolSet(dir))
+	turn := 0
+	provider := &fakeProvider{
+		chatStreamFn: func(_ context.Context, _ llm.ChatRequest, callback llm.StreamCallback) error {
+			turn++
+			switch turn {
+			case 1:
+				return callback(llm.StreamChunk{Choices: []llm.StreamChoice{{Delta: llm.Message{ToolCalls: []llm.ToolCall{{
+					Index:    0,
+					ID:       "tc-r1",
+					Type:     "function",
+					Function: llm.ToolFunctionCall{Name: "read", Arguments: `{"path":"a.txt"}`},
+				}}}}}})
+			case 2:
+				return callback(llm.StreamChunk{Choices: []llm.StreamChoice{{Delta: llm.Message{ToolCalls: []llm.ToolCall{{
+					Index:    0,
+					ID:       "tc-w1",
+					Type:     "function",
+					Function: llm.ToolFunctionCall{Name: "write", Arguments: `{"path":"a.txt","mode":"overwrite","content":"hello\nworld\n"}`},
+				}}}}}})
+			case 3:
+				return callback(llm.StreamChunk{Choices: []llm.StreamChoice{{Delta: llm.Message{ToolCalls: []llm.ToolCall{{
+					Index:    0,
+					ID:       "tc-w2",
+					Type:     "function",
+					Function: llm.ToolFunctionCall{Name: "write", Arguments: `{"path":"a.txt","mode":"append","content":"!\n"}`},
+				}}}}}})
+			case 4:
+				return callback(llm.StreamChunk{Choices: []llm.StreamChoice{{Delta: llm.Message{ToolCalls: []llm.ToolCall{{
+					Index:    0,
+					ID:       "tc-r2",
+					Type:     "function",
+					Function: llm.ToolFunctionCall{Name: "read", Arguments: `{"path":"a.txt"}`},
+				}}}}}})
+			case 5:
+				return callback(llm.StreamChunk{Choices: []llm.StreamChoice{{Delta: llm.Message{ToolCalls: []llm.ToolCall{{
+					Index:    0,
+					ID:       "tc-r3",
+					Type:     "function",
+					Function: llm.ToolFunctionCall{Name: "read", Arguments: `{"path":"a.txt"}`},
+				}}}}}})
+			default:
+				return callback(llm.StreamChunk{Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "done"}}}})
+			}
+		},
+	}
+
+	svc.providerReg = llm.NewProviderRegistry()
+	svc.providerReg.Register(&llm.ProviderDescriptor{
+		ID:   "fake",
+		Name: "fake",
+		ResolveToken: func(_ *llm.AuthStorage) (string, error) {
+			return "token", nil
+		},
+		Build: func(_ string) (llm.Provider, error) {
+			return provider, nil
+		},
+	})
+
+	var contextPayloads []string
+	err := svc.Stream(context.Background(), "fake", "m", nil, nil, nil, func(e ToolEvent) error {
+		if e.Type == ToolEventEnd && strings.TrimSpace(e.ContextContent) != "" {
+			contextPayloads = append(contextPayloads, e.ContextContent)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+
+	if got := string(mustReadFile(t, filepath.Join(dir, "a.txt"))); got != "hello\nworld\n!\n" {
+		t.Fatalf("unexpected final file content: %q", got)
+	}
+
+	var duplicateMarkerSeen bool
+	for _, p := range contextPayloads {
+		if strings.Contains(p, `"duplicate_read":true`) {
+			duplicateMarkerSeen = true
+			break
+		}
+	}
+	if !duplicateMarkerSeen {
+		t.Fatal("expected duplicate read compaction marker in tool context")
+	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return b
 }
