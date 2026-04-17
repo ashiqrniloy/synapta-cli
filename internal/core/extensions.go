@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/ashiqrniloy/synapta-cli/internal/fsutil"
 )
 
 func collectExtensionToolManifestWarnings(extDir string) []string {
@@ -71,10 +73,11 @@ func LoadExtensions(opts LoadExtensionsOptions) ExtensionsResult {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
+	cwd = fsutil.CleanAbs(cwd)
 
 	dirs := make([]string, 0, 2)
 	if strings.TrimSpace(opts.AgentDir) != "" {
-		dirs = append(dirs, filepath.Join(opts.AgentDir, "extensions"))
+		dirs = append(dirs, filepath.Join(fsutil.CleanAbs(opts.AgentDir), "extensions"))
 	}
 	if cwd != "" {
 		dirs = append(dirs, filepath.Join(cwd, "extensions"))
@@ -85,7 +88,7 @@ func LoadExtensions(opts LoadExtensionsOptions) ExtensionsResult {
 	warnings := make([]string, 0)
 
 	for _, base := range dirs {
-		entries, err := os.ReadDir(base)
+		entries, err := fsutil.ReadDirFiltered(base, fsutil.DefaultIgnoreRules())
 		if err != nil {
 			continue
 		}
@@ -126,8 +129,8 @@ func LoadExtensions(opts LoadExtensionsOptions) ExtensionsResult {
 			workdir := strings.TrimSpace(mf.WorkDir)
 			if workdir == "" {
 				workdir = extDir
-			} else if !filepath.IsAbs(workdir) {
-				workdir = filepath.Join(extDir, workdir)
+			} else {
+				workdir = fsutil.ResolvePath(extDir, workdir)
 			}
 
 			name := strings.TrimSpace(mf.Name)

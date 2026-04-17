@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ashiqrniloy/synapta-cli/internal/fsutil"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -47,7 +48,8 @@ func LoadSkills(options LoadSkillsOptions) SkillsResult {
 	if strings.TrimSpace(cwd) == "" {
 		cwd, _ = os.Getwd()
 	}
-	agentDir := strings.TrimSpace(options.AgentDir)
+	cwd = fsutil.CleanAbs(cwd)
+	agentDir := fsutil.CleanAbs(strings.TrimSpace(options.AgentDir))
 	includeDefaults := true
 	if !options.IncludeDefaults {
 		includeDefaults = false
@@ -60,9 +62,9 @@ func LoadSkills(options LoadSkillsOptions) SkillsResult {
 	addResult := func(result SkillsResult) {
 		diagnostics = append(diagnostics, result.Diagnostics...)
 		for _, skill := range result.Skills {
-			realPath := skill.FilePath
-			if rp, err := filepath.EvalSymlinks(skill.FilePath); err == nil && strings.TrimSpace(rp) != "" {
-				realPath = rp
+			realPath := fsutil.CanonicalPath(skill.FilePath)
+			if strings.TrimSpace(realPath) == "" {
+				realPath = skill.FilePath
 			}
 			if _, exists := realPathSeen[realPath]; exists {
 				continue
@@ -88,7 +90,7 @@ func LoadSkills(options LoadSkillsOptions) SkillsResult {
 	}
 
 	for _, p := range options.SkillPaths {
-		resolved := resolveSkillPath(cwd, p)
+		resolved := fsutil.ResolvePath(cwd, p)
 		if strings.TrimSpace(resolved) == "" {
 			continue
 		}
@@ -125,7 +127,7 @@ func loadSkillsFromDir(dir string, includeRootFiles bool) SkillsResult {
 	skills := make([]Skill, 0)
 	diagnostics := make([]SkillDiagnostic, 0)
 
-	entries, err := os.ReadDir(dir)
+	entries, err := fsutil.ReadDirFiltered(dir, fsutil.DefaultIgnoreRules())
 	if err != nil {
 		return SkillsResult{Skills: skills, Diagnostics: diagnostics}
 	}
@@ -142,7 +144,7 @@ func loadSkillsFromDir(dir string, includeRootFiles bool) SkillsResult {
 	}
 
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".") || entry.Name() == "node_modules" {
+		if entry.IsDir() && fsutil.ShouldIgnoreDir(entry.Name(), fsutil.DefaultIgnoreRules()) {
 			continue
 		}
 		fullPath := filepath.Join(dir, entry.Name())
@@ -402,24 +404,6 @@ func validateSkillDescription(description string) []string {
 	return errors
 }
 
-func resolveSkillPath(cwd, p string) string {
-	trimmed := strings.TrimSpace(p)
-	if trimmed == "" {
-		return ""
-	}
-	if strings.HasPrefix(trimmed, "~/") || trimmed == "~" {
-		home, _ := os.UserHomeDir()
-		if trimmed == "~" {
-			trimmed = home
-		} else {
-			trimmed = filepath.Join(home, strings.TrimPrefix(trimmed, "~/"))
-		}
-	}
-	if filepath.IsAbs(trimmed) {
-		return filepath.Clean(trimmed)
-	}
-	return filepath.Clean(filepath.Join(cwd, trimmed))
-}
 
 var xmlReplacer = strings.NewReplacer(
 	"&", "&amp;",

@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/ashiqrniloy/synapta-cli/internal/fsutil"
 )
 
 type SkillCatalogCache struct {
@@ -84,7 +86,9 @@ func skillsLoadSignature(options LoadSkillsOptions) string {
 	if strings.TrimSpace(cwd) == "" {
 		cwd, _ = os.Getwd()
 	}
-	parts := []string{"cwd=" + cwd, "agent=" + options.AgentDir}
+	cwd = fsutil.CleanAbs(cwd)
+	agentDir := fsutil.CleanAbs(strings.TrimSpace(options.AgentDir))
+	parts := []string{"cwd=" + cwd, "agent=" + agentDir}
 	if options.IncludeDefaults {
 		parts = append(parts, "defaults=1")
 	} else {
@@ -93,13 +97,13 @@ func skillsLoadSignature(options LoadSkillsOptions) string {
 
 	dirs := make([]string, 0)
 	if options.IncludeDefaults {
-		if strings.TrimSpace(options.AgentDir) != "" {
-			dirs = append(dirs, filepath.Join(options.AgentDir, "skills"))
+		if agentDir != "" {
+			dirs = append(dirs, filepath.Join(agentDir, "skills"))
 		}
 		dirs = append(dirs, filepath.Join(cwd, ".agents", "skills"))
 	}
 	for _, p := range options.SkillPaths {
-		resolved := resolveSkillPath(cwd, p)
+		resolved := fsutil.ResolvePath(cwd, p)
 		if strings.TrimSpace(resolved) == "" {
 			continue
 		}
@@ -121,18 +125,11 @@ func pathTreeSignature(path string) string {
 		return fileStatSignature(path)
 	}
 	files := make([]string, 0)
-	_ = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		name := d.Name()
-		if d.IsDir() && (strings.HasPrefix(name, ".") || name == "node_modules") {
-			return filepath.SkipDir
-		}
+	_ = fsutil.WalkFiles(path, fsutil.DefaultIgnoreRules(), func(p string, d os.DirEntry) error {
 		if d.IsDir() {
 			return nil
 		}
-		lower := strings.ToLower(name)
+		lower := strings.ToLower(d.Name())
 		if lower == "skill.md" || strings.HasSuffix(lower, ".md") {
 			files = append(files, fileStatSignature(p))
 		}

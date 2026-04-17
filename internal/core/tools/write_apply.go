@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/ashiqrniloy/synapta-cli/internal/fsutil"
 )
 
 // ── WriteDetails — structured metadata returned to the agent ─────────────────
@@ -43,12 +45,8 @@ func (t *WriteTool) Execute(ctx context.Context, in WriteInput) (Result, error) 
 	}
 
 	absPath := resolveToCwd(in.Path, t.cwd)
-	if t.cwd != "" {
-		cleanCWD := filepath.Clean(t.cwd)
-		cleanAbs := filepath.Clean(absPath)
-		if !strings.HasPrefix(cleanAbs, cleanCWD+string(filepath.Separator)) && cleanAbs != cleanCWD {
-			return Result{}, fmt.Errorf("path %q resolves outside the working directory %q. Use a path within the project root.", in.Path, t.cwd)
-		}
+	if t.cwd != "" && !fsutil.IsWithinRootLexical(absPath, t.cwd) {
+		return Result{}, fmt.Errorf("path %q resolves outside the working directory %q. Use a path within the project root.", in.Path, t.cwd)
 	}
 
 	dir := filepath.Dir(absPath)

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/ashiqrniloy/synapta-cli/internal/fsutil"
 )
 
 type ReadTool struct {
@@ -57,6 +59,9 @@ func (t *ReadTool) Execute(ctx context.Context, in ReadInput) (Result, error) {
 	}
 
 	absPath := resolveReadPath(in.Path, t.cwd)
+	if t.cwd != "" && !fsutil.IsWithinRootLexical(absPath, t.cwd) {
+		return Result{}, fmt.Errorf("path %q resolves outside the working directory %q. Use a path within the project root.", in.Path, t.cwd)
+	}
 	b, err := os.ReadFile(absPath)
 	if err != nil {
 		return Result{}, err

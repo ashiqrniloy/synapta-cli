@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ashiqrniloy/synapta-cli/internal/core/tools"
+	"github.com/ashiqrniloy/synapta-cli/internal/fsutil"
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 )
 
@@ -199,11 +200,12 @@ func (r *ToolRegistry) LoadRuntimeTools(opts LoadToolRegistryOptions) []string {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-	agentDir := strings.TrimSpace(opts.AgentDir)
+	cwd = fsutil.CleanAbs(cwd)
+	agentDir := fsutil.CleanAbs(strings.TrimSpace(opts.AgentDir))
 	warnings := make([]string, 0)
 
 	registerDirManifests := func(dir string, source string) {
-		entries, err := os.ReadDir(dir)
+		entries, err := fsutil.ReadDirFiltered(dir, fsutil.DefaultIgnoreRules())
 		if err != nil {
 			return
 		}
@@ -232,7 +234,7 @@ func (r *ToolRegistry) LoadRuntimeTools(opts LoadToolRegistryOptions) []string {
 }
 
 func (r *ToolRegistry) loadExtensionToolManifests(extensionsDir string, cwd string) []string {
-	entries, err := os.ReadDir(extensionsDir)
+	entries, err := fsutil.ReadDirFiltered(extensionsDir, fsutil.DefaultIgnoreRules())
 	if err != nil {
 		return nil
 	}
@@ -249,7 +251,7 @@ func (r *ToolRegistry) loadExtensionToolManifests(extensionsDir string, cwd stri
 			}
 		}
 		toolsDir := filepath.Join(extDir, "tools")
-		subEntries, err := os.ReadDir(toolsDir)
+		subEntries, err := fsutil.ReadDirFiltered(toolsDir, fsutil.DefaultIgnoreRules())
 		if err != nil {
 			continue
 		}
@@ -311,16 +313,15 @@ func (r *ToolRegistry) registerManifestFile(path string, source string, cwd stri
 
 func resolveManifestWorkDir(configured, manifestDir, cwd, source string) string {
 	wd := strings.TrimSpace(configured)
+	manifestDir = fsutil.CleanAbs(strings.TrimSpace(manifestDir))
+	cwd = fsutil.CleanAbs(strings.TrimSpace(cwd))
 	if wd == "" {
 		if source == ToolSourceExtension {
 			return manifestDir
 		}
 		return cwd
 	}
-	if filepath.IsAbs(wd) {
-		return wd
-	}
-	return filepath.Join(manifestDir, wd)
+	return fsutil.ResolvePath(manifestDir, wd)
 }
 
 func manifestExecutor(command string, args []string, workDir string, timeoutSeconds int, streaming bool) ToolExecutor {

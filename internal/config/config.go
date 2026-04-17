@@ -3,9 +3,9 @@ package config
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
+	"github.com/ashiqrniloy/synapta-cli/internal/fsutil"
 	"github.com/spf13/viper"
 	go_yaml "go.yaml.in/yaml/v3"
 )
@@ -340,10 +340,8 @@ func LoadConfig() (*AppConfig, error) {
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
 
-	homeDir, err := os.UserHomeDir()
-	if err == nil {
-		v.AddConfigPath(filepath.Join(homeDir, ".synapta"))
-	}
+	agentDir := fsutil.ResolveAgentDir("synapta", "SYNAPTA_DIR")
+	v.AddConfigPath(agentDir)
 	v.AddConfigPath("./config")
 	v.AddConfigPath("../config")
 
@@ -481,17 +479,16 @@ func deepMerge(dst, src map[string]any) {
 // written back.  This preserves any user comments or keys that AppConfig does
 // not know about, while guaranteeing every section of the config is up-to-date.
 func SaveConfig(cfg *AppConfig) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
+	if _, err := os.UserHomeDir(); err != nil {
 		return fmt.Errorf("getting home dir: %w", err)
 	}
 
-	configDir := filepath.Join(homeDir, ".synapta")
+	configDir := fsutil.ResolveAgentDir("synapta", "SYNAPTA_DIR")
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("creating config dir: %w", err)
 	}
 
-	configPath := filepath.Join(configDir, "config.yaml")
+	configPath := fsutil.ResolvePath(configDir, "config.yaml")
 
 	// Build the new config map from the full AppConfig.
 	newMap, err := configToMap(cfg)
