@@ -102,8 +102,13 @@ func (s *ChatService) streamAssistantTurn(ctx context.Context, provider llm.Prov
 
 	var contentBuilder strings.Builder
 	toolCallByIndex := map[int]*llm.ToolCall{}
+	var latestUsage *llm.Usage
 
 	err := provider.ChatStream(ctx, streamReq, func(chunk llm.StreamChunk) error {
+		if chunk.Usage != nil {
+			u := *chunk.Usage
+			latestUsage = &u
+		}
 		for _, choice := range chunk.Choices {
 			if choice.Delta.Content != "" {
 				contentBuilder.WriteString(choice.Delta.Content)
@@ -139,6 +144,9 @@ func (s *ChatService) streamAssistantTurn(ctx context.Context, provider llm.Prov
 	if err != nil {
 		return "", nil, err
 	}
+	if latestUsage != nil {
+		llm.ObserveTokenUsage(provider.ID(), modelID, messages, latestUsage)
+	}
 
 	toolCalls := make([]llm.ToolCall, 0, len(toolCallByIndex))
 	if len(toolCallByIndex) > 0 {
@@ -159,6 +167,9 @@ func (s *ChatService) streamAssistantTurn(ctx context.Context, provider llm.Prov
 		}
 		if resp == nil || len(resp.Choices) == 0 {
 			return "", nil, fmt.Errorf("empty response")
+		}
+		if resp.Usage != nil {
+			llm.ObserveTokenUsage(provider.ID(), modelID, messages, resp.Usage)
 		}
 		fallbackText := resp.Choices[0].Message.Content
 		if strings.TrimSpace(fallbackText) != "" && onDelta != nil {

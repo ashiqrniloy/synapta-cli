@@ -94,7 +94,7 @@ func (m *CodeAgentModel) buildContextEntries() []ContextEntry {
 			RawHistoryIndex: -1,
 			Category:        category,
 			Timestamp:       time.Time{},
-			EstimatedTokens: llm.EstimateMessageTokens(llm.Message{Role: msg.Role, Content: content, ToolCalls: msg.ToolCalls, ToolCallID: msg.ToolCallID, Name: msg.Name}),
+			EstimatedTokens: llm.EstimateMessageTokensForModel(m.selectedProvider, m.selectedModelID, llm.Message{Role: msg.Role, Content: content, ToolCalls: msg.ToolCalls, ToolCallID: msg.ToolCallID, Name: msg.Name}),
 		}
 
 		isHistoryMessage := hPos < len(filteredHistoryMsgs) && contextMessageEquals(msg, filteredHistoryMsgs[hPos])

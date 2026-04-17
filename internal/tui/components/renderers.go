@@ -69,7 +69,7 @@ func (m *CodeAgentModel) renderModelFooter() string {
 	if window <= 0 {
 		window = resolveModelContextWindow(m.selectedProvider, m.selectedModelID)
 	}
-	usedTokens := estimateMessagesTokens(m.conversationHistory)
+	usedTokens := estimateMessagesTokens(m.selectedProvider, m.selectedModelID, m.conversationHistory)
 	contextText := fmt.Sprintf("context used: ~%s", formatTokenCount(usedTokens))
 	if window > 0 {
 		pct := int((float64(usedTokens) / float64(window)) * 100)

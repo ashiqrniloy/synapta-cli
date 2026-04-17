@@ -55,8 +55,8 @@ func (m *CodeAgentModel) providerDisplayLabel() string {
 	}
 }
 
-func estimateMessagesTokens(messages []llm.Message) int {
-	return llm.EstimateMessagesTokens(messages)
+func estimateMessagesTokens(providerID, modelID string, messages []llm.Message) int {
+	return llm.EstimateMessagesTokensForModel(providerID, modelID, messages)
 }
 
 func (m *CodeAgentModel) densityMode() string {

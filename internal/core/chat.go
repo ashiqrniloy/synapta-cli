@@ -162,6 +162,9 @@ func (s *ChatService) SummarizeCompaction(ctx context.Context, providerID, model
 	if resp == nil || len(resp.Choices) == 0 {
 		return "", fmt.Errorf("empty summarization response")
 	}
+	if resp.Usage != nil {
+		llm.ObserveTokenUsage(provider.ID(), modelID, requestMessages, resp.Usage)
+	}
 	summary := strings.TrimSpace(resp.Choices[0].Message.Content)
 	if summary == "" {
 		return "", fmt.Errorf("empty compaction summary")
