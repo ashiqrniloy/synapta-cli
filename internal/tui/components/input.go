@@ -7,12 +7,11 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/ashiqrniloy/synapta-cli/internal/core"
+	"github.com/ashiqrniloy/synapta-cli/internal/normalize"
 )
 
 func normalizeKeyName(key string) string {
-	lower := strings.ToLower(key)
-	replacer := strings.NewReplacer("escape", "esc")
-	return replacer.Replace(lower)
+	return normalize.KeyName(key)
 }
 
 func (m *CodeAgentModel) getSubmitKey() string {
@@ -76,12 +75,7 @@ func getFilterTextFromValue(value string) string {
 }
 
 func normalizeCommandShortcut(value string) string {
-	v := strings.ToLower(strings.TrimSpace(value))
-	v = strings.TrimPrefix(v, ":")
-	if strings.ContainsAny(v, " \t\n") {
-		return ""
-	}
-	return strings.TrimSpace(v)
+	return normalize.ShortcutKey(value)
 }
 
 func (m *CodeAgentModel) commandShortcutCommandID() string {

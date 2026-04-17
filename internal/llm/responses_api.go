@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/ashiqrniloy/synapta-cli/internal/normalize"
 )
 
 func (p *OpenAIProvider) chatResponses(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
@@ -87,19 +89,19 @@ func (p *OpenAIProvider) chatStreamResponses(ctx context.Context, req ChatReques
 }
 
 func splitToolCallID(id string) (callID, itemID string) {
-	trimmed := strings.TrimSpace(id)
-	if trimmed == "" {
+	trimmed, ok := normalize.NonEmpty(id)
+	if !ok {
 		return "", ""
 	}
 	parts := strings.SplitN(trimmed, "|", 2)
 	if len(parts) == 2 {
-		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+		return normalize.NonEmptyOr(parts[0]), normalize.NonEmptyOr(parts[1])
 	}
 	return trimmed, ""
 }
 
 func normalizeResponsesItemID(id string) string {
-	id = strings.TrimSpace(strings.ToLower(id))
+	id = normalize.ID(id)
 	if id == "" {
 		return ""
 	}

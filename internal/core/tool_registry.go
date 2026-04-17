@@ -18,6 +18,7 @@ import (
 	"github.com/ashiqrniloy/synapta-cli/internal/core/tools"
 	"github.com/ashiqrniloy/synapta-cli/internal/fsutil"
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
+	"github.com/ashiqrniloy/synapta-cli/internal/normalize"
 )
 
 const (
@@ -84,8 +85,8 @@ func NewToolRegistry() *ToolRegistry {
 }
 
 func (r *ToolRegistry) Register(spec ToolSpec) error {
-	name := strings.TrimSpace(spec.Name)
-	if name == "" {
+	name, ok := normalize.NonEmpty(spec.Name)
+	if !ok {
 		return fmt.Errorf("tool name is required")
 	}
 	if spec.Executor == nil {
@@ -102,7 +103,7 @@ func (r *ToolRegistry) Register(spec ToolSpec) error {
 func (r *ToolRegistry) Get(name string) (ToolSpec, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	spec, ok := r.tools[strings.TrimSpace(name)]
+	spec, ok := r.tools[normalize.NonEmptyOr(name)]
 	return spec, ok
 }
 

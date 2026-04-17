@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ashiqrniloy/synapta-cli/internal/fsutil"
+	"github.com/ashiqrniloy/synapta-cli/internal/normalize"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -45,7 +46,7 @@ const (
 
 func LoadSkills(options LoadSkillsOptions) SkillsResult {
 	cwd := options.CWD
-	if strings.TrimSpace(cwd) == "" {
+	if _, ok := normalize.NonEmpty(cwd); !ok {
 		cwd, _ = os.Getwd()
 	}
 	cwd = fsutil.CleanAbs(cwd)
@@ -182,8 +183,8 @@ func loadSkillFromFile(filePath string) (*Skill, []SkillDiagnostic) {
 	fm, _ := parseSkillFrontmatter(string(raw))
 	baseDir := filepath.Dir(filePath)
 	parentDir := filepath.Base(baseDir)
-	name := strings.TrimSpace(fm.Name)
-	if name == "" {
+	name, ok := normalize.NonEmpty(fm.Name)
+	if !ok {
 		name = parentDir
 	}
 
@@ -195,13 +196,14 @@ func loadSkillFromFile(filePath string) (*Skill, []SkillDiagnostic) {
 		diagnostics = append(diagnostics, SkillDiagnostic{Type: "warning", Message: v, Path: filePath})
 	}
 
-	if strings.TrimSpace(fm.Description) == "" {
+	desc, ok := normalize.NonEmpty(fm.Description)
+	if !ok {
 		return nil, diagnostics
 	}
 
 	skill := &Skill{
 		Name:                   name,
-		Description:            strings.TrimSpace(fm.Description),
+		Description:            desc,
 		FilePath:               filePath,
 		BaseDir:                baseDir,
 		DisableModelInvocation: fm.DisableModelInvocation,
@@ -395,15 +397,14 @@ func validateSkillName(name, parentDir string) []string {
 
 func validateSkillDescription(description string) []string {
 	errors := make([]string, 0)
-	description = strings.TrimSpace(description)
-	if description == "" {
+	description, ok := normalize.NonEmpty(description)
+	if !ok {
 		errors = append(errors, "description is required")
 	} else if len(description) > maxSkillDescriptionLength {
 		errors = append(errors, fmt.Sprintf("description exceeds %d characters (%d)", maxSkillDescriptionLength, len(description)))
 	}
 	return errors
 }
-
 
 var xmlReplacer = strings.NewReplacer(
 	"&", "&amp;",

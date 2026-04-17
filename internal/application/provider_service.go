@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
+	"github.com/ashiqrniloy/synapta-cli/internal/normalize"
 	"github.com/ashiqrniloy/synapta-cli/internal/oauth"
 )
 
@@ -38,28 +39,38 @@ func (s *ProviderService) FetchBalance(ctx context.Context, providerID string) (
 	switch providerID {
 	case "kilo":
 		creds, err := s.authStorage.GetOAuthCredentials("kilo")
-		if err != nil || creds == nil || strings.TrimSpace(creds.Access) == "" {
+		if err != nil || creds == nil {
+			return "", nil
+		}
+		accessToken, ok := normalize.NonEmpty(creds.Access)
+		if !ok {
 			return "", nil
 		}
 		gateway := llm.NewKiloGateway()
-		balance, err := gateway.FetchBalance(ctx, creds.Access)
+		balance, err := gateway.FetchBalance(ctx, accessToken)
 		if err != nil {
 			return "", err
 		}
 		return llm.FormatBalance(balance), nil
 	case "github-copilot":
 		creds, err := s.authStorage.GetOAuthCredentials("github-copilot")
-		if err != nil || creds == nil || strings.TrimSpace(creds.Refresh) == "" {
+		if err != nil || creds == nil {
+			return "", nil
+		}
+		refreshToken, ok := normalize.NonEmpty(creds.Refresh)
+		if !ok {
 			return "", nil
 		}
 		domain := "github.com"
 		if len(creds.ExtraData) > 0 {
 			var extra oauth.CopilotExtraData
-			if err := json.Unmarshal(creds.ExtraData, &extra); err == nil && strings.TrimSpace(extra.EnterpriseDomain) != "" {
-				domain = strings.TrimSpace(extra.EnterpriseDomain)
+			if err := json.Unmarshal(creds.ExtraData, &extra); err == nil {
+				if normalized, valid := normalize.DomainOrHost(extra.EnterpriseDomain); valid && normalized != "" {
+					domain = normalized
+				}
 			}
 		}
-		usage, err := oauth.FetchCopilotPremiumUsage(ctx, creds.Refresh, domain)
+		usage, err := oauth.FetchCopilotPremiumUsage(ctx, refreshToken, domain)
 		if err != nil || usage == nil || usage.Total <= 0 {
 			return "", nil
 		}

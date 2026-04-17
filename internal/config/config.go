@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/ashiqrniloy/synapta-cli/internal/fsutil"
+	"github.com/ashiqrniloy/synapta-cli/internal/normalize"
 	"github.com/spf13/viper"
 	go_yaml "go.yaml.in/yaml/v3"
 )
@@ -194,9 +195,7 @@ func DefaultConfig() *AppConfig {
 // ── Loading ───────────────────────────────────────────────────────────
 
 func normalizeShortcutKey(key string) string {
-	k := strings.ToLower(strings.TrimSpace(key))
-	k = strings.TrimPrefix(k, ":")
-	return strings.TrimSpace(k)
+	return normalize.ShortcutKey(key)
 }
 
 // mergeField descriptors keep merge logic table-driven and reduce field-by-field
@@ -286,8 +285,8 @@ func mergeKeybindings(v *viper.Viper, dst *Keybindings) error {
 		if !v.IsSet(key) {
 			continue
 		}
-		value := strings.TrimSpace(v.GetString(key))
-		if value == "" {
+		value, ok := normalize.NonEmpty(v.GetString(key))
+		if !ok {
 			continue
 		}
 		f.set(dst, value)
@@ -299,7 +298,7 @@ func mergeKeybindings(v *viper.Viper, dst *Keybindings) error {
 // mergeThemes collects all theme palette sub-keys under "themes.*" (excluding
 // "themes.default") and merges only configured fields into each palette.
 func mergeThemes(v *viper.Viper, dst *RawThemes) error {
-	if dk := strings.TrimSpace(v.GetString("themes.default")); dk != "" {
+	if dk, ok := normalize.NonEmpty(v.GetString("themes.default")); ok {
 		dst.Default = dk
 	}
 
@@ -364,8 +363,8 @@ func LoadConfig() (*AppConfig, error) {
 	if shortcuts := v.GetStringMapString("command_shortcuts"); len(shortcuts) > 0 {
 		for rawKey, commandID := range shortcuts {
 			key := normalizeShortcutKey(rawKey)
-			id := strings.TrimSpace(commandID)
-			if key == "" || id == "" {
+			id, ok := normalize.NonEmpty(commandID)
+			if key == "" || !ok {
 				continue
 			}
 			cfg.CommandShortcuts[key] = id
@@ -381,7 +380,7 @@ func LoadConfig() (*AppConfig, error) {
 	}
 
 	// UI config.
-	if d := strings.ToLower(strings.TrimSpace(v.GetString("ui.density"))); d != "" {
+	if d := normalize.ID(v.GetString("ui.density")); d != "" {
 		if d == "compact" || d == "comfortable" {
 			cfg.UI.Density = d
 		}

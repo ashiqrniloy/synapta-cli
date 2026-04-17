@@ -14,6 +14,7 @@ import (
 
 	"github.com/ashiqrniloy/synapta-cli/internal/httpclient"
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
+	"github.com/ashiqrniloy/synapta-cli/internal/normalize"
 )
 
 // GitHub Copilot OAuth provider implementation.
@@ -91,21 +92,7 @@ func (g *GitHubCopilotOAuth) getURLs(domain string) (deviceCode, accessToken, co
 }
 
 func normalizeDomain(input string) (string, bool) {
-	trimmed := strings.TrimSpace(input)
-	if trimmed == "" {
-		return "", true
-	}
-	if strings.Contains(trimmed, "://") {
-		u, err := url.Parse(trimmed)
-		if err != nil || strings.TrimSpace(u.Hostname()) == "" {
-			return "", false
-		}
-		return strings.TrimSpace(u.Hostname()), true
-	}
-	if strings.Contains(trimmed, "/") || strings.HasPrefix(trimmed, ".") || strings.HasSuffix(trimmed, ".") || !strings.Contains(trimmed, ".") {
-		return "", false
-	}
-	return trimmed, true
+	return normalize.DomainOrHost(input)
 }
 
 func (g *GitHubCopilotOAuth) Login(callbacks llm.OAuthLoginCallbacks) (*llm.OAuthCredentials, error) {
