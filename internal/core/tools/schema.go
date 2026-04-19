@@ -147,9 +147,5 @@ func CheckDocJSONSchema() map[string]any {
 			},
 		},
 		"required": []string{"query"},
-		"anyOf": []map[string]any{
-			{"required": []string{"library_name"}},
-			{"required": []string{"library_id"}},
-		},
 	}
 }

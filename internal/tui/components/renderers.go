@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func (m *CodeAgentModel) renderHeaderBar() string {
@@ -401,92 +402,186 @@ func renderContextBadge(category string) string {
 	bg, label := contextBadgeLabel(category)
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color(bg)).Bold(true).Padding(0, 1).Render(label)
 }
-
 func (m *CodeAgentModel) renderChatTranscript() string {
 	if len(m.chatMessages) == 0 {
+		m.transcriptBlocks = nil
+		m.transcriptBlockKeys = nil
+		m.transcriptBlockOffsets = nil
+		m.transcriptMessageStartLine = nil
+		m.transcriptContent = ""
+		m.transcriptDirtyFrom = -1
+		m.chatRenderedLines = nil
+		m.chatMessageStartLines = nil
 		return ""
 	}
 
-	// Determine if we need highlight tracking
-	shouldHighlight := m.sessionSearch != nil && m.sessionSearch.IsActive()
-	shouldHighlight = shouldHighlight || m.sessionSearchHighlightLine >= 0
-	highlightLine := m.sessionSearchHighlightLine
+	width := max(m.chatViewport.Width(), 20)
+	compact := m.isCompactDensity()
+	sep := "\n\n"
+	if compact {
+		sep = "\n"
+	}
+	sepLineCount := countLines(sep)
 
-	// Reset tracking arrays if needed
+	// Layout changes invalidate all memoized render blocks.
+	if m.transcriptCacheWidth != width || m.transcriptCacheCompact != compact || m.transcriptCacheSep != sep {
+		m.transcriptCacheWidth = width
+		m.transcriptCacheCompact = compact
+		m.transcriptCacheSep = sep
+		m.transcriptBlocks = nil
+		m.transcriptBlockKeys = nil
+		m.transcriptBlockOffsets = nil
+		m.transcriptMessageStartLine = nil
+		m.transcriptContent = ""
+		m.transcriptDirtyFrom = 0
+	}
+
+	if len(m.transcriptBlocks) != len(m.chatMessages) || len(m.transcriptBlockKeys) != len(m.chatMessages) || len(m.transcriptBlockOffsets) != len(m.chatMessages) || len(m.transcriptMessageStartLine) != len(m.chatMessages) {
+		m.transcriptBlocks = make([]string, len(m.chatMessages))
+		m.transcriptBlockKeys = make([]string, len(m.chatMessages))
+		m.transcriptBlockOffsets = make([]int, len(m.chatMessages))
+		m.transcriptMessageStartLine = make([]int, len(m.chatMessages))
+		m.transcriptContent = ""
+		m.transcriptDirtyFrom = 0
+	}
+
+	if m.transcriptDirtyFrom < 0 || m.transcriptDirtyFrom >= len(m.chatMessages) {
+		m.transcriptDirtyFrom = len(m.chatMessages)
+	}
+
+	start := m.transcriptDirtyFrom
+	if start < len(m.chatMessages) {
+		lineStart := 0
+		if start > 0 {
+			lineStart = m.transcriptBlockOffsets[start-1] + countLines(m.transcriptBlocks[start-1])
+			if sep != "" {
+				lineStart += sepLineCount
+			}
+		}
+
+		for i := start; i < len(m.chatMessages); i++ {
+			msg := m.chatMessages[i]
+			key := m.transcriptBlockRenderKey(msg, width)
+			rendered := m.transcriptBlocks[i]
+			if m.transcriptBlockKeys[i] != key {
+				rendered = m.renderChatMessageForTranscript(msg)
+				m.transcriptBlocks[i] = rendered
+				m.transcriptBlockKeys[i] = key
+			}
+			m.transcriptBlockOffsets[i] = lineStart
+			m.transcriptMessageStartLine[i] = lineStart
+			lineStart += countLines(rendered)
+			if i < len(m.chatMessages)-1 {
+				lineStart += sepLineCount
+			}
+		}
+
+		m.transcriptContent = strings.Join(m.transcriptBlocks, sep)
+	}
+
+	m.transcriptDirtyFrom = len(m.chatMessages)
+
+	// Determine if we need highlight tracking.
+	shouldHighlight := (m.sessionSearch != nil && m.sessionSearch.IsActive()) || m.sessionSearchHighlightLine >= 0
+	highlightLine := m.sessionSearchHighlightLine
 	if shouldHighlight {
+		m.chatRenderedLines = m.buildRenderedLinesFromTranscript(ansi.Strip(m.transcriptContent), sep)
+		m.chatMessageStartLines = append(m.chatMessageStartLines[:0], m.transcriptMessageStartLine...)
+		if highlightLine >= 0 {
+			if highlighted, ok := m.applyHighlightToTranscript(highlightLine, sep); ok {
+				return highlighted
+			}
+		}
+	} else {
 		m.chatRenderedLines = nil
 		m.chatMessageStartLines = nil
 	}
 
-	// Build message blocks - each message becomes a single block with internal newlines
-	blocks := make([]string, 0, len(m.chatMessages))
-	sep := "\n\n"
-	if m.isCompactDensity() {
-		sep = "\n"
+	return m.transcriptContent
+}
+
+func (m *CodeAgentModel) renderChatMessageForTranscript(msg ChatMessage) string {
+	switch msg.Role {
+	case "user":
+		return m.renderUserMessage(msg.Content)
+	case "assistant":
+		return m.renderAssistantMessage(msg.Content)
+	case "tool":
+		return m.renderToolMessage(msg)
+	case "system":
+		return m.renderSystemMessage(msg)
+	default:
+		return msg.Content
 	}
+}
 
-	var currentLine int
+func (m *CodeAgentModel) transcriptBlockRenderKey(msg ChatMessage, width int) string {
+	return fmt.Sprintf("%s|%d|%s|%s|%s|%s|%s|%s|%s|%s|%s|%t|%d|%d|%s",
+		msg.Role,
+		width,
+		msg.Content,
+		msg.SystemKind,
+		msg.ToolCallID,
+		msg.ToolName,
+		msg.ToolPath,
+		msg.ToolCommand,
+		msg.ToolLibrary,
+		msg.ToolVersion,
+		msg.ToolQuery,
+		msg.IsPartial,
+		msg.ToolStartedAt.UnixNano(),
+		msg.ToolEndedAt.UnixNano(),
+		m.transcriptToolSelectionKey(msg),
+	)
+}
 
-	for msgIdx, msg := range m.chatMessages {
-		// Track the starting line for this message
-		if shouldHighlight {
-			m.chatMessageStartLines = append(m.chatMessageStartLines, currentLine)
+func (m *CodeAgentModel) transcriptToolSelectionKey(msg ChatMessage) string {
+	if msg.Role != "tool" || strings.TrimSpace(msg.ToolCallID) == "" {
+		return ""
+	}
+	expanded := m.toolExpanded[msg.ToolCallID]
+	selected := msg.ToolCallID == m.selectedToolCallID
+	return fmt.Sprintf("%t|%t", expanded, selected)
+}
+
+func (m *CodeAgentModel) applyHighlightToTranscript(highlightLine int, sep string) (string, bool) {
+	if highlightLine < 0 {
+		return "", false
+	}
+	for i, block := range m.transcriptBlocks {
+		start := m.transcriptBlockOffsets[i]
+		blockLines := strings.Split(block, "\n")
+		end := start + len(blockLines) - 1
+		if highlightLine < start || highlightLine > end {
+			continue
 		}
+		rel := highlightLine - start
+		highlighted := make([]string, len(m.transcriptBlocks))
+		copy(highlighted, m.transcriptBlocks)
+		blockCopy := append([]string(nil), blockLines...)
+		blockCopy[rel] = applySearchHighlight(blockCopy[rel])
+		highlighted[i] = strings.Join(blockCopy, "\n")
+		return strings.Join(highlighted, sep), true
+	}
+	return "", false
+}
 
-		var rendered string
-		switch msg.Role {
-		case "user":
-			rendered = m.renderUserMessage(msg.Content)
-		case "assistant":
-			rendered = m.renderAssistantMessage(msg.Content)
-		case "tool":
-			rendered = m.renderToolMessage(msg)
-		case "system":
-			rendered = m.renderSystemMessage(msg)
-		default:
-			rendered = msg.Content
-		}
-
-		// Count lines for tracking (before any highlighting modifications)
-		if shouldHighlight {
-			msgLines := strings.Split(rendered, "\n")
-			for _, line := range msgLines {
-				m.chatRenderedLines = append(m.chatRenderedLines, line)
-				currentLine++
-			}
-		}
-
-		// Apply highlight to the entire block if it contains the highlight line
-		if shouldHighlight && highlightLine >= 0 {
-			// Check if this block contains the highlighted line
-			msgLines := strings.Split(rendered, "\n")
-			blockStartLine := currentLine - len(msgLines)
-			blockEndLine := currentLine - 1
-
-			if highlightLine >= blockStartLine && highlightLine <= blockEndLine {
-				// Find the relative line within this block
-				relLine := highlightLine - blockStartLine
-				highlightedLines := make([]string, len(msgLines))
-				copy(highlightedLines, msgLines)
-				highlightedLines[relLine] = applySearchHighlight(msgLines[relLine])
-				rendered = strings.Join(highlightedLines, "\n")
-			}
-		}
-
-		blocks = append(blocks, rendered)
-
-		// Track separator lines for highlighting
-		if shouldHighlight && msgIdx < len(m.chatMessages)-1 {
-			sepLines := strings.Split(sep, "\n")
-			for _, sepLine := range sepLines {
-				m.chatRenderedLines = append(m.chatRenderedLines, sepLine)
-				currentLine++
-			}
+func (m *CodeAgentModel) buildRenderedLinesFromTranscript(transcript string, sep string) []string {
+	if len(m.transcriptBlocks) == 0 {
+		m.chatMessageStartLines = nil
+		return nil
+	}
+	lines := make([]string, 0, countLines(transcript))
+	startLines := make([]int, len(m.transcriptBlocks))
+	for i, block := range m.transcriptBlocks {
+		startLines[i] = len(lines)
+		lines = append(lines, strings.Split(block, "\n")...)
+		if i < len(m.transcriptBlocks)-1 {
+			lines = append(lines, strings.Split(sep, "\n")...)
 		}
 	}
-
-	// Join blocks with separator
-	return strings.Join(blocks, sep)
+	m.chatMessageStartLines = startLines
+	return lines
 }
 
 // applySearchHighlight applies a visual highlight to a line.

@@ -3,8 +3,8 @@ package components
 import (
 	"strings"
 
-	"github.com/charmbracelet/x/ansi"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // handleSessionSearchKeyPress handles keyboard events when session search is active.
@@ -16,6 +16,7 @@ func (m *CodeAgentModel) handleSessionSearchKeyPress(msg tea.KeyPressMsg, keyStr
 	if keyStr == "esc" {
 		m.sessionSearch.Deactivate()
 		m.sessionSearchHighlightLine = -1
+		m.invalidateTranscriptCacheAll()
 		m.ta.SetValue("")
 		m.ta.Placeholder = "Type your message... (Enter=send, Shift+Enter/Ctrl+N=newline)"
 		m.recalculateLayout()
@@ -25,6 +26,7 @@ func (m *CodeAgentModel) handleSessionSearchKeyPress(msg tea.KeyPressMsg, keyStr
 	if keyStr == "up" {
 		m.sessionSearch.MoveUp()
 		m.updateSearchHighlightLine()
+		m.invalidateTranscriptCacheAll()
 		m.refreshChatViewport()
 		return true, nil
 	}
@@ -32,6 +34,7 @@ func (m *CodeAgentModel) handleSessionSearchKeyPress(msg tea.KeyPressMsg, keyStr
 	if keyStr == "down" {
 		m.sessionSearch.MoveDown()
 		m.updateSearchHighlightLine()
+		m.invalidateTranscriptCacheAll()
 		m.refreshChatViewport()
 		return true, nil
 	}
@@ -43,6 +46,7 @@ func (m *CodeAgentModel) handleSessionSearchKeyPress(msg tea.KeyPressMsg, keyStr
 			m.jumpToSearchMatch(selected)
 			m.sessionSearchHighlightLine = selected.RenderedLine
 			m.sessionSearch.Deactivate()
+			m.invalidateTranscriptCacheAll()
 			m.ta.SetValue("")
 			m.ta.Placeholder = "Type your message... (Enter=send, Shift+Enter/Ctrl+N=newline)"
 			m.recalculateLayout()
@@ -103,111 +107,26 @@ func (m *CodeAgentModel) jumpToSearchMatch(match *SearchMatch) {
 		return
 	}
 
-	// First, build the rendered lines to get accurate line numbers
-	m.chatRenderedLines = nil
-	m.chatMessageStartLines = nil
+	// Ensure transcript caches/line offsets are up to date.
+	_ = m.renderChatTranscript()
 
-	// Calculate the actual line offset in the rendered transcript
-	// by simulating what renderChatTranscript does
-	sep := "\n\n"
-	if m.isCompactDensity() {
-		sep = "\n"
+	targetLine := match.RenderedLine
+	if targetLine < 0 {
+		targetLine = 0
 	}
-
-	var currentLine int
-	highlightFound := false
-
-	for msgIdx, msg := range m.chatMessages {
-		m.chatMessageStartLines = append(m.chatMessageStartLines, currentLine)
-
-		var rendered string
-		switch msg.Role {
-		case "user":
-			rendered = m.renderUserMessage(msg.Content)
-		case "assistant":
-			rendered = m.renderAssistantMessage(msg.Content)
-		case "tool":
-			rendered = m.renderToolMessage(msg)
-		case "system":
-			rendered = m.renderSystemMessage(msg)
-		default:
-			rendered = msg.Content
-		}
-
-		// Count lines in this rendered block
-		msgLines := strings.Split(rendered, "\n")
-
-		// Check if the match is in this message by comparing content
-		matchContent := ansi.Strip(match.Content)
-		for lineIdx, line := range msgLines {
-			plainLine := ansi.Strip(line)
-			// Check if this line matches our search match
-			if strings.Contains(matchContent, plainLine) || strings.Contains(plainLine, matchContent) {
-				if !highlightFound && currentLine+lineIdx == match.RenderedLine {
-					// Found the matching line in the rendered output
-					m.chatViewport.SetYOffset(currentLine + lineIdx)
-					highlightFound = true
-					break
-				}
-			}
-		}
-
-		currentLine += len(msgLines)
-
-		// Add separator between messages
-		if msgIdx < len(m.chatMessages)-1 {
-			sepLines := strings.Split(sep, "\n")
-			currentLine += len(sepLines)
-		}
-	}
-
-	// Fallback: if we couldn't find exact match, just use the RenderedLine from search
-	if !highlightFound {
-		// Try to find the line by matching the original search match
-		matchContent := strings.ToLower(ansi.Strip(match.Content))
-		currentLine = 0
-		for _, msg := range m.chatMessages {
-			var rendered string
-			switch msg.Role {
-			case "user":
-				rendered = m.renderUserMessage(msg.Content)
-			case "assistant":
-				rendered = m.renderAssistantMessage(msg.Content)
-			case "tool":
-				rendered = m.renderToolMessage(msg)
-			case "system":
-				rendered = m.renderSystemMessage(msg)
-			default:
-				rendered = msg.Content
-			}
-
-			msgLines := strings.Split(rendered, "\n")
-			for lineIdx, line := range msgLines {
-				plainLine := strings.ToLower(ansi.Strip(line))
-				if strings.Contains(plainLine, matchContent) {
-					m.chatViewport.SetYOffset(currentLine + lineIdx)
-					m.sessionSearchHighlightLine = currentLine + lineIdx
-					m.chatAutoScroll = false
-					return
-				}
-			}
-			currentLine += len(msgLines)
-		}
-	}
-
+	m.chatViewport.SetYOffset(targetLine)
 	m.chatAutoScroll = false
 
-	// Optionally select the message containing the match
+	// Optionally select the message containing the match.
 	if match.MessageIdx >= 0 && match.MessageIdx < len(m.chatMessages) {
-		// Clear existing selection
 		m.selectedToolCallID = ""
-		// Select this message's tool if it has one
 		msg := m.chatMessages[match.MessageIdx]
 		if msg.Role == "tool" && msg.ToolCallID != "" {
 			m.selectedToolCallID = msg.ToolCallID
 		}
 	}
 
+	m.invalidateTranscriptCacheAll()
 	m.refreshChatViewport()
 }
 
@@ -232,48 +151,29 @@ func (m *CodeAgentModel) activateSessionSearch() {
 // buildChatRenderedLines builds the flattened list of rendered lines from chat messages.
 // This is used to map search matches back to viewport positions.
 func (m *CodeAgentModel) buildChatRenderedLines() {
-	m.chatRenderedLines = nil
-	m.chatMessageStartLines = nil
-
-	if len(m.chatMessages) == 0 {
+	transcript := m.renderChatTranscript()
+	_ = transcript
+	if len(m.transcriptBlocks) == 0 {
+		m.chatRenderedLines = nil
+		m.chatMessageStartLines = nil
 		return
 	}
 
-	// Get max width for rendering
-	maxWidth := max(m.chatViewport.Width(), 20)
 	sep := "\n\n"
 	if m.isCompactDensity() {
 		sep = "\n"
 	}
 
-	for msgIdx, msg := range m.chatMessages {
-		// Record the starting line for this message
-		m.chatMessageStartLines = append(m.chatMessageStartLines, len(m.chatRenderedLines))
-
-		var rendered string
-		switch msg.Role {
-		case "user":
-			rendered = m.renderUserMessage(msg.Content)
-		case "assistant":
-			rendered = m.renderAssistantMessage(msg.Content)
-		case "tool":
-			rendered = m.renderToolMessage(msg)
-		case "system":
-			rendered = m.renderSystemMessage(msg)
-		default:
-			rendered = msg.Content
-		}
-
-		// Strip the border styling to get clean lines
-		lines := extractSearchContentLines(rendered, maxWidth)
-		m.chatRenderedLines = append(m.chatRenderedLines, lines...)
-
-		// Add separator between messages
-		if msgIdx < len(m.chatMessages)-1 {
-			sepLines := strings.Split(sep, "\n")
-			m.chatRenderedLines = append(m.chatRenderedLines, sepLines...)
+	lines := make([]string, 0, countLines(m.transcriptContent))
+	for i, block := range m.transcriptBlocks {
+		clean := extractSearchContentLines(block, max(m.chatViewport.Width(), 20))
+		lines = append(lines, clean...)
+		if i < len(m.transcriptBlocks)-1 {
+			lines = append(lines, strings.Split(sep, "\n")...)
 		}
 	}
+	m.chatRenderedLines = lines
+	m.chatMessageStartLines = append([]int(nil), m.transcriptMessageStartLine...)
 }
 
 // extractSearchContentLines extracts clean text lines from a rendered block.

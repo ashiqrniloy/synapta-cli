@@ -258,7 +258,7 @@ func (m *CodeAgentModel) handleChatStreamChunk(msg chatStreamChunkMsg) (tea.Mode
 		m.activeAssistantIdx = m.appendChatMessage(ChatMessage{Role: "assistant", Content: ""})
 	}
 	m.chatMessages[m.activeAssistantIdx].Content += msg.Text
-	m.refreshChatViewport()
+	m.refreshChatViewportIncremental(m.activeAssistantIdx)
 	return m, waitForStreamMsg(m.streamCh)
 }
 
@@ -277,22 +277,27 @@ func (m *CodeAgentModel) handleAssistantToolCalls(msg assistantToolCallsMsg) (te
 
 func (m *CodeAgentModel) handleToolEvent(msg toolEventMsg) (tea.Model, tea.Cmd) {
 	e := msg.Event
+	refreshFrom := -1
 	switch e.Type {
 	case core.ToolEventStart:
 		m.activeAssistantIdx = -1
 		idx := m.appendChatMessage(ChatMessage{Role: "tool", ToolCallID: e.CallID, ToolName: e.ToolName, ToolPath: e.Path, ToolCommand: e.Command, ToolLibrary: e.Library, ToolVersion: e.Version, ToolQuery: e.Query, ToolState: "running", Content: "", IsPartial: true, ToolStartedAt: time.Now()})
 		m.activeToolIndices[e.CallID] = idx
 		m.toolExpanded[e.CallID] = false
-		m.refreshChatViewport()
+		m.refreshChatViewportIncremental(idx)
 		return m, tea.Batch(waitForStreamMsg(m.streamCh), toolTickCmd())
 	case core.ToolEventUpdate:
 		if idx, ok := m.activeToolIndices[e.CallID]; ok && idx >= 0 && idx < len(m.chatMessages) {
 			m.chatMessages[idx].Content = e.Output
 			m.chatMessages[idx].IsPartial = true
 			m.chatMessages[idx].ToolState = "running"
+			refreshFrom = idx
 		}
 	case core.ToolEventEnd:
 		if idx, ok := m.activeToolIndices[e.CallID]; ok && idx >= 0 && idx < len(m.chatMessages) {
+			if m.chatMessages[idx].ToolCallID == e.CallID {
+				m.invalidateTranscriptFrom(idx)
+			}
 			if strings.TrimSpace(e.Output) != "" {
 				m.chatMessages[idx].Content = e.Output
 			}
@@ -332,9 +337,14 @@ func (m *CodeAgentModel) handleToolEvent(msg toolEventMsg) (tea.Model, tea.Cmd) 
 				}
 			}
 			delete(m.activeToolIndices, e.CallID)
+			refreshFrom = idx
 		}
 	}
-	m.refreshChatViewport()
+	if refreshFrom >= 0 {
+		m.refreshChatViewportIncremental(refreshFrom)
+	} else {
+		m.refreshChatViewport()
+	}
 	return m, waitForStreamMsg(m.streamCh)
 }
 
@@ -560,11 +570,11 @@ func (m *CodeAgentModel) handleBashCommandDone(msg bashCommandDoneMsg) (tea.Mode
 	} else {
 		m.finalizeWorkingSystemMessage("[Shell] ✓ Command finished", "done")
 	}
-	m.appendChatMessage(ChatMessage{Role: "tool", ToolName: "shell", ToolCommand: msg.Command, ToolState: state, Content: msg.Output, ToolStartedAt: msg.StartedAt, ToolEndedAt: msg.EndedAt})
+	idx := m.appendChatMessage(ChatMessage{Role: "tool", ToolName: "shell", ToolCommand: msg.Command, ToolState: state, Content: msg.Output, ToolStartedAt: msg.StartedAt, ToolEndedAt: msg.EndedAt})
 	if msg.IsCD && msg.Err == nil {
 		m.appendSystemMessage("[Shell] cwd: "+m.currentCwd, "info")
 	}
-	m.refreshChatViewport()
+	m.refreshChatViewportIncremental(idx)
 	return m, nil
 }
 

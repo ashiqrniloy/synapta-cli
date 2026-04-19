@@ -119,6 +119,15 @@ type CodeAgentModel struct {
 	chatRenderedLines          []string
 	chatMessageStartLines      []int
 	sessionSearchHighlightLine int
+	transcriptBlocks           []string
+	transcriptBlockKeys        []string
+	transcriptBlockOffsets     []int
+	transcriptMessageStartLine []int
+	transcriptContent          string
+	transcriptDirtyFrom        int
+	transcriptCacheWidth       int
+	transcriptCacheCompact     bool
+	transcriptCacheSep         string
 	lastPromptHash             string
 	lastPromptFingerprint      core.PromptFingerprint
 	likelyPromptCacheHit       bool
@@ -126,7 +135,7 @@ type CodeAgentModel struct {
 	stablePrefixChangeCount    int
 	cancelStream               context.CancelFunc
 	lifecycleCtx               context.Context
-	cancelLifecycle           context.CancelFunc
+	cancelLifecycle            context.CancelFunc
 	pendingUserMessage         string
 	availableExtensions        []core.Extension
 
@@ -203,6 +212,7 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 		currentCwd:            cwd,
 		currentGitBranch:      detectGitBranch(cwd),
 		layoutMode:            LayoutModeStacked,
+		transcriptDirtyFrom:   -1,
 	}
 
 	if cfg.Provider.Default != "" && cfg.Provider.Model != "" {

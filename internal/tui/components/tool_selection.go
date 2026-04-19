@@ -73,6 +73,7 @@ func (m *CodeAgentModel) stepSelectedTool(delta int) bool {
 	}
 	m.selectedToolCallID = newID
 	m.chatAutoScroll = false
+	m.invalidateTranscriptCacheAll()
 	m.refreshChatViewport()
 	return true
 }

@@ -82,6 +82,7 @@ func (m *CodeAgentModel) handleGeneralKeyPress(msg tea.KeyPressMsg, keyStr, quit
 	if keyStr == "ctrl+o" {
 		if id, ok := m.selectedOrLastToolCallID(); ok {
 			m.toolExpanded[id] = !m.toolExpanded[id]
+			m.invalidateTranscriptForToolCallID(id)
 			m.refreshChatViewport()
 		}
 		return true, nil

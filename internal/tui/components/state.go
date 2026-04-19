@@ -198,8 +198,48 @@ func (m *CodeAgentModel) recalculateLayout() {
 	m.chatViewport.SetHeight(chatH)
 }
 
+func (m *CodeAgentModel) invalidateTranscriptFrom(index int) {
+	if index < 0 {
+		index = 0
+	}
+	if m.transcriptDirtyFrom < 0 || index < m.transcriptDirtyFrom {
+		m.transcriptDirtyFrom = index
+	}
+}
+
+func (m *CodeAgentModel) invalidateTranscriptCacheAll() {
+	m.transcriptDirtyFrom = 0
+}
+
+func (m *CodeAgentModel) invalidateTranscriptForToolCallID(callID string) {
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		m.invalidateTranscriptCacheAll()
+		return
+	}
+	for i, msg := range m.chatMessages {
+		if msg.Role == "tool" && strings.TrimSpace(msg.ToolCallID) == callID {
+			m.invalidateTranscriptFrom(i)
+			return
+		}
+	}
+	m.invalidateTranscriptCacheAll()
+}
+
 func (m *CodeAgentModel) refreshChatViewport() {
 	m.recalculateLayout()
+	m.chatViewport.SetContent(m.renderChatTranscript())
+	if m.chatAutoScroll {
+		m.chatViewport.GotoBottom()
+	}
+}
+
+func (m *CodeAgentModel) refreshChatViewportIncremental(from int) {
+	m.recalculateLayout()
+	if from < 0 {
+		from = 0
+	}
+	m.invalidateTranscriptFrom(from)
 	m.chatViewport.SetContent(m.renderChatTranscript())
 	if m.chatAutoScroll {
 		m.chatViewport.GotoBottom()
@@ -226,6 +266,7 @@ func (m *CodeAgentModel) appendChatMessage(msg ChatMessage) int {
 		m.chatMessages = append(m.chatMessages, msg)
 	}
 	m.chatAutoScroll = true
+	m.invalidateTranscriptFrom(insertAt)
 	return insertAt
 }
 
@@ -617,5 +658,14 @@ func (m *CodeAgentModel) rebuildTranscriptFromHistory() {
 	m.chatMessages = messages
 	m.activeAssistantIdx = -1
 	m.activeToolIndices = map[string]int{}
+	m.transcriptBlocks = nil
+	m.transcriptBlockKeys = nil
+	m.transcriptBlockOffsets = nil
+	m.transcriptMessageStartLine = nil
+	m.transcriptContent = ""
+	m.transcriptDirtyFrom = 0
+	m.transcriptCacheWidth = 0
+	m.transcriptCacheCompact = false
+	m.transcriptCacheSep = ""
 	m.refreshChatViewport()
 }
