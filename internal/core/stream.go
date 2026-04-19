@@ -121,14 +121,16 @@ func (s *ChatService) Stream(
 			}
 			parsed, parseErr := ParseToolCall(tc, s.registry)
 			path, command := parsed.Path, parsed.Command
+			library, version, query := parsed.Library, parsed.Version, parsed.Query
 
 			if parseErr == nil {
 				autofillWriteSHA(&parsed, files)
 				path, command = parsed.Path, parsed.Command
+				library, version, query = parsed.Library, parsed.Version, parsed.Query
 			}
 
 			if onToolEvent != nil {
-				_ = onToolEvent(ToolEvent{Type: ToolEventStart, CallID: callID, ToolName: tc.Function.Name, Path: path, Command: command})
+				_ = onToolEvent(ToolEvent{Type: ToolEventStart, CallID: callID, ToolName: tc.Function.Name, Path: path, Command: command, Library: library, Version: version, Query: query})
 			}
 
 			var (
@@ -159,6 +161,9 @@ func (s *ChatService) Stream(
 					IsError:        execErr != nil,
 					Path:           path,
 					Command:        command,
+					Library:        library,
+					Version:        version,
+					Query:          query,
 				})
 			}
 		}

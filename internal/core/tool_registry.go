@@ -243,6 +243,47 @@ func (r *ToolRegistry) RegisterBuiltins(toolset *tools.ToolSet) error {
 		}
 	}
 
+	if toolset.CheckDoc != nil {
+		if err := r.Register(ToolSpec{
+			Name:                 toolset.CheckDoc.Name(),
+			Description:          toolset.CheckDoc.Description(),
+			Parameters:           tools.CheckDocJSONSchema(),
+			Source:               ToolSourceBuiltin,
+			Capabilities:         []string{"documentation", "process", "read-only"},
+			SafeWorkingDirectory: SafeWorkingDirectoryScope{Mode: "workspace"},
+			Decoder: func(raw string) (any, error) {
+				if strings.TrimSpace(raw) == "" {
+					raw = "{}"
+				}
+				var in tools.CheckDocInput
+				if err := json.Unmarshal([]byte(raw), &in); err != nil {
+					return nil, fmt.Errorf("invalid check-doc arguments: %w", err)
+				}
+				return in, nil
+			},
+			Metadata: func(decoded any) tools.ToolMetadata {
+				in, ok := decoded.(tools.CheckDocInput)
+				if !ok {
+					return tools.ToolMetadata{}
+				}
+				return tools.ToolMetadata{
+					Library: strings.TrimSpace(in.LibraryName),
+					Version: strings.TrimSpace(in.Version),
+					Query:   strings.TrimSpace(in.Query),
+				}
+			},
+			Executor: func(ctx context.Context, input any, _ tools.StreamUpdate) (any, error) {
+				in, ok := input.(tools.CheckDocInput)
+				if !ok {
+					return nil, fmt.Errorf("invalid check-doc arguments: expected CheckDocInput")
+				}
+				return toolset.CheckDoc.Execute(ctx, in)
+			},
+		}); err != nil {
+			return err
+		}
+	}
+
 	if toolset.Bash != nil {
 		if err := r.Register(ToolSpec{
 			Name:                 toolset.Bash.Name(),
@@ -410,6 +451,15 @@ func (r *ToolRegistry) registerManifestFile(path string, source string, cwd stri
 			}
 			if v, ok := m["command"].(string); ok {
 				meta.Command = strings.TrimSpace(v)
+			}
+			if v, ok := m["library_name"].(string); ok {
+				meta.Library = strings.TrimSpace(v)
+			}
+			if v, ok := m["version"].(string); ok {
+				meta.Version = strings.TrimSpace(v)
+			}
+			if v, ok := m["query"].(string); ok {
+				meta.Query = strings.TrimSpace(v)
 			}
 			return meta
 		},

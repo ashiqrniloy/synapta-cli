@@ -111,3 +111,45 @@ func ShellJSONSchema() map[string]any {
 		"required": []string{"command"},
 	}
 }
+
+func CheckDocJSONSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"method": map[string]any{
+				"type":        "string",
+				"description": "Documentation lookup method. Supported: context7.",
+				"enum":        []string{"context7"},
+			},
+			"library_name": map[string]any{
+				"type":        "string",
+				"description": "Library or framework name to resolve with ctx7 library (e.g. react, nextjs, prisma).",
+			},
+			"library_id": map[string]any{
+				"type":        "string",
+				"description": "Optional direct Context7 library ID (format: /org/project or /org/project/version). If set, check-doc skips ctx7 library lookup and directly calls ctx7 docs.",
+			},
+			"version": map[string]any{
+				"type":        "string",
+				"description": "Optional version hint. If provided, check-doc tries to choose a matching version ID from ctx7 library results.",
+			},
+			"query": map[string]any{
+				"type":        "string",
+				"description": "Specific natural-language question to ask ctx7 docs. Be task-oriented for best results.",
+			},
+			"timeout": map[string]any{
+				"type":        "number",
+				"description": "Optional timeout in seconds for ctx7 commands.",
+			},
+			"output_json": map[string]any{
+				"type":        "boolean",
+				"description": "When true, request JSON output from ctx7 commands (--json).",
+			},
+		},
+		"required": []string{"query"},
+		"anyOf": []map[string]any{
+			{"required": []string{"library_name"}},
+			{"required": []string{"library_id"}},
+		},
+	}
+}

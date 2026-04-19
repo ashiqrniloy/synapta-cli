@@ -27,6 +27,9 @@ type ToolEvent struct {
 	IsPartial      bool
 	Path           string
 	Command        string
+	Library        string
+	Version        string
+	Query          string
 	ContextContent string
 }
 
