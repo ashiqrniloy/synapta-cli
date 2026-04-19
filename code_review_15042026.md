@@ -461,7 +461,7 @@ More consistent networking behavior and less duplicated transport configuration.
 
 ---
 
-### 4.4 Repeated JSON marshal/unmarshal in hot paths can be reduced
+### 4.4 Repeated JSON marshal/unmarshal in hot paths can be reduced :DONE
 **Issue**  
 Tool events and message transformation repeatedly marshal/unmarshal JSON in streaming paths and UI state extraction.
 
@@ -480,7 +480,7 @@ Less CPU churn in chat loops and cleaner code structure.
 
 ---
 
-### 4.5 UI model likely does more full-state rendering/derivation than necessary
+### 4.5 UI model likely does more full-state rendering/derivation than necessary : DONE
 **Issue**  
 The TUI model in `/home/arniloy/synapta-cli/internal/tui/components/codeagent.go` and related files holds large amounts of derived state, with many string builders and repeated transformations. As the transcript grows, this risks degraded interaction smoothness.
 
@@ -635,7 +635,7 @@ Extensions become a proper ecosystem surface instead of only shell command launc
 
 ---
 
-### 5.6 Expose skill loading as a reusable subsystem with policy hooks
+### 5.6 Expose skill loading as a reusable subsystem with policy hooks : DONE
 **Issue**  
 Skills are loaded and formatted in a relatively fixed way from default directories and optional paths.
 
