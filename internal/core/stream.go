@@ -120,17 +120,35 @@ func (s *ChatService) Stream(
 				callID = fmt.Sprintf("tool_%d_%s", round, tc.Function.Name)
 			}
 			parsed, parseErr := ParseToolCall(tc, s.registry)
-			path, command := parsed.Path, parsed.Command
-			library, version, query := parsed.Library, parsed.Version, parsed.Query
+			invocation := parsed.Invocation
+			if strings.TrimSpace(invocation.Name) == "" {
+				invocation.Name = strings.TrimSpace(parsed.Name)
+			}
+			path, command := strings.TrimSpace(invocation.Path), strings.TrimSpace(invocation.Command)
+			library, version, query := strings.TrimSpace(invocation.Library), strings.TrimSpace(invocation.Version), strings.TrimSpace(invocation.Query)
 
 			if parseErr == nil {
 				autofillWriteSHA(&parsed, files)
-				path, command = parsed.Path, parsed.Command
-				library, version, query = parsed.Library, parsed.Version, parsed.Query
+				invocation = parsed.Invocation
+				if strings.TrimSpace(invocation.Name) == "" {
+					invocation.Name = strings.TrimSpace(parsed.Name)
+				}
+				path, command = strings.TrimSpace(invocation.Path), strings.TrimSpace(invocation.Command)
+				library, version, query = strings.TrimSpace(invocation.Library), strings.TrimSpace(invocation.Version), strings.TrimSpace(invocation.Query)
 			}
 
 			if onToolEvent != nil {
-				_ = onToolEvent(ToolEvent{Type: ToolEventStart, CallID: callID, ToolName: tc.Function.Name, Path: path, Command: command, Library: library, Version: version, Query: query})
+				_ = onToolEvent(ToolEvent{
+					Type:       ToolEventStart,
+					CallID:     callID,
+					ToolName:   tc.Function.Name,
+					Path:       path,
+					Command:    command,
+					Library:    library,
+					Version:    version,
+					Query:      query,
+					Invocation: invocation,
+				})
 			}
 
 			var (
@@ -151,12 +169,13 @@ func (s *ChatService) Stream(
 			messages = append(messages, llm.Message{Role: llm.RoleTool, ToolCallID: callID, Name: tc.Function.Name, Content: contextPayload})
 
 			if onToolEvent != nil {
-				output := toolResultText(toolResult)
+				summary := summarizeToolResult(toolResult)
 				_ = onToolEvent(ToolEvent{
 					Type:           ToolEventEnd,
 					CallID:         callID,
 					ToolName:       tc.Function.Name,
-					Output:         output,
+					Output:         summary.Text,
+					ResultSummary:  summary,
 					ContextContent: contextPayload,
 					IsError:        execErr != nil,
 					Path:           path,
@@ -164,6 +183,7 @@ func (s *ChatService) Stream(
 					Library:        library,
 					Version:        version,
 					Query:          query,
+					Invocation:     invocation,
 				})
 			}
 		}
@@ -187,6 +207,9 @@ func autofillWriteSHA(parsed *ParsedToolCall, files *fileStateTracker) {
 	}
 	if strings.TrimSpace(parsed.Path) == "" {
 		parsed.Path = strings.TrimSpace(in.Path)
+	}
+	if strings.TrimSpace(parsed.Invocation.Path) == "" {
+		parsed.Invocation.Path = strings.TrimSpace(in.Path)
 	}
 }
 

@@ -281,7 +281,7 @@ func (m *CodeAgentModel) handleToolEvent(msg toolEventMsg) (tea.Model, tea.Cmd) 
 	switch e.Type {
 	case core.ToolEventStart:
 		m.activeAssistantIdx = -1
-		idx := m.appendChatMessage(ChatMessage{Role: "tool", ToolCallID: e.CallID, ToolName: e.ToolName, ToolPath: e.Path, ToolCommand: e.Command, ToolLibrary: e.Library, ToolVersion: e.Version, ToolQuery: e.Query, ToolState: "running", Content: "", IsPartial: true, ToolStartedAt: time.Now()})
+		idx := m.appendChatMessage(ChatMessage{Role: "tool", ToolCallID: e.CallID, ToolName: e.ToolName, ToolPath: e.Path, ToolCommand: e.Command, ToolLibrary: e.Library, ToolVersion: e.Version, ToolQuery: e.Query, ToolState: "running", Content: "", IsPartial: true, ToolStartedAt: time.Now(), ToolInvocation: e.Invocation})
 		m.activeToolIndices[e.CallID] = idx
 		m.toolExpanded[e.CallID] = false
 		m.refreshChatViewportIncremental(idx)
@@ -316,6 +316,10 @@ func (m *CodeAgentModel) handleToolEvent(msg toolEventMsg) (tea.Model, tea.Cmd) 
 			if strings.TrimSpace(e.Query) != "" {
 				m.chatMessages[idx].ToolQuery = e.Query
 			}
+			if strings.TrimSpace(e.Invocation.Name) != "" {
+				m.chatMessages[idx].ToolInvocation = e.Invocation
+			}
+			m.chatMessages[idx].ToolResult = e.ResultSummary
 			m.chatMessages[idx].IsPartial = false
 			m.chatMessages[idx].ToolEndedAt = time.Now()
 			if e.IsError {
@@ -329,6 +333,15 @@ func (m *CodeAgentModel) handleToolEvent(msg toolEventMsg) (tea.Model, tea.Cmd) 
 				toolContent = strings.TrimSpace(formatToolContextContent(e))
 			}
 			if toolContent != "" {
+				callID := strings.TrimSpace(e.CallID)
+				if callID != "" {
+					meta := normalizeInvocationMeta(e.Invocation)
+					if meta.Name == "" {
+						meta.Name = strings.TrimSpace(e.ToolName)
+					}
+					m.toolInvocationByCallID[callID] = meta
+					m.toolResultByCallID[callID] = e.ResultSummary
+				}
 				toolMsg := llm.Message{Role: "tool", ToolCallID: e.CallID, Name: e.ToolName, Content: toolContent}
 				m.conversationHistory = append(m.conversationHistory, toolMsg)
 				m.markContextEntriesDirty()
@@ -390,6 +403,12 @@ func (m *CodeAgentModel) flushStreamState(savePartialText bool) {
 	m.streamChunkCount = 0
 	m.streamCharCount = 0
 	m.activeToolIndices = map[string]int{}
+	if m.toolInvocationByCallID == nil {
+		m.toolInvocationByCallID = map[string]core.ToolInvocationMeta{}
+	}
+	if m.toolResultByCallID == nil {
+		m.toolResultByCallID = map[string]core.ToolResultSummary{}
+	}
 	m.isWorking = false
 	m.workingFrame = 0
 }

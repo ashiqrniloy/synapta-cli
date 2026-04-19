@@ -31,6 +31,26 @@ type ToolEvent struct {
 	Version        string
 	Query          string
 	ContextContent string
+	Invocation     ToolInvocationMeta
+	ResultSummary  ToolResultSummary
+}
+
+// ToolInvocationMeta carries normalized tool invocation details extracted once
+// from the tool call arguments.
+type ToolInvocationMeta struct {
+	Name    string
+	Path    string
+	Command string
+	Library string
+	Version string
+	Query   string
+}
+
+// ToolResultSummary carries structured tool output details so callers can reuse
+// parsed output without repeatedly decoding raw JSON payloads.
+type ToolResultSummary struct {
+	Text  string
+	Error string
 }
 
 // ChatService provides chat + tool-calling runtime behaviour.

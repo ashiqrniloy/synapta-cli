@@ -58,33 +58,35 @@ type CodeAgentModel struct {
 	selectedContextWindow int
 	providerBalance       string
 
-	chatMessages          []ChatMessage
-	isWorking             bool
-	activeAssistantIdx    int
-	activeSystemStatusIdx int
-	activeToolIndices     map[string]int
-	toolExpanded          map[string]bool
-	selectedToolCallID    string
-	streamCh              <-chan tea.Msg
-	authCh                <-chan tea.Msg
-	chatService           *core.ChatService
-	systemPromptStore     *core.SystemPromptStore
-	contextManager        *core.ContextManager
-	chatController        *application.ChatController
-	sessionService        *application.SessionService
-	providerService       *application.ProviderService
-	extensionService      *application.ExtensionService
-	workspaceService      *application.WorkspaceService
-	sessionStore          *core.SessionStore
-	agentDir              string
-	conversationHistory   []llm.Message
-	currentAssistantText  strings.Builder
-	chatViewport          viewport.Model
-	chatAutoScroll        bool
-	streamStartedAt       time.Time
-	firstChunkAt          time.Time
-	streamChunkCount      int
-	streamCharCount       int
+	chatMessages           []ChatMessage
+	isWorking              bool
+	activeAssistantIdx     int
+	activeSystemStatusIdx  int
+	activeToolIndices      map[string]int
+	toolExpanded           map[string]bool
+	selectedToolCallID     string
+	streamCh               <-chan tea.Msg
+	authCh                 <-chan tea.Msg
+	chatService            *core.ChatService
+	systemPromptStore      *core.SystemPromptStore
+	contextManager         *core.ContextManager
+	chatController         *application.ChatController
+	sessionService         *application.SessionService
+	providerService        *application.ProviderService
+	extensionService       *application.ExtensionService
+	workspaceService       *application.WorkspaceService
+	sessionStore           *core.SessionStore
+	agentDir               string
+	conversationHistory    []llm.Message
+	toolInvocationByCallID map[string]core.ToolInvocationMeta
+	toolResultByCallID     map[string]core.ToolResultSummary
+	currentAssistantText   strings.Builder
+	chatViewport           viewport.Model
+	chatAutoScroll         bool
+	streamStartedAt        time.Time
+	firstChunkAt           time.Time
+	streamChunkCount       int
+	streamCharCount        int
 
 	inputMode         InputMode
 	currentCwd        string
@@ -179,40 +181,42 @@ func NewCodeAgentModel(cfg *config.AppConfig) *CodeAgentModel {
 	extensionService := application.NewExtensionService()
 	workspaceService := application.NewWorkspaceService()
 	model := &CodeAgentModel{
-		styles:                styles,
-		ta:                    buildTextarea(t, cfg),
-		borderColor:           t.Border,
-		cfg:                   cfg,
-		picker:                NewCommandPicker(styles),
-		skillPicker:           NewSkillPicker(styles),
-		fileBrowser:           NewFileBrowser(styles),
-		sessionSearch:         NewSessionSearchPicker(styles),
-		skillCatalogCache:     skillCatalogCache,
-		authStorage:           authStorage,
-		chatService:           chatService,
-		systemPromptStore:     systemPromptStore,
-		contextManager:        contextManager,
-		chatController:        chatController,
-		sessionService:        sessionService,
-		providerService:       providerService,
-		extensionService:      extensionService,
-		workspaceService:      workspaceService,
-		sessionStore:          sessionStore,
-		agentDir:              agentDir,
-		conversationHistory:   conversationHistory,
-		activeAssistantIdx:    -1,
-		activeSystemStatusIdx: -1,
-		lifecycleCtx:          lifecycleCtx,
-		cancelLifecycle:       cancelLifecycle,
-		activeToolIndices:     map[string]int{},
-		toolExpanded:          map[string]bool{},
-		chatViewport:          vp,
-		chatAutoScroll:        true,
-		inputMode:             InputModeChat,
-		currentCwd:            cwd,
-		currentGitBranch:      detectGitBranch(cwd),
-		layoutMode:            LayoutModeStacked,
-		transcriptDirtyFrom:   -1,
+		styles:                 styles,
+		ta:                     buildTextarea(t, cfg),
+		borderColor:            t.Border,
+		cfg:                    cfg,
+		picker:                 NewCommandPicker(styles),
+		skillPicker:            NewSkillPicker(styles),
+		fileBrowser:            NewFileBrowser(styles),
+		sessionSearch:          NewSessionSearchPicker(styles),
+		skillCatalogCache:      skillCatalogCache,
+		authStorage:            authStorage,
+		chatService:            chatService,
+		systemPromptStore:      systemPromptStore,
+		contextManager:         contextManager,
+		chatController:         chatController,
+		sessionService:         sessionService,
+		providerService:        providerService,
+		extensionService:       extensionService,
+		workspaceService:       workspaceService,
+		sessionStore:           sessionStore,
+		agentDir:               agentDir,
+		conversationHistory:    conversationHistory,
+		activeAssistantIdx:     -1,
+		activeSystemStatusIdx:  -1,
+		lifecycleCtx:           lifecycleCtx,
+		cancelLifecycle:        cancelLifecycle,
+		toolInvocationByCallID: map[string]core.ToolInvocationMeta{},
+		toolResultByCallID:     map[string]core.ToolResultSummary{},
+		activeToolIndices:      map[string]int{},
+		toolExpanded:           map[string]bool{},
+		chatViewport:           vp,
+		chatAutoScroll:         true,
+		inputMode:              InputModeChat,
+		currentCwd:             cwd,
+		currentGitBranch:       detectGitBranch(cwd),
+		layoutMode:             LayoutModeStacked,
+		transcriptDirtyFrom:    -1,
 	}
 
 	if cfg.Provider.Default != "" && cfg.Provider.Model != "" {

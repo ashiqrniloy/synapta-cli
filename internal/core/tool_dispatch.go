@@ -67,3 +67,26 @@ func toolResultText(v any) string {
 		return string(data)
 	}
 }
+
+func summarizeToolResult(v any) ToolResultSummary {
+	summary := ToolResultSummary{Text: toolResultText(v)}
+	switch r := v.(type) {
+	case map[string]any:
+		if errText, ok := r["error"].(string); ok {
+			summary.Error = strings.TrimSpace(errText)
+		}
+	case map[string]string:
+		summary.Error = strings.TrimSpace(r["error"])
+	}
+	if summary.Error == "" {
+		if trimmed := strings.TrimSpace(summary.Text); strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(trimmed), &payload); err == nil {
+				if errText, ok := payload["error"].(string); ok {
+					summary.Error = strings.TrimSpace(errText)
+				}
+			}
+		}
+	}
+	return summary
+}

@@ -581,33 +581,43 @@ func toolResultPlainText(result tools.Result) string {
 	return strings.TrimSpace(b.String())
 }
 
-type toolInvocationMeta struct {
-	Name    string
-	Path    string
-	Command string
-	Library string
-	Version string
-	Query   string
+type toolInvocationMeta = core.ToolInvocationMeta
+
+func normalizeInvocationMeta(meta core.ToolInvocationMeta) core.ToolInvocationMeta {
+	meta.Name = strings.TrimSpace(meta.Name)
+	meta.Path = strings.TrimSpace(meta.Path)
+	meta.Command = strings.TrimSpace(meta.Command)
+	meta.Library = strings.TrimSpace(meta.Library)
+	meta.Version = strings.TrimSpace(meta.Version)
+	meta.Query = strings.TrimSpace(meta.Query)
+	return meta
 }
 
 func parseToolInvocationMeta(tc llm.ToolCall) toolInvocationMeta {
 	parsed, err := core.ParseToolCall(tc, nil)
 	if err != nil {
-		return toolInvocationMeta{Name: strings.TrimSpace(tc.Function.Name)}
+		return normalizeInvocationMeta(core.ToolInvocationMeta{Name: strings.TrimSpace(tc.Function.Name)})
 	}
-	return toolInvocationMeta{
-		Name:    strings.TrimSpace(parsed.Name),
-		Path:    strings.TrimSpace(parsed.Path),
-		Command: strings.TrimSpace(parsed.Command),
-		Library: strings.TrimSpace(parsed.Library),
-		Version: strings.TrimSpace(parsed.Version),
-		Query:   strings.TrimSpace(parsed.Query),
+	meta := normalizeInvocationMeta(parsed.Invocation)
+	if meta.Name == "" {
+		meta.Name = strings.TrimSpace(parsed.Name)
 	}
+	return meta
 }
 
-func buildToolInvocationMetaByCallID(history []llm.Message) map[string]toolInvocationMeta {
+func (m *CodeAgentModel) toolInvocationMetaByCallID() map[string]toolInvocationMeta {
 	metaByCallID := map[string]toolInvocationMeta{}
-	for _, msg := range history {
+	if m.toolInvocationByCallID == nil {
+		m.toolInvocationByCallID = map[string]core.ToolInvocationMeta{}
+	}
+	for callID, meta := range m.toolInvocationByCallID {
+		callID = strings.TrimSpace(callID)
+		if callID == "" {
+			continue
+		}
+		metaByCallID[callID] = normalizeInvocationMeta(meta)
+	}
+	for _, msg := range m.conversationHistory {
 		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
 			continue
 		}
@@ -616,14 +626,24 @@ func buildToolInvocationMetaByCallID(history []llm.Message) map[string]toolInvoc
 			if callID == "" {
 				continue
 			}
-			metaByCallID[callID] = parseToolInvocationMeta(tc)
+			if _, ok := metaByCallID[callID]; !ok {
+				metaByCallID[callID] = parseToolInvocationMeta(tc)
+			}
+			m.toolInvocationByCallID[callID] = metaByCallID[callID]
 		}
 	}
 	return metaByCallID
 }
 
-func parseToolContentForTranscript(raw string) string {
-	content := strings.TrimSpace(raw)
+func parseToolContentForTranscript(msg llm.Message, summary core.ToolResultSummary) string {
+	if text := strings.TrimSpace(summary.Error); text != "" {
+		return text
+	}
+	if text := strings.TrimSpace(summary.Text); text != "" {
+		return text
+	}
+
+	content := strings.TrimSpace(msg.Content)
 	if content == "" {
 		return ""
 	}
@@ -647,8 +667,15 @@ func parseToolContentForTranscript(raw string) string {
 }
 
 func (m *CodeAgentModel) rebuildTranscriptFromHistory() {
+	if m.toolInvocationByCallID == nil {
+		m.toolInvocationByCallID = map[string]core.ToolInvocationMeta{}
+	}
+	if m.toolResultByCallID == nil {
+		m.toolResultByCallID = map[string]core.ToolResultSummary{}
+	}
+
 	messages := make([]ChatMessage, 0, len(m.conversationHistory))
-	toolMetaByCallID := buildToolInvocationMetaByCallID(m.conversationHistory)
+	toolMetaByCallID := m.toolInvocationMetaByCallID()
 
 	for _, msg := range m.conversationHistory {
 		switch msg.Role {
@@ -659,26 +686,40 @@ func (m *CodeAgentModel) rebuildTranscriptFromHistory() {
 			}
 			messages = append(messages, ChatMessage{Role: string(msg.Role), Content: content})
 		case "tool":
-			content := parseToolContentForTranscript(msg.Content)
+			callID := strings.TrimSpace(msg.ToolCallID)
+			summary := m.toolResultByCallID[callID]
+			content := parseToolContentForTranscript(msg, summary)
 			if strings.TrimSpace(content) == "" {
 				continue
 			}
-			meta := toolMetaByCallID[strings.TrimSpace(msg.ToolCallID)]
+			meta := normalizeInvocationMeta(toolMetaByCallID[callID])
+			if meta.Name == "" {
+				meta.Name = strings.TrimSpace(msg.Name)
+			}
+			if callID != "" {
+				m.toolInvocationByCallID[callID] = meta
+				if strings.TrimSpace(summary.Text) == "" {
+					summary.Text = strings.TrimSpace(content)
+				}
+				m.toolResultByCallID[callID] = summary
+			}
 			toolName := strings.TrimSpace(msg.Name)
 			if toolName == "" {
 				toolName = strings.TrimSpace(meta.Name)
 			}
 			messages = append(messages, ChatMessage{
-				Role:        "tool",
-				ToolCallID:  msg.ToolCallID,
-				ToolName:    toolName,
-				ToolPath:    meta.Path,
-				ToolCommand: meta.Command,
-				ToolLibrary: meta.Library,
-				ToolVersion: meta.Version,
-				ToolQuery:   meta.Query,
-				ToolState:   "done",
-				Content:     content,
+				Role:           "tool",
+				ToolCallID:     msg.ToolCallID,
+				ToolName:       toolName,
+				ToolPath:       meta.Path,
+				ToolCommand:    meta.Command,
+				ToolLibrary:    meta.Library,
+				ToolVersion:    meta.Version,
+				ToolQuery:      meta.Query,
+				ToolState:      "done",
+				ToolInvocation: meta,
+				ToolResult:     summary,
+				Content:        content,
 			})
 		}
 	}

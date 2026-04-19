@@ -67,7 +67,7 @@ func (m *CodeAgentModel) buildContextEntries() []ContextEntry {
 	if m.sessionStore != nil {
 		timestamps = m.sessionStore.ContextMessageTimestamps()
 	}
-	toolMetaByCallID := buildToolInvocationMetaByCallID(m.conversationHistory)
+	toolMetaByCallID := m.toolInvocationMetaByCallID()
 
 	entries := make([]ContextEntry, 0, len(msgs))
 	order := 0

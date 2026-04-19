@@ -18,6 +18,17 @@ type ParsedToolCall struct {
 	Library      string
 	Version      string
 	Query        string
+	Invocation   ToolInvocationMeta
+}
+
+func (m ToolInvocationMeta) normalize() ToolInvocationMeta {
+	m.Name = strings.TrimSpace(m.Name)
+	m.Path = strings.TrimSpace(m.Path)
+	m.Command = strings.TrimSpace(m.Command)
+	m.Library = strings.TrimSpace(m.Library)
+	m.Version = strings.TrimSpace(m.Version)
+	m.Query = strings.TrimSpace(m.Query)
+	return m
 }
 
 // ParseToolCall decodes a tool call input and extracts lightweight metadata
@@ -40,7 +51,14 @@ func ParseToolCall(tc llm.ToolCall, registry *ToolRegistry) (ParsedToolCall, err
 
 	parsed.RawArguments = raw
 	if registry == nil {
-		parsed.Path, parsed.Command, parsed.Library, parsed.Version, parsed.Query = extractToolCallMeta(raw)
+		parsed.Invocation = extractToolCallMeta(raw)
+		parsed.Invocation.Name = name
+		parsed.Invocation = parsed.Invocation.normalize()
+		parsed.Path = parsed.Invocation.Path
+		parsed.Command = parsed.Invocation.Command
+		parsed.Library = parsed.Invocation.Library
+		parsed.Version = parsed.Invocation.Version
+		parsed.Query = parsed.Invocation.Query
 		return parsed, nil
 	}
 
@@ -50,33 +68,42 @@ func ParseToolCall(tc llm.ToolCall, registry *ToolRegistry) (ParsedToolCall, err
 	}
 	meta := registry.Metadata(name, decoded)
 	parsed.Decoded = decoded
-	parsed.Path = strings.TrimSpace(meta.Path)
-	parsed.Command = strings.TrimSpace(meta.Command)
-	parsed.Library = strings.TrimSpace(meta.Library)
-	parsed.Version = strings.TrimSpace(meta.Version)
-	parsed.Query = strings.TrimSpace(meta.Query)
+	parsed.Invocation = ToolInvocationMeta{
+		Name:    name,
+		Path:    meta.Path,
+		Command: meta.Command,
+		Library: meta.Library,
+		Version: meta.Version,
+		Query:   meta.Query,
+	}.normalize()
+	parsed.Path = parsed.Invocation.Path
+	parsed.Command = parsed.Invocation.Command
+	parsed.Library = parsed.Invocation.Library
+	parsed.Version = parsed.Invocation.Version
+	parsed.Query = parsed.Invocation.Query
 	return parsed, nil
 }
 
-func extractToolCallMeta(raw json.RawMessage) (path string, command string, library string, version string, query string) {
+func extractToolCallMeta(raw json.RawMessage) ToolInvocationMeta {
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return "", "", "", "", ""
+		return ToolInvocationMeta{}
 	}
+	meta := ToolInvocationMeta{}
 	if v, ok := m["path"].(string); ok {
-		path = strings.TrimSpace(v)
+		meta.Path = v
 	}
 	if v, ok := m["command"].(string); ok {
-		command = strings.TrimSpace(v)
+		meta.Command = v
 	}
 	if v, ok := m["library_name"].(string); ok {
-		library = strings.TrimSpace(v)
+		meta.Library = v
 	}
 	if v, ok := m["version"].(string); ok {
-		version = strings.TrimSpace(v)
+		meta.Version = v
 	}
 	if v, ok := m["query"].(string); ok {
-		query = strings.TrimSpace(v)
+		meta.Query = v
 	}
-	return path, command, library, version, query
+	return meta.normalize()
 }

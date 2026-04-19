@@ -2,24 +2,28 @@ package components
 
 import (
 	"time"
+
+	"github.com/ashiqrniloy/synapta-cli/internal/core"
 )
 
 // ChatMessage represents a transcript entry in the chat.
 type ChatMessage struct {
-	Role          string // "user", "assistant", "tool", "system"
-	Content       string
-	SystemKind    string // "info", "working", "done", "error"
-	ToolCallID    string
-	ToolName      string
-	ToolPath      string
-	ToolCommand   string
-	ToolLibrary   string
-	ToolVersion   string
-	ToolQuery     string
-	ToolState     string // "running", "done", "error"
-	IsPartial     bool
-	ToolStartedAt time.Time
-	ToolEndedAt   time.Time
+	Role           string // "user", "assistant", "tool", "system"
+	Content        string
+	SystemKind     string // "info", "working", "done", "error"
+	ToolCallID     string
+	ToolName       string
+	ToolPath       string
+	ToolCommand    string
+	ToolLibrary    string
+	ToolVersion    string
+	ToolQuery      string
+	ToolState      string // "running", "done", "error"
+	IsPartial      bool
+	ToolStartedAt  time.Time
+	ToolEndedAt    time.Time
+	ToolInvocation core.ToolInvocationMeta
+	ToolResult     core.ToolResultSummary
 }
 
 type ContextAction struct {
