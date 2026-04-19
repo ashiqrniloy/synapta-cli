@@ -604,6 +604,15 @@ func (m *CodeAgentModel) renderToolMessage(msg ChatMessage) string {
 	if msg.ToolName == "shell" && strings.TrimSpace(msg.ToolCommand) != "" {
 		meta = append(meta, m.styles.MutedStyle.Render("command: "+msg.ToolCommand))
 	}
+	if strings.TrimSpace(msg.ToolLibrary) != "" {
+		meta = append(meta, m.styles.MutedStyle.Render("library: "+msg.ToolLibrary))
+	}
+	if strings.TrimSpace(msg.ToolVersion) != "" {
+		meta = append(meta, m.styles.MutedStyle.Render("version: "+msg.ToolVersion))
+	}
+	if strings.TrimSpace(msg.ToolQuery) != "" {
+		meta = append(meta, m.styles.MutedStyle.Render("query: "+msg.ToolQuery))
+	}
 
 	body := strings.TrimSpace(msg.Content)
 	if body == "" {

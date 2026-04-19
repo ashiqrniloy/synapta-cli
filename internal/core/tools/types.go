@@ -62,6 +62,9 @@ type Tool interface {
 type ToolMetadata struct {
 	Path    string `json:"path,omitempty"`
 	Command string `json:"command,omitempty"`
+	Library string `json:"library,omitempty"`
+	Version string `json:"version,omitempty"`
+	Query   string `json:"query,omitempty"`
 }
 
 // RuntimeTool extends Tool with schema/decoding/metadata/execution hooks so a
@@ -186,16 +189,19 @@ type BashInput struct {
 
 // ToolSet is the shared core bundle consumed by agents.
 type ToolSet struct {
-	Read  *ReadTool
-	Write *WriteTool
-	Bash  *BashTool
+	Read     *ReadTool
+	CheckDoc *CheckDocTool
+	Write    *WriteTool
+	Bash     *BashTool
 }
 
 func NewToolSet(cwd string) *ToolSet {
+	bash := NewBashTool(cwd)
 	return &ToolSet{
-		Read:  NewReadTool(cwd),
-		Write: NewWriteTool(cwd),
-		Bash:  NewBashTool(cwd),
+		Read:     NewReadTool(cwd),
+		CheckDoc: NewCheckDocTool(bash),
+		Write:    NewWriteTool(cwd),
+		Bash:     bash,
 	}
 }
 

@@ -517,6 +517,9 @@ type toolInvocationMeta struct {
 	Name    string
 	Path    string
 	Command string
+	Library string
+	Version string
+	Query   string
 }
 
 func parseToolInvocationMeta(tc llm.ToolCall) toolInvocationMeta {
@@ -528,6 +531,9 @@ func parseToolInvocationMeta(tc llm.ToolCall) toolInvocationMeta {
 		Name:    strings.TrimSpace(parsed.Name),
 		Path:    strings.TrimSpace(parsed.Path),
 		Command: strings.TrimSpace(parsed.Command),
+		Library: strings.TrimSpace(parsed.Library),
+		Version: strings.TrimSpace(parsed.Version),
+		Query:   strings.TrimSpace(parsed.Query),
 	}
 }
 
@@ -600,6 +606,9 @@ func (m *CodeAgentModel) rebuildTranscriptFromHistory() {
 				ToolName:    toolName,
 				ToolPath:    meta.Path,
 				ToolCommand: meta.Command,
+				ToolLibrary: meta.Library,
+				ToolVersion: meta.Version,
+				ToolQuery:   meta.Query,
 				ToolState:   "done",
 				Content:     content,
 			})

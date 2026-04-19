@@ -15,10 +15,13 @@ type ParsedToolCall struct {
 	Decoded      any
 	Path         string
 	Command      string
+	Library      string
+	Version      string
+	Query        string
 }
 
 // ParseToolCall decodes a tool call input and extracts lightweight metadata
-// (path/command), validating tool existence when a registry is provided.
+// (path/command/library/version/query), validating tool existence when a registry is provided.
 func ParseToolCall(tc llm.ToolCall, registry *ToolRegistry) (ParsedToolCall, error) {
 	name := strings.TrimSpace(tc.Function.Name)
 	parsed := ParsedToolCall{Name: name}
@@ -37,7 +40,7 @@ func ParseToolCall(tc llm.ToolCall, registry *ToolRegistry) (ParsedToolCall, err
 
 	parsed.RawArguments = raw
 	if registry == nil {
-		parsed.Path, parsed.Command = extractToolCallMeta(raw)
+		parsed.Path, parsed.Command, parsed.Library, parsed.Version, parsed.Query = extractToolCallMeta(raw)
 		return parsed, nil
 	}
 
@@ -49,13 +52,16 @@ func ParseToolCall(tc llm.ToolCall, registry *ToolRegistry) (ParsedToolCall, err
 	parsed.Decoded = decoded
 	parsed.Path = strings.TrimSpace(meta.Path)
 	parsed.Command = strings.TrimSpace(meta.Command)
+	parsed.Library = strings.TrimSpace(meta.Library)
+	parsed.Version = strings.TrimSpace(meta.Version)
+	parsed.Query = strings.TrimSpace(meta.Query)
 	return parsed, nil
 }
 
-func extractToolCallMeta(raw json.RawMessage) (path string, command string) {
+func extractToolCallMeta(raw json.RawMessage) (path string, command string, library string, version string, query string) {
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return "", ""
+		return "", "", "", "", ""
 	}
 	if v, ok := m["path"].(string); ok {
 		path = strings.TrimSpace(v)
@@ -63,5 +69,14 @@ func extractToolCallMeta(raw json.RawMessage) (path string, command string) {
 	if v, ok := m["command"].(string); ok {
 		command = strings.TrimSpace(v)
 	}
-	return path, command
+	if v, ok := m["library_name"].(string); ok {
+		library = strings.TrimSpace(v)
+	}
+	if v, ok := m["version"].(string); ok {
+		version = strings.TrimSpace(v)
+	}
+	if v, ok := m["query"].(string); ok {
+		query = strings.TrimSpace(v)
+	}
+	return path, command, library, version, query
 }

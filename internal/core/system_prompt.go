@@ -17,13 +17,15 @@ Available Tools:
 Shell: Execute shell commands
 Read: Inspect file contents
 Write: Create or edit files
+Check-doc: Check documentation before coding. Uses context7 via shell to resolve library IDs and fetch targeted docs.
 
 Guidelines:
 1. Use rg and fd to find relevant files based on the user request
-2. Use Read tool to read or inspect files
-3. Use write tool to create or edit file contents
-4. Be concise in your responses
-5. Show full file paths when using Read and Write tools`
+2. Use Read tool to inspect code and understand what to implement
+3. Use Check-doc to verify relevant documentation (library name, optional version, and query) before writing code
+4. Use Write tool to create or edit file contents
+5. Be concise in your responses
+6. Show full file paths when using Read and Write tools`
 
 // SystemPromptStore manages user-editable per-agent system prompt files.
 type SystemPromptStore struct {

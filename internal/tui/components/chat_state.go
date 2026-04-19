@@ -13,6 +13,9 @@ type ChatMessage struct {
 	ToolName      string
 	ToolPath      string
 	ToolCommand   string
+	ToolLibrary   string
+	ToolVersion   string
+	ToolQuery     string
 	ToolState     string // "running", "done", "error"
 	IsPartial     bool
 	ToolStartedAt time.Time

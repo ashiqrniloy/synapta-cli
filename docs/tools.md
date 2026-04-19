@@ -4,7 +4,7 @@ Synapta uses a **runtime tool registry** so tools are not hardcoded in chat exec
 
 At runtime, Synapta loads tools from three sources:
 
-1. **Built-in tools** (`read`, `write`, `shell`)
+1. **Built-in tools** (`read`, `write`, `shell`, `check-doc`)
 2. **Extension-provided tools** (from extension directories)
 3. **User manifests** (JSON files you add)
 
@@ -49,14 +49,40 @@ This is the runtime source of truth used for:
 
 - OpenAI-compatible tool definitions
 - argument decode/validation
-- metadata extraction for stream/UI (`path`, `command`)
+- metadata extraction for stream/UI (`path`, `command`, `library`, `version`, `query`)
 - execution
 
 ### Current built-ins
 
 - `read`
 - `write`
+- `check-doc`
 - `shell`
+
+### `check-doc` (built-in)
+
+`check-doc` is a thin documentation lookup tool that reuses the shell runtime.
+
+Current method implemented:
+
+- `context7` via `ctx7` CLI.
+
+Flow used by the tool:
+
+1. Resolve library ID with `ctx7 library <library_name> <query> --json`.
+2. Choose the best Context7 library ID (optionally preferring `version`).
+3. Fetch documentation with `ctx7 docs <library_id> <query>` (or `--json`).
+4. Return shell command + shell stdout/stderr so the agent can read docs output directly.
+
+Primary arguments:
+
+- `library_name` (required when `library_id` omitted)
+- `library_id` (optional direct ID, format `/org/project[/version]`)
+- `version` (optional hint for version-specific ID selection)
+- `query` (required natural-language question)
+- `method` (optional; defaults to `context7`)
+- `timeout` (optional seconds)
+- `output_json` (optional; adds `--json`)
 
 Schemas for built-ins live in:
 

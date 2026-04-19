@@ -280,7 +280,7 @@ func (m *CodeAgentModel) handleToolEvent(msg toolEventMsg) (tea.Model, tea.Cmd) 
 	switch e.Type {
 	case core.ToolEventStart:
 		m.activeAssistantIdx = -1
-		idx := m.appendChatMessage(ChatMessage{Role: "tool", ToolCallID: e.CallID, ToolName: e.ToolName, ToolPath: e.Path, ToolCommand: e.Command, ToolState: "running", Content: "", IsPartial: true, ToolStartedAt: time.Now()})
+		idx := m.appendChatMessage(ChatMessage{Role: "tool", ToolCallID: e.CallID, ToolName: e.ToolName, ToolPath: e.Path, ToolCommand: e.Command, ToolLibrary: e.Library, ToolVersion: e.Version, ToolQuery: e.Query, ToolState: "running", Content: "", IsPartial: true, ToolStartedAt: time.Now()})
 		m.activeToolIndices[e.CallID] = idx
 		m.toolExpanded[e.CallID] = false
 		m.refreshChatViewport()
@@ -301,6 +301,15 @@ func (m *CodeAgentModel) handleToolEvent(msg toolEventMsg) (tea.Model, tea.Cmd) 
 			}
 			if strings.TrimSpace(e.Command) != "" {
 				m.chatMessages[idx].ToolCommand = e.Command
+			}
+			if strings.TrimSpace(e.Library) != "" {
+				m.chatMessages[idx].ToolLibrary = e.Library
+			}
+			if strings.TrimSpace(e.Version) != "" {
+				m.chatMessages[idx].ToolVersion = e.Version
+			}
+			if strings.TrimSpace(e.Query) != "" {
+				m.chatMessages[idx].ToolQuery = e.Query
 			}
 			m.chatMessages[idx].IsPartial = false
 			m.chatMessages[idx].ToolEndedAt = time.Now()
