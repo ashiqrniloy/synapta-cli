@@ -406,6 +406,7 @@ func (m *CodeAgentModel) handleChatStreamDone() (tea.Model, tea.Cmd) {
 	} else {
 		m.finalizeWorkingSystemMessage("✓ Done", "done")
 	}
+	m.clearWorkingSystemMessage()
 	m.refreshChatViewport()
 	return m, nil
 }

@@ -304,6 +304,33 @@ func (m *CodeAgentModel) finalizeWorkingSystemMessage(content, kind string) {
 	m.appendSystemMessage(content, kind)
 }
 
+func (m *CodeAgentModel) clearWorkingSystemMessage() {
+	idx := m.activeSystemStatusIdx
+	if idx < 0 || idx >= len(m.chatMessages) {
+		m.activeSystemStatusIdx = -1
+		return
+	}
+
+	m.chatMessages = append(m.chatMessages[:idx], m.chatMessages[idx+1:]...)
+	m.activeSystemStatusIdx = -1
+
+	if m.activeAssistantIdx > idx {
+		m.activeAssistantIdx--
+	} else if m.activeAssistantIdx == idx {
+		m.activeAssistantIdx = -1
+	}
+	for id, toolIdx := range m.activeToolIndices {
+		if toolIdx > idx {
+			m.activeToolIndices[id] = toolIdx - 1
+		} else if toolIdx == idx {
+			delete(m.activeToolIndices, id)
+		}
+	}
+
+	m.chatAutoScroll = true
+	m.invalidateTranscriptFrom(idx)
+}
+
 func (m *CodeAgentModel) chatWorkingStatusText() string {
 	spinner := []string{"⠋", "⠙", "⠹", "⠸"}[m.workingFrame%4]
 	elapsed := time.Since(m.streamStartedAt).Round(time.Second)
