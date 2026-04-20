@@ -274,22 +274,28 @@ func (m *CodeAgentModel) appendSystemMessage(content, kind string) {
 	m.appendChatMessage(ChatMessage{Role: "system", Content: content, SystemKind: kind})
 	m.refreshChatViewport()
 }
-
 func (m *CodeAgentModel) setWorkingSystemMessage(content string) {
 	if m.activeSystemStatusIdx >= 0 && m.activeSystemStatusIdx < len(m.chatMessages) {
 		m.chatMessages[m.activeSystemStatusIdx].Content = content
 		m.chatMessages[m.activeSystemStatusIdx].SystemKind = "working"
+		m.chatAutoScroll = true
+		m.invalidateTranscriptFrom(m.activeSystemStatusIdx)
 		return
 	}
 	m.activeSystemStatusIdx = len(m.chatMessages)
 	m.chatMessages = append(m.chatMessages, ChatMessage{Role: "system", Content: content, SystemKind: "working"})
 	m.chatAutoScroll = true
+	m.invalidateTranscriptFrom(m.activeSystemStatusIdx)
 }
+
+
 
 func (m *CodeAgentModel) updateWorkingSystemMessage(content string) {
 	if m.activeSystemStatusIdx >= 0 && m.activeSystemStatusIdx < len(m.chatMessages) {
 		m.chatMessages[m.activeSystemStatusIdx].Content = content
 		m.chatMessages[m.activeSystemStatusIdx].SystemKind = "working"
+		m.chatAutoScroll = true
+		m.invalidateTranscriptFrom(m.activeSystemStatusIdx)
 	}
 }
 
@@ -297,8 +303,9 @@ func (m *CodeAgentModel) finalizeWorkingSystemMessage(content, kind string) {
 	if m.activeSystemStatusIdx >= 0 && m.activeSystemStatusIdx < len(m.chatMessages) {
 		m.chatMessages[m.activeSystemStatusIdx].Content = content
 		m.chatMessages[m.activeSystemStatusIdx].SystemKind = kind
-		m.activeSystemStatusIdx = -1
 		m.chatAutoScroll = true
+		m.invalidateTranscriptFrom(m.activeSystemStatusIdx)
+		m.activeSystemStatusIdx = -1
 		return
 	}
 	m.appendSystemMessage(content, kind)
