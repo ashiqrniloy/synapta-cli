@@ -78,6 +78,8 @@ func (m *CodeAgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleWorkingTick()
 	case FileAddedMsg:
 		return m.handleFileAdded(msg)
+	case tea.PasteMsg:
+		return m.handlePaste(msg)
 	case tea.MouseWheelMsg:
 		return m.handleMouseWheel(msg)
 	case tea.KeyPressMsg:

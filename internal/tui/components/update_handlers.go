@@ -683,7 +683,14 @@ func (m *CodeAgentModel) continueWithPendingMessage(pendingMsg string) tea.Cmd {
 	m.conversationHistory = append(m.conversationHistory, llm.Message{Role: "user", Content: pendingMsg})
 	m.markContextEntriesDirty()
 	if m.sessionStore != nil {
-		_ = m.sessionStore.AppendMessage(llm.Message{Role: "user", Content: pendingMsg})
+		if err := m.sessionStore.AppendMessage(llm.Message{Role: "user", Content: pendingMsg}); err == nil {
+			// Full content (including any inlined large-paste text) is now
+			// durably persisted — safe to remove the paste temp files.
+			for _, p := range m.pendingPastePaths {
+				cleanupPasteTempFile(p)
+			}
+		}
+		m.pendingPastePaths = nil
 	}
 
 	// Start a new stream with updated history

@@ -167,9 +167,25 @@ func (m *CodeAgentModel) handleSubmitKeyPress() (bool, tea.Cmd) {
 	if m.isWorking {
 		text := strings.TrimSpace(m.ta.Value())
 		if text != "" && !strings.HasPrefix(text, ":") {
+			// Expand any large-paste attachment tokens now so that the steer
+			// message stored in pendingUserMessage (and later persisted by
+			// continueWithPendingMessage) contains the full inlined content,
+			// not a path reference that may no longer exist.
+			steerText := text
+			if m.inputMode == inputModeChat {
+				if withAttachments, attachedPaths, err := m.expandAttachmentTokens(text); err == nil {
+					steerText = withAttachments
+					// Paste temp files will be cleaned up after session persistence
+					// inside continueWithPendingMessage → AppendMessage succeeds.
+					// Store paths alongside the pending message for deferred cleanup.
+					m.pendingPastePaths = attachedPaths
+				}
+				// On expansion error we fall back to raw text; the steer will
+				// still work, just without the pasted content inlined.
+			}
 			// Replace (don't append) any previously queued steer message so
 			// the most recent instruction is always what gets injected.
-			m.pendingUserMessage = text
+			m.pendingUserMessage = steerText
 			m.ta.SetValue("")
 			m.appendSystemMessage("[Steer] Message received — interrupting current task to steer…", "info")
 			// Cancel the running stream; handleChatStreamCancelled will pick
@@ -217,13 +233,15 @@ func (m *CodeAgentModel) handleSubmitKeyPress() (bool, tea.Cmd) {
 		return true, nil
 	}
 
+	var attachedPaths []string
 	if m.inputMode == inputModeChat {
-		withAttachments, attachedPaths, err := m.expandAttachmentTokens(expandedText)
+		withAttachments, paths, err := m.expandAttachmentTokens(expandedText)
 		if err != nil {
 			m.appendSystemMessage("[Files] ✗ "+err.Error(), "error")
 			return true, nil
 		}
 		expandedText = withAttachments
+		attachedPaths = paths
 		if len(attachedPaths) > 0 {
 			m.recordContextAction("File attachments added: " + strings.Join(attachedPaths, ", "))
 		}
@@ -241,7 +259,12 @@ func (m *CodeAgentModel) handleSubmitKeyPress() (bool, tea.Cmd) {
 	m.conversationHistory = append(m.conversationHistory, llm.Message{Role: "user", Content: expandedText})
 	m.markContextEntriesDirty()
 	if m.sessionStore != nil {
-		_ = m.sessionStore.AppendMessage(llm.Message{Role: "user", Content: expandedText})
+		if err := m.sessionStore.AppendMessage(llm.Message{Role: "user", Content: expandedText}); err == nil {
+			// Full content is now durably persisted — safe to remove paste temp files.
+			for _, p := range attachedPaths {
+				cleanupPasteTempFile(p)
+			}
+		}
 	}
 	history, err := m.chatHistoryAsLLM()
 	if err != nil {

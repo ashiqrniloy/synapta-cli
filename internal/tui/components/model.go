@@ -139,6 +139,7 @@ type CodeAgentModel struct {
 	lifecycleCtx               context.Context
 	cancelLifecycle            context.CancelFunc
 	pendingUserMessage         string
+	pendingPastePaths          []string // paste temp files awaiting cleanup after steer persists
 	availableExtensions        []core.Extension
 
 	cachedContextEntries []ContextEntry
