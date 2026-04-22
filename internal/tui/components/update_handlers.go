@@ -10,6 +10,7 @@ import (
 
 	"github.com/ashiqrniloy/synapta-cli/internal/core"
 	"github.com/ashiqrniloy/synapta-cli/internal/core/tools"
+	"github.com/ashiqrniloy/synapta-cli/internal/fsutil"
 	"github.com/ashiqrniloy/synapta-cli/internal/llm"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -661,6 +662,13 @@ func (m *CodeAgentModel) readFileForContext(path string) (string, error) {
 
 	// Execute the read tool
 	ctx := m.lifecycleContext()
+	if strings.Contains(path, string(os.PathSeparator)+"paste-tmp"+string(os.PathSeparator)) && fsutil.IsWithinRoot(path, pasteTempDir(m.agentDir)) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	}
 	result, err := readTool.Execute(ctx, tools.ReadInput{Path: path})
 	if err != nil {
 		return "", err
